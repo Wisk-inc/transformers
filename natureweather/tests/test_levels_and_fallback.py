@@ -297,3 +297,100 @@ def test_ensure_packages_treats_a_missing_module_as_stale():
 
     with pytest.raises(RuntimeError, match="could not install"):
         ensure_packages({"not_an_importable_module_xyzzy": ("no-such-package-xyzzy", (1, 0, 0))})
+
+
+# --------------------------------------------------------------------------------------------------
+# Staging: parallel, and resumable
+# --------------------------------------------------------------------------------------------------
+
+def test_staging_resumes_instead_of_starting_over(store, tmp_path):
+    """
+    A 37 GB download that dies at 80% should cost the chunk in flight, not the run.
+
+    Asserted on *work skipped*, not on wall time: with few chunks left there is less parallelism to
+    exploit and fixed setup dominates, so a resumed run can finish in a similar time while fetching
+    half the data. Bytes are the honest measure.
+    """
+    import json
+
+    from naturev1 import materialise
+    from naturev1.era5 import Normalizer, _base_variables, expand_variables
+
+    levels = [int(x) for x in LEVELS]
+    names = expand_variables(store, ALL, levels)
+    normalizer = Normalizer.fit(store, _base_variables(names), levels=levels)
+    path = tmp_path / "staged.npy"
+
+    materialise(store, np.arange(6), path, variables=ALL, levels=levels,
+                normalizer=normalizer, chunk=2, workers=2, progress=False)
+    assert path.exists() and (tmp_path / "staged.json").exists()
+    assert not (tmp_path / "staged.progress.json").exists(), "the marker must clear on success"
+
+    # Leave the marker as an interrupted run would: two of three chunks landed.
+    shape = json.loads((tmp_path / "staged.json").read_text())["shape"]
+    (tmp_path / "staged.progress.json").write_text(
+        json.dumps({"shape": shape, "variables": names, "done": [0, 2]}))
+
+    fetched = []
+    original = __import__("naturev1.era5", fromlist=["read_block"]).read_block
+
+    import naturev1.era5 as era5_module
+
+    def counting(dataset, variables, selector, lv=None):
+        fetched.append(selector)
+        return original(dataset, variables, selector, lv)
+
+    era5_module.read_block = counting
+    try:
+        materialise(store, np.arange(6), path, variables=ALL, levels=levels,
+                    normalizer=normalizer, chunk=2, workers=2, progress=False)
+    finally:
+        era5_module.read_block = original
+
+    assert len(fetched) == 1, f"should have fetched the one remaining chunk, fetched {len(fetched)}"
+
+
+def test_staging_starts_over_when_the_request_changed(store, tmp_path):
+    """Continuing into a mismatched file would interleave two different datasets in one array."""
+    import json
+
+    from naturev1 import materialise
+    from naturev1.era5 import Normalizer, _base_variables, expand_variables
+
+    levels = [int(x) for x in LEVELS]
+    names = expand_variables(store, ALL, levels)
+    normalizer = Normalizer.fit(store, _base_variables(names), levels=levels)
+    path = tmp_path / "staged.npy"
+
+    materialise(store, np.arange(4), path, variables=ALL, levels=levels,
+                normalizer=normalizer, chunk=2, workers=1, progress=False)
+    # A marker whose shape does not match the new request.
+    (tmp_path / "staged.progress.json").write_text(
+        json.dumps({"shape": [999, 1, 1, 1], "variables": names, "done": [0, 2]}))
+
+    materialise(store, np.arange(6), path, variables=ALL, levels=levels,
+                normalizer=normalizer, chunk=2, workers=1, progress=False)
+    staged = np.load(path, mmap_mode="r")
+    assert staged.shape[0] == 6
+    assert np.isfinite(np.asarray(staged[-1], np.float32)).any(), "the last chunk must have been written"
+
+
+def test_parallel_staging_writes_the_same_bytes_as_serial(store, tmp_path):
+    """Threads write disjoint slices of the memmap, so the result must not depend on worker count."""
+    from naturev1 import materialise
+    from naturev1.era5 import Normalizer, _base_variables, expand_variables
+
+    levels = [int(x) for x in LEVELS]
+    normalizer = Normalizer.fit(store, _base_variables(expand_variables(store, ALL, levels)),
+                                levels=levels)
+
+    serial = tmp_path / "serial.npy"
+    parallel = tmp_path / "parallel.npy"
+    materialise(store, np.arange(6), serial, variables=ALL, levels=levels,
+                normalizer=normalizer, chunk=2, workers=1, progress=False)
+    materialise(store, np.arange(6), parallel, variables=ALL, levels=levels,
+                normalizer=normalizer, chunk=2, workers=4, progress=False)
+
+    a, b = np.load(serial), np.load(parallel)
+    assert a.shape == b.shape
+    assert np.array_equal(np.nan_to_num(a), np.nan_to_num(b))

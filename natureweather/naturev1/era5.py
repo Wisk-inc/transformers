@@ -713,49 +713,96 @@ def materialise(
     normalizer: Normalizer | None = None,
     levels=None,
     dtype=np.float16,
-    chunk: int = 64,
+    chunk: int = 16,
+    workers: int = 8,
     progress: bool = True,
+    resume: bool = True,
 ) -> Path:
     """
-    Stage a slice of the record onto local disk as a memory-mapped array.
+    Stage a slice of the record onto local disk as a memory-mapped array. Parallel, and resumable.
 
-    Streaming costs about 549 ms per window against tens of milliseconds of compute, so a cloud-backed
-    epoch is network-bound by an order of magnitude and the GPU idles through most of it. Staging turns
-    that into a 5 ms disk read -- measured 105x -- and every epoch after the first runs at the card's
-    speed rather than the network's.
+    Streaming during training costs about 550 ms per window against tens of milliseconds of compute, so
+    a cloud-backed epoch is network-bound by an order of magnitude and the GPU idles through most of it.
+    Staging turns that into a 5 ms disk read -- measured 105x -- paid once.
 
-    What is stored is the *normalized* form, not raw values, for a reason worth stating: raw sea-level
-    pressure is about 101,325 Pa and float16 tops out at 65,504, so staging raw data in half precision
-    turns every pressure reading into infinity. Normalized values sit within a few units of zero where
-    float16 resolves about 0.005 -- 0.1 K and 0.08 hPa, at or below ERA5's own precision. The statistics
-    used are written into the sidecar so the staged copy stays self-describing, and NaN is preserved so
-    land still reads as land.
+    **Reads run in parallel, because this is latency-bound, not bandwidth-bound.** Measured on the
+    89-channel upper-air store: one serial chunk of 128 timesteps managed 12.2 MB/s, while eight threads
+    on chunks of 16 managed 55.9 MB/s -- 4.6x, taking a 37 GB staging run from 46 minutes to 11. Zarr
+    and gcsfs release the GIL during network I/O, so threads are the right tool and each one writes a
+    disjoint slice of the memmap, which needs no lock.
 
-    At 240x121 with six variables one timestep is 349 KB, so a decade of 6-hourly data is about 5 GB.
+    **Interrupted runs continue where they stopped.** A sidecar records which chunks landed, so a dead
+    cell costs the chunk in flight rather than the whole download. Pass ``resume=False`` to start over.
+
+    What is stored is the *normalized* form: raw sea-level pressure is about 101,325 Pa and float16 tops
+    out at 65,504, so staging raw data in half precision turns every pressure reading into infinity.
+    Normalized values sit within a few units of zero where float16 resolves about 0.005 -- 0.1 K and
+    0.08 hPa, at or below ERA5's own precision. NaN is preserved, so land still reads as land.
 
     Returns:
-        The path to the ``.npy`` memmap. A sidecar ``.json`` records shape, variables, timestamps and
+        The path to the ``.npy`` memmap. A sidecar ``.json`` records shape, channels, timestamps and
         the statistics the values were normalized with.
     """
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Lock
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    names = expand_variables(dataset, variables, levels)          # flat channel names
+    names = expand_variables(dataset, variables, levels)
     source = _base_variables(names)
     normalizer = normalizer or Normalizer.fit(dataset, source, levels=levels)
-    shape = (len(indices), dataset.sizes["latitude"], dataset.sizes["longitude"], len(names))
-    gigabytes = float(np.prod(shape)) * np.dtype(dtype).itemsize / 1e9
-    if progress:
-        print(f"[era5] staging {len(indices):,} steps -> {path}  ({gigabytes:.2f} GB, {np.dtype(dtype).name})")
 
-    store = np.lib.format.open_memmap(path, mode="w+", dtype=dtype, shape=shape)
     ordered = np.sort(np.asarray(indices))
-    for offset in range(0, len(ordered), chunk):
+    shape = (len(ordered), dataset.sizes["latitude"], dataset.sizes["longitude"], len(names))
+    gigabytes = float(np.prod(shape)) * np.dtype(dtype).itemsize / 1e9
+    marker = path.with_suffix(".progress.json")
+
+    # Resume only when the existing file matches exactly. A shape mismatch means the request changed,
+    # and continuing into it would interleave two different datasets in one array.
+    done: set[int] = set()
+    existing = path.exists() and marker.exists()
+    if resume and existing:
+        try:
+            state = json.loads(marker.read_text())
+            if state.get("shape") == list(shape) and state.get("variables") == names:
+                done = set(state.get("done", []))
+            elif progress:
+                print("[era5] existing staging does not match this request; starting over")
+        except (json.JSONDecodeError, OSError):
+            done = set()
+
+    mode = "r+" if (done and path.exists()) else "w+"
+    store = np.lib.format.open_memmap(path, mode=mode, dtype=dtype, shape=shape)
+
+    offsets = [o for o in range(0, len(ordered), chunk) if o not in done]
+    if progress:
+        remaining = len(offsets) * chunk * float(np.prod(shape[1:])) * np.dtype(dtype).itemsize / 1e9
+        note = f", resuming ({len(done) * chunk:,} steps already done)" if done else ""
+        print(f"[era5] staging {len(ordered):,} steps -> {path}  ({gigabytes:.2f} GB total, "
+              f"{remaining:.2f} GB to fetch, {workers} threads){note}")
+
+    lock = Lock()
+    completed = [len(done) * chunk]
+
+    def fetch(offset: int) -> None:
         take = ordered[offset : offset + chunk]
         block = read_block(dataset, source, take, levels)
         store[offset : offset + len(take)] = normalizer.prepare(block).astype(dtype)
-        if progress:
-            done = offset + len(take)
-            print(f"\r[era5]   {done:,}/{len(ordered):,}  ({100 * done / len(ordered):.1f}%)", end="", flush=True)
+        with lock:
+            done.add(offset)
+            completed[0] += len(take)
+            if progress:
+                share = 100 * completed[0] / len(ordered)
+                print(f"\r[era5]   {completed[0]:,}/{len(ordered):,}  ({share:.1f}%)", end="", flush=True)
+            # Checkpoint the marker as we go, so an interruption loses one chunk and not the run.
+            marker.write_text(json.dumps({"shape": list(shape), "variables": names,
+                                          "done": sorted(done)}))
+
+    if offsets:
+        with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
+            for error in [f.exception() for f in [pool.submit(fetch, o) for o in offsets]]:
+                if error is not None:
+                    raise error
     store.flush()
     if progress:
         print()
@@ -766,6 +813,7 @@ def materialise(
          "shape": list(shape), "dtype": np.dtype(dtype).name, "normalized": True,
          "statistics": normalizer.to_dict(), "indices": ordered.tolist(), "time": stamps.tolist()},
         indent=2))
+    marker.unlink(missing_ok=True)
     return path
 
 
