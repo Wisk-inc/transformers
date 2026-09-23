@@ -29,6 +29,21 @@ from .forecast import (
                    decode_track,
                    nearest_point,
 )
+from .guards import (
+                   PHYSICAL,
+                   Bounds,
+                   PreflightError,
+                   TrainingWatchdog,
+                   check_device_agreement,
+                   check_environment,
+                   check_forecast,
+                   check_grid_alignment,
+                   check_normalization,
+                   check_weights,
+                   format_preflight,
+                   preflight,
+                   responds_to_input,
+)
 from .hub import from_pretrained, push_to_hub, save_for_hub
 from .live import fetch_latest, latest_scene_keys, watch
 from .losses import focal_bce, masked_gaussian_nll, total_loss, track_mixture_nll
@@ -85,7 +100,7 @@ from .wb2 import (
 )
 
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __author__ = "Nathan"
 __all__ = [
     "CORPORA", "RI_THRESHOLDS_KT", "WIND_RADII_THRESHOLDS_KT", "EyewallHead", "RapidIntensificationHead",
@@ -95,6 +110,9 @@ __all__ = [
     "training_plan", "CachedERA5", "ERA5Window", "corpus_scale", "era5_source_grid", "era5_splits",
     "materialise", "normalization", "Normalizer", "equiangular_weights", "era5_loader",
     "from_pretrained", "push_to_hub", "save_for_hub",
+    "preflight", "format_preflight", "PreflightError", "TrainingWatchdog", "check_forecast",
+    "check_grid_alignment", "check_weights", "check_normalization", "check_device_agreement",
+    "check_environment", "responds_to_input", "PHYSICAL", "Bounds",
     "RolloutSchedule", "rollout_loss", "rollout_forecast", "reinject", "advance_calendar",
     "field_to_channel", "drift_report",
     "PRESSURE_LEVELS", "UPPER_VARIABLES", "SURFACE_EXTRAS", "HEADLINE_LEVELS", "channel_names",
