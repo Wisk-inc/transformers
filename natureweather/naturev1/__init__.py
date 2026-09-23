@@ -24,6 +24,8 @@ from .era5 import (
 from .fallback import (
                    Choice,
                    Plan,
+                   ensure_packages,
+                   install_packages,
                    resolve_all,
                    resolve_batch,
                    resolve_precision,
@@ -111,7 +113,7 @@ from .wb2 import (
 )
 
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 __author__ = "Nathan"
 __all__ = [
     "CORPORA", "RI_THRESHOLDS_KT", "WIND_RADII_THRESHOLDS_KT", "EyewallHead", "RapidIntensificationHead",
@@ -122,7 +124,7 @@ __all__ = [
     "materialise", "normalization", "Normalizer", "equiangular_weights", "era5_loader",
     "from_pretrained", "push_to_hub", "save_for_hub",
     "Plan", "Choice", "resolve_all", "resolve_variables", "resolve_staging",
-    "resolve_precision", "resolve_batch", "with_retry",
+    "resolve_precision", "resolve_batch", "with_retry", "ensure_packages", "install_packages",
     "preflight", "format_preflight", "PreflightError", "TrainingWatchdog", "check_forecast",
     "check_grid_alignment", "check_weights", "check_normalization", "check_device_agreement",
     "check_environment", "responds_to_input", "PHYSICAL", "Bounds",

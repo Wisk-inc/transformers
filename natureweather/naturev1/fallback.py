@@ -237,3 +237,90 @@ def resolve_all(dataset, wanted, levels, years: int, points: int, layers: int,
     plan.resolved = {"variables": kept, "levels": levels, "channels": channels, "years": years,
                      "streaming": streaming, "precision": precision, "batch": batch}
     return plan
+
+
+# --------------------------------------------------------------------------------------------------
+# Installing, which is the first thing that can go wrong and the one with the worst error message
+# --------------------------------------------------------------------------------------------------
+
+def install_packages(requirements, quiet: bool = True) -> tuple[bool, list[str]]:
+    """
+    Install these requirements, trying every reasonable strategy before giving up.
+
+    Returns:
+        ``(ok, attempts)``. On failure the caller gets the commands that were tried, so the message
+        can say what to run by hand instead of printing a subprocess traceback.
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    requirements = list(requirements)
+    flags = ["-q"] if quiet else []
+    commands = []
+
+    if shutil.which("uv"):
+        # --python names the interpreter explicitly: uv otherwise looks for VIRTUAL_ENV, which a
+        # notebook kernel started outside the shell that made the venv does not always have set.
+        commands.append(("uv", ["uv", "pip", "install", "--python", sys.executable,
+                                "--upgrade", *requirements]))
+    base = [sys.executable, "-m", "pip", "install", *flags, "--upgrade"]
+    commands += [
+        ("pip, fresh index", [*base, "--no-cache-dir", "--index-url", "https://pypi.org/simple",
+                              *requirements]),
+        ("pip, no cache", [*base, "--no-cache-dir", *requirements]),
+        ("pip", [*base, *requirements]),
+    ]
+
+    attempted = []
+    for label, command in commands:
+        attempted.append(" ".join(command))
+        try:
+            subprocess.check_call(command)
+            print(f"[install] ok via {label}", flush=True)
+            return True, attempted
+        except (subprocess.CalledProcessError, FileNotFoundError) as error:
+            reason = getattr(error, "returncode", type(error).__name__)
+            print(f"[install] {label} failed ({reason}), trying the next approach", flush=True)
+    return False, attempted
+
+
+def ensure_packages(needed: dict, quiet: bool = True) -> bool:
+    """
+    Import-and-version check, then install only what is missing or out of date.
+
+    Args:
+        needed: ``{import_name: (requirement, minimum_version_tuple)}``.
+
+    Returns:
+        True if anything was installed, in which case the caller should restart the interpreter --
+        a package upgraded underneath an already-imported one is not reliably picked up.
+    """
+    import importlib
+    import importlib.util
+
+    def stale(module: str, minimum: tuple) -> bool:
+        try:
+            version = importlib.import_module(module).__version__
+            return tuple(int(part) for part in version.split(".")[:3]) < minimum
+        except Exception:
+            return True
+
+    missing = [requirement for module, (requirement, minimum) in needed.items()
+               if importlib.util.find_spec(module) is None or stale(module, minimum)]
+    if not missing:
+        return False
+
+    print(f"[install] needed: {', '.join(missing)}", flush=True)
+    ok, attempted = install_packages(missing, quiet=quiet)
+    if not ok:
+        raise RuntimeError(
+            "could not install " + ", ".join(missing) + ".\n\nTried:\n  "
+            + "\n  ".join(attempted)
+            + "\n\nIf the package exists on PyPI but pip cannot see it, the index is being cached "
+              "somewhere. Run this by hand and then restart:\n"
+              "  !pip install --no-cache-dir --index-url https://pypi.org/simple --upgrade "
+              + " ".join(f'"{r}"' for r in missing)
+        )
+    importlib.invalidate_caches()
+    return True

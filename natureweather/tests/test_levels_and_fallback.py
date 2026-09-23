@@ -249,3 +249,51 @@ def test_retry_succeeds_after_a_transient_failure():
 
 def test_a_plan_with_no_substitutions_says_so():
     assert "no substitutions" in Plan().summary()
+
+
+# --------------------------------------------------------------------------------------------------
+# Installing, which is the first thing that can fail and has the worst default error
+# --------------------------------------------------------------------------------------------------
+
+def test_install_tries_every_strategy_before_giving_up():
+    """
+    There is no single install command that works everywhere.
+
+    A uv-managed virtualenv wants ``uv pip``; a container whose pip cache is owned by another user
+    serves a stale index and needs ``--no-cache-dir``; a machine behind a mirror needs the real index
+    named. Trying one and raising CalledProcessError is how a run dies at line 12 with a traceback
+    that mentions none of this.
+    """
+    from naturev1.fallback import install_packages
+
+    ok, attempted = install_packages(["definitely-not-a-real-package-xyzzy"], quiet=True)
+    assert not ok
+    assert len(attempted) >= 3, "one failed command is not an install attempt"
+    assert any("--no-cache-dir" in command for command in attempted), "the stale-cache case is the common one"
+    assert any("https://pypi.org/simple" in command for command in attempted)
+
+
+def test_ensure_packages_is_a_no_op_when_everything_is_current():
+    from naturev1.fallback import ensure_packages
+
+    assert ensure_packages({"naturev1": ("naturev1>=0.1.0", (0, 1, 0))}) is False
+
+
+def test_ensure_packages_reports_how_to_fix_it_by_hand():
+    """A subprocess traceback tells the user nothing they can act on. The message must."""
+    from naturev1.fallback import ensure_packages
+
+    with pytest.raises(RuntimeError) as failure:
+        ensure_packages({"naturev1": ("naturev1>=99.0.0", (99, 0, 0))})
+
+    message = str(failure.value)
+    assert "could not install" in message
+    assert "Tried:" in message
+    assert "--no-cache-dir" in message, "the message must carry the command that usually works"
+
+
+def test_ensure_packages_treats_a_missing_module_as_stale():
+    from naturev1.fallback import ensure_packages
+
+    with pytest.raises(RuntimeError, match="could not install"):
+        ensure_packages({"not_an_importable_module_xyzzy": ("no-such-package-xyzzy", (1, 0, 0))})
