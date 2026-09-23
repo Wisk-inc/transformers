@@ -35,7 +35,7 @@ import sys
 
 
 _NEEDED = {                                    # import name -> pip requirement
-    "naturev1":        "naturev1[all]>=0.6.0",
+    "naturev1":        "naturev1[all]>=0.7.0",
     "ihelix":          "ihelix>=0.4.0",
     "xarray":          "xarray>=2023.1",
     "zarr":            "zarr>=2.16",
@@ -43,7 +43,7 @@ _NEEDED = {                                    # import name -> pip requirement
     "netCDF4":         "netCDF4>=1.6",
     "huggingface_hub": "huggingface_hub>=0.20",
 }
-_MIN_NATUREV1 = (0, 6, 0)
+_MIN_NATUREV1 = (0, 7, 0)
 
 
 def _present(module: str) -> bool:
@@ -55,7 +55,7 @@ def _present(module: str) -> bool:
 
 
 def _naturev1_too_old() -> bool:
-    """The cell below uses APIs added in 0.6.0, so an older copy is as good as missing."""
+    """The cell below uses APIs added in 0.7.0, so an older copy is as good as missing."""
     try:
         import naturev1
         parts = tuple(int(piece) for piece in naturev1.__version__.split(".")[:3])

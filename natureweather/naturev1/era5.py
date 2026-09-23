@@ -81,7 +81,31 @@ ERA5_TO_SURFACE = {
 #: Variables that are spike-and-slab rather than bell-shaped, with the scale of their log transform in
 #: the variable's own units. 1e-4 m is 0.1 mm over six hours -- the drizzle threshold, below which the
 #: distinction between "a little rain" and "no rain" is instrument noise.
-LOG_SCALE = {"total_precipitation_6hr": 1e-4}
+LOG_SCALE = {"total_precipitation_6hr": 1e-4, "total_precipitation_12hr": 1e-4,
+             "total_precipitation_24hr": 1e-4}
+
+#: Variables that are heavy-tailed *and signed*, with the scale at which they stop being linear.
+#:
+#: Vertical velocity is the example that forced this. Omega is near zero almost everywhere and spikes
+#: in convection, which put it at 15 to 27 standard deviations on every one of the 13 pressure levels --
+#: a spike, not a distribution, and the same failure precipitation had. But omega has a sign (negative
+#: is rising air, which is where weather comes from), so log1p cannot be used: it would need a clamp at
+#: zero, and clamping away rising motion removes the thing worth predicting.
+#:
+#: ``asinh(x/scale)`` is the signed answer: linear near zero, logarithmic far out, smooth everywhere
+#: including at the origin -- which matters, because sign(x)*log1p(|x|) has a kink at zero and a
+#: gradient that jumps across it. It inverts exactly through sinh.
+ASINH_SCALE = {"vertical_velocity": 0.05}          # Pa/s; typical omega is ~0.01-0.1
+
+
+def _base_name(channel: str) -> str:
+    """The variable a flat channel name belongs to: ``vertical_velocity@500`` -> ``vertical_velocity``.
+
+    Transforms are a property of the variable, not of the level. Keying them on the flat name would
+    mean listing all thirteen levels of every heavy-tailed field, and silently missing any level a
+    different store happened to carry.
+    """
+    return channel.split("@", 1)[0]
 
 #: Default input variables. Sea-surface temperature is an input but not a target: it drives
 #: intensification, and it is a boundary condition rather than something the atmosphere head forecasts.
@@ -103,11 +127,89 @@ DEFAULT_VARIABLES = (
 FIELD_DIMS = ("time", "latitude", "longitude")
 
 
-def read_block(dataset, variables, selector) -> np.ndarray:
-    """Read a time selection as ``(T, lat, lon, C)``, in that order, whatever the store's own layout."""
+def _base_variables(flat_names) -> list[str]:
+    """Flat channel names back to the distinct variables a read needs, in first-seen order."""
+    seen, base = set(), []
+    for name in flat_names:
+        root = name.split("@", 1)[0]
+        if root not in seen:
+            seen.add(root)
+            base.append(root)
+    return base
+
+
+def expand_variables(dataset, variables, levels=None) -> list[str]:
+    """
+    The flat channel names a read will produce, in order.
+
+    One variable does not mean one channel. A surface field contributes one; a pressure-level field
+    contributes one per level, named ``variable@level``. Everything downstream -- the normalizer, the
+    target map, the scorecard -- is keyed on these flat names, so that the thing that says what a
+    channel *is* and the thing that produces it cannot disagree.
+
+    Args:
+        levels: which pressure levels to keep, or None for every level the store carries.
+    """
+    names = []
+    for name in variables:
+        if name not in dataset:
+            continue
+        dims = dataset[name].dims
+        if "level" in dims:
+            available = [int(v) for v in dataset.level.values]
+            keep = available if levels is None else [lv for lv in levels if lv in available]
+            names.extend(f"{name}@{level}" for level in keep)
+        else:
+            names.append(name)
+    return names
+
+
+def read_block(dataset, variables, selector, levels=None) -> np.ndarray:
+    """
+    Read a time selection as ``(T, lat, lon, C)``, in that order, whatever the store's own layout.
+
+    Three shapes of variable arrive here and all three must come out the same way:
+
+    * **time-varying surface** -- the ordinary case, one channel;
+    * **static** -- land-sea mask, orography, soil type. No time axis at all, and dropping them would
+      leave the model with no way to know a coastline is there or that mountains steer weather. They
+      are broadcast across the window, which is how GraphCast supplies its constants too;
+    * **pressure-level** -- one channel per level, flattened in the order
+      :func:`expand_variables` reports.
+
+    Dimension order is forced rather than assumed: the store is longitude-major while the coordinate
+    mesh is latitude-major, and reading it untransposed gives the right point count, plausible values
+    and a falling loss with every sample bound to the wrong place on Earth.
+    """
     block = dataset.isel(time=selector)
-    stacked = [block[name].transpose(*FIELD_DIMS).values for name in variables]
-    return np.stack(stacked, -1).astype(np.float32)
+    steps = block.sizes["time"]
+    pieces = []
+
+    for name in variables:
+        if name not in block:
+            continue
+        field = block[name]
+        has_time, has_level = "time" in field.dims, "level" in field.dims
+
+        if has_level:
+            if levels is not None:
+                available = [int(v) for v in block.level.values]
+                keep = [lv for lv in levels if lv in available]
+                field = field.sel(level=keep)
+            if has_time:
+                pieces.append(field.transpose(*FIELD_DIMS, "level").values)
+            else:
+                spatial = field.transpose("latitude", "longitude", "level").values
+                pieces.append(np.broadcast_to(spatial[None], (steps, *spatial.shape)))
+        elif has_time:
+            pieces.append(field.transpose(*FIELD_DIMS).values[..., None])
+        else:
+            spatial = field.transpose("latitude", "longitude").values
+            pieces.append(np.broadcast_to(spatial[None, ..., None], (steps, *spatial.shape, 1)))
+
+    if not pieces:
+        raise ValueError(f"none of {list(variables)} are in this store")
+    return np.concatenate(pieces, axis=-1).astype(np.float32)
 
 
 def equiangular_weights(latitudes: np.ndarray, num_longitudes: int) -> np.ndarray:
@@ -194,11 +296,22 @@ class Normalizer:
         return len(self.variables) + len(self.masked)
 
     def transform(self, values: np.ndarray) -> np.ndarray:
-        """Apply the per-variable shape transform (log for precipitation), leaving others alone."""
+        """
+        Apply each channel's shape transform, leaving well-behaved ones alone.
+
+        Two kinds, both for the same reason -- a channel that is a spike rather than a distribution
+        trains the model to predict its mode and nothing else:
+
+        * ``log1p(x/scale)`` for non-negative accumulations (precipitation);
+        * ``asinh(x/scale)`` for signed heavy tails (vertical velocity), which keeps the sign.
+        """
         values = values.copy()
         for index, name in enumerate(self.variables):
-            if name in LOG_SCALE:
-                values[..., index] = np.log1p(np.maximum(values[..., index], 0.0) / LOG_SCALE[name])
+            base = _base_name(name)
+            if base in LOG_SCALE:
+                values[..., index] = np.log1p(np.maximum(values[..., index], 0.0) / LOG_SCALE[base])
+            elif base in ASINH_SCALE:
+                values[..., index] = np.arcsinh(values[..., index] / ASINH_SCALE[base])
         return values
 
     def prepare(self, raw: np.ndarray) -> np.ndarray:
@@ -225,17 +338,22 @@ class Normalizer:
         return split_prepared(self.prepare(raw))
 
     def decode(self, values, variable: str):
-        """Invert :meth:`encode` for one variable, transform included, back to physical units."""
+        """Invert :meth:`encode` for one channel, transform included, back to physical units."""
         index = self.variables.index(variable)
         physical = values * float(self.std[index]) + float(self.mean[index])
-        if variable in LOG_SCALE:
-            if isinstance(physical, torch.Tensor):
-                return torch.expm1(physical) * LOG_SCALE[variable]
-            return np.expm1(physical) * LOG_SCALE[variable]
+        base = _base_name(variable)
+        tensor = isinstance(physical, torch.Tensor)
+        if base in LOG_SCALE:
+            expm1 = torch.expm1 if tensor else np.expm1
+            return expm1(physical) * LOG_SCALE[base]
+        if base in ASINH_SCALE:
+            sinh = torch.sinh if tensor else np.sinh
+            return sinh(physical) * ASINH_SCALE[base]
         return physical
 
     @classmethod
-    def fit(cls, dataset, variables, samples: int = 40, cache: str | os.PathLike | None = None) -> Normalizer:
+    def fit(cls, dataset, variables, samples: int = 40, cache: str | os.PathLike | None = None,
+            levels=None) -> Normalizer:
         """
         Compute statistics from a stride through the whole record, and cache them.
 
@@ -243,7 +361,10 @@ class Normalizer:
         season and put the 1959 climate's bias into a model that has to forecast 2021. The read costs far
         more than the arithmetic, so the result is cached next to the data.
         """
-        variables = list(variables)
+        # Key on FLAT channel names: one pressure-level variable is thirteen channels, and statistics
+        # keyed on the variable would be one number describing thirteen very different distributions
+        # (50 hPa is 210 K, 1000 hPa is 285 K).
+        variables = expand_variables(dataset, variables, levels)
         if cache is not None and Path(cache).exists():
             stored = json.loads(Path(cache).read_text())
             if stored.get("variables") == variables:
@@ -251,7 +372,8 @@ class Normalizer:
                            np.array(stored["std"], np.float32), np.array(stored["missing"], np.float32))
 
         steps = dataset.sizes["time"]
-        raw = read_block(dataset, variables, slice(0, steps, max(steps // max(samples, 1), 1)))
+        source = _base_variables(variables)
+        raw = read_block(dataset, source, slice(0, steps, max(steps // max(samples, 1), 1)), levels)
         missing = np.isnan(raw).mean(axis=tuple(range(raw.ndim - 1))).astype(np.float32)
 
         blank = cls(variables, np.zeros(len(variables), np.float32), np.ones(len(variables), np.float32), missing)
@@ -281,7 +403,9 @@ class Normalizer:
         lines = [f"{'variable':32} {'mean':>12} {'std':>12} {'missing':>9}  transform"]
         lines.append("-" * 84)
         for index, name in enumerate(self.variables):
-            shape = f"log1p(x/{LOG_SCALE[name]:g})" if name in LOG_SCALE else "identity"
+            base = _base_name(name)
+            shape = (f"log1p(x/{LOG_SCALE[base]:g})" if base in LOG_SCALE
+                     else f"asinh(x/{ASINH_SCALE[base]:g})" if base in ASINH_SCALE else "identity")
             lines.append(f"{name:32} {self.mean[index]:>12.4g} {self.std[index]:>12.4g} "
                          f"{100 * self.missing[index]:>8.1f}%  {shape}")
         if self.masked:
@@ -429,12 +553,16 @@ class ERA5Window(torch.utils.data.Dataset):
         resolution: str | None = None,
         stats_cache: str | os.PathLike | None = None,
         seed: int = 0,
+        levels=None,
     ) -> None:
         self._resolution, self._variables = resolution, tuple(variables)
+        self.levels = tuple(levels) if levels is not None else None
         self._dataset = dataset if dataset is not None else self._open()
         self._pid = os.getpid()
 
-        self.variables = [name for name in self._variables if name in self._dataset]
+        # `variables` is the flat channel list from here on: one entry per channel the model sees.
+        self.variables = expand_variables(self._dataset, self._variables, self.levels)
+        self.source_variables = _base_variables(self.variables)
         self.history = history
         self.offsets = (lead_steps,) if isinstance(lead_steps, int) else tuple(lead_steps)
         self.augment, self.channels, self.seed = augment, channels, seed
@@ -443,7 +571,8 @@ class ERA5Window(torch.utils.data.Dataset):
         indices = np.arange(steps - span) if indices is None else np.asarray(indices)
         self.indices = indices[indices <= steps - span]
 
-        self.normalizer = Normalizer.fit(self._dataset, self.variables, cache=stats_cache)
+        self.normalizer = Normalizer.fit(self._dataset, self.source_variables, cache=stats_cache,
+                                         levels=self.levels)
         self.num_longitudes = int(self._dataset.sizes["longitude"])
         self.num_latitudes = int(self._dataset.sizes["latitude"])
         self.target_index = _target_index(self.variables)
@@ -488,7 +617,7 @@ class ERA5Window(torch.utils.data.Dataset):
     def __getitem__(self, item: int) -> dict:
         start = int(self.indices[item])
         span = self.history + max(self.offsets)
-        raw = read_block(self.store, self.variables, slice(start, start + span))
+        raw = read_block(self.store, self.source_variables, slice(start, start + span), self.levels)
 
         analysis, target, mask = _build_window(
             self.normalizer.prepare(raw), self.normalizer, self.target_index, self.history, self.offsets,
@@ -582,6 +711,7 @@ def materialise(
     path: str | os.PathLike,
     variables: tuple[str, ...] = DEFAULT_VARIABLES,
     normalizer: Normalizer | None = None,
+    levels=None,
     dtype=np.float16,
     chunk: int = 64,
     progress: bool = True,
@@ -609,8 +739,9 @@ def materialise(
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    names = [name for name in variables if name in dataset]
-    normalizer = normalizer or Normalizer.fit(dataset, names)
+    names = expand_variables(dataset, variables, levels)          # flat channel names
+    source = _base_variables(names)
+    normalizer = normalizer or Normalizer.fit(dataset, source, levels=levels)
     shape = (len(indices), dataset.sizes["latitude"], dataset.sizes["longitude"], len(names))
     gigabytes = float(np.prod(shape)) * np.dtype(dtype).itemsize / 1e9
     if progress:
@@ -620,7 +751,8 @@ def materialise(
     ordered = np.sort(np.asarray(indices))
     for offset in range(0, len(ordered), chunk):
         take = ordered[offset : offset + chunk]
-        store[offset : offset + len(take)] = normalizer.prepare(read_block(dataset, names, take)).astype(dtype)
+        block = read_block(dataset, source, take, levels)
+        store[offset : offset + len(take)] = normalizer.prepare(block).astype(dtype)
         if progress:
             done = offset + len(take)
             print(f"\r[era5]   {done:,}/{len(ordered):,}  ({100 * done / len(ordered):.1f}%)", end="", flush=True)
@@ -630,7 +762,8 @@ def materialise(
 
     stamps = dataset.time.values[ordered].astype("datetime64[s]").astype(np.int64)
     path.with_suffix(".json").write_text(json.dumps(
-        {"variables": names, "shape": list(shape), "dtype": np.dtype(dtype).name, "normalized": True,
+        {"variables": names, "levels": list(levels) if levels else None,
+         "shape": list(shape), "dtype": np.dtype(dtype).name, "normalized": True,
          "statistics": normalizer.to_dict(), "indices": ordered.tolist(), "time": stamps.tolist()},
         indent=2))
     return path

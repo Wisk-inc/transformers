@@ -101,36 +101,18 @@ def channel_names(surface_names, upper_names, levels) -> list[str]:
     return list(surface_names) + [f"{name}@{level}" for name in upper_names for level in levels]
 
 
-def read_levels(dataset, surface_names, upper_names, selector) -> np.ndarray:
+def read_levels(dataset, surface_names, upper_names, selector, levels=None) -> np.ndarray:
     """
     Read a time selection as ``(T, lat, lon, C)`` with levels flattened into the channel axis.
 
-    Dimension order is forced, as everywhere else in this package: the store is longitude-major and the
-    coordinate mesh is latitude-major, and reading it untransposed binds every sample to the wrong place
-    on Earth while looking entirely healthy.
-
-    Static fields without a time axis are broadcast across the window rather than skipped.
+    Kept as a named entry point for the upper-air path, but it delegates: :func:`naturev1.read_block`
+    handles time-varying, static and pressure-level fields in one place. Two readers that must agree
+    on channel order is one reader too many -- they drifted once already, which is how a dataset came
+    back with eleven channels while the cell printed eighty-nine.
     """
-    block = dataset.isel(time=selector)
-    steps = block.sizes["time"]
+    from .era5 import read_block
 
-    pieces = []
-    for name in surface_names:
-        field = block[name]
-        if "time" in field.dims:
-            pieces.append(field.transpose(*FIELD_DIMS).values[..., None])
-        else:
-            # Static fields -- land-sea mask, orography, soil type -- carry no time axis, and they are
-            # exactly the ones worth having: a model with no land mask cannot know a coastline is there,
-            # and one with no orography cannot know the Rockies steer weather. Broadcast them across the
-            # window rather than dropping them, which is how GraphCast supplies its constants too.
-            spatial = field.transpose("latitude", "longitude").values
-            pieces.append(np.broadcast_to(spatial[None, ..., None], (steps, *spatial.shape, 1)))
-
-    for name in upper_names:
-        stacked = block[name].transpose(*FIELD_DIMS, "level").values     # (T, lat, lon, level)
-        pieces.append(stacked)
-    return np.concatenate(pieces, axis=-1).astype(np.float32)
+    return read_block(dataset, list(surface_names) + list(upper_names), selector, levels)
 
 
 def headline_channels(surface_names, upper_names, levels) -> dict[str, int]:

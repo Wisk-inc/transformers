@@ -15,10 +15,21 @@ from .era5 import (
                    era5_loader,
                    era5_source_grid,
                    era5_splits,
+                   expand_variables,
                    lead_offsets,
                    materialise,
                    normalization,
                    read_block,
+)
+from .fallback import (
+                   Choice,
+                   Plan,
+                   resolve_all,
+                   resolve_batch,
+                   resolve_precision,
+                   resolve_staging,
+                   resolve_variables,
+                   with_retry,
 )
 from .forecast import (
                    build_forecast,
@@ -100,7 +111,7 @@ from .wb2 import (
 )
 
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 __author__ = "Nathan"
 __all__ = [
     "CORPORA", "RI_THRESHOLDS_KT", "WIND_RADII_THRESHOLDS_KT", "EyewallHead", "RapidIntensificationHead",
@@ -110,6 +121,8 @@ __all__ = [
     "training_plan", "CachedERA5", "ERA5Window", "corpus_scale", "era5_source_grid", "era5_splits",
     "materialise", "normalization", "Normalizer", "equiangular_weights", "era5_loader",
     "from_pretrained", "push_to_hub", "save_for_hub",
+    "Plan", "Choice", "resolve_all", "resolve_variables", "resolve_staging",
+    "resolve_precision", "resolve_batch", "with_retry",
     "preflight", "format_preflight", "PreflightError", "TrainingWatchdog", "check_forecast",
     "check_grid_alignment", "check_weights", "check_normalization", "check_device_agreement",
     "check_environment", "responds_to_input", "PHYSICAL", "Bounds",
@@ -119,7 +132,7 @@ __all__ = [
     "headline_channels", "open_weatherbench_levels", "read_levels", "upper_air_report",
     "volume_coords", "volume_grid",
     "HEADLINE", "Score", "Scorecard", "ScoredField", "scoring_fields", "score_model", "latitude_weights", "weighted_rmse",
-    "weighted_acc", "persistence_forecast", "climatology_forecast", "build_climatology", "FIELD_DIMS", "read_block", "lead_offsets", "GridCollate",
+    "weighted_acc", "persistence_forecast", "climatology_forecast", "build_climatology", "FIELD_DIMS", "read_block", "expand_variables", "lead_offsets", "GridCollate",
     "SURFACE_FIELDS", "WEATHER_TYPES", "CheckpointManager", "NatureConfig", "NatureV1", "SatelliteScene",
     "TrainSettings", "Trainer", "TrainingState", "build_forecast", "calendar_features", "decode_landfall",
     "decode_point_forecast", "decode_track", "decode_eyewall", "decode_rapid_intensification", "fetch_latest", "fixed_grid_to_latlon", "footprint_area_km2",
