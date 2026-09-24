@@ -146,7 +146,7 @@ from .wb2 import (
 )
 
 
-__version__ = "0.8.2"
+__version__ = "0.8.3"
 __author__ = "Nathan"
 __all__ = [
     "CORPORA", "RI_THRESHOLDS_KT", "WIND_RADII_THRESHOLDS_KT", "EyewallHead", "RapidIntensificationHead",

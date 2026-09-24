@@ -1,14 +1,11 @@
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
-#  NatureV1 0.8.2 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
+#  NatureV1 0.8.3 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
 #
-#  Paste and run. It installs what it needs, stages the data, trains in stages, scores itself against
-#  persistence and climatology, and only publishes if it earned it. Every stage checkpoints every
-#  minute and resumes where it stopped -- re-running the cell after a crash continues, it does not
-#  restart. Set SMOKE_TEST = True first: a tiny model through every stage in a few minutes, so a typo
-#  or a missing package shows up now instead of three days into a run.
+#  Paste and run. It installs what it needs, stages the data, builds the 89M-parameter model, trains it
+#  in stages, scores itself against persistence and climatology, and only publishes if it earned it.
+#  Every stage checkpoints every minute and resumes where it stopped -- re-running the cell after a
+#  crash or a dropped connection continues, it does not restart.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
-
-SMOKE_TEST    = False     # True: tiny model, a few steps of every stage -- checks the whole pipeline
 
 RUN_PRETRAIN  = True      # stage one: every channel at every lead, on ERA5 reanalysis
 RUN_ROLLOUT   = True      # stage 1b: the whole atmosphere rolled forward 12 steps, CRPS ensemble
@@ -50,7 +47,7 @@ os.environ.setdefault("GRPC_VERBOSITY", "ERROR")   # the cloud client logs every
 # has not touched the GPU yet in this kernel -- restart the kernel for it to apply.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-_NEEDED = {"naturev1": ("naturev1[all]>=0.8.2", (0, 8, 2)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
+_NEEDED = {"naturev1": ("naturev1[all]>=0.8.3", (0, 8, 3)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
 
 
 def _version(module):
@@ -122,14 +119,8 @@ COLAB_DRIVE = "/content/drive/MyDrive"
 DATA_DIR = "/content" if os.path.isdir("/content") else os.path.expanduser("~/naturev1_data")
 CKPT_DIR = (f"{COLAB_DRIVE}/naturev1_ckpt" if os.path.isdir(COLAB_DRIVE)       # Drive outlives the VM
             else os.path.join(DATA_DIR, "naturev1_ckpt"))
-if SMOKE_TEST:
-    # The smoke run's tiny model and 64-step staging live apart from the real run's, and never go to
-    # the Hub -- so switching SMOKE_TEST off starts the real 89M model clean.
-    CKPT_DIR, HF_REPO = os.path.join(CKPT_DIR, "smoke"), None
 os.makedirs(DATA_DIR, exist_ok=True)
-_prefix = "smoke_" if SMOKE_TEST else ""
-CACHE, VAL_CACHE = (os.path.join(DATA_DIR, _prefix + name) for name in ("era5.npy", "era5_val.npy"))
-STATS = os.path.join(DATA_DIR, "stats.json")          # normalization statistics are the same for both
+CACHE, VAL_CACHE, STATS = (os.path.join(DATA_DIR, name) for name in ("era5.npy", "era5_val.npy", "stats.json"))
 
 
 def banner(text):
@@ -155,8 +146,8 @@ print(f"\n{upper_air_report(SURFACE, UPPER, LEVELS)}")
 assert not check_weights(SRC), check_weights(SRC)  # poles present, not deleted by cos(latitude)
 
 OFFSETS, SPLITS = lead_offsets((6, 12, 18, 24, 36, 48, 72, 96, 120)), era5_splits(ERA5)
-TRAIN_STEPS = 64 if SMOKE_TEST else max(R["years"] - VAL_YEARS, 1) * 1460
-VAL_STEPS = 48 if SMOKE_TEST else VAL_YEARS * 1460
+TRAIN_STEPS = max(R["years"] - VAL_YEARS, 1) * 1460
+VAL_STEPS = VAL_YEARS * 1460
 common = dict(history=6, lead_steps=OFFSETS, variables=tuple(R["variables"]), levels=R["levels"], channels=WIDTH)
 for name, index in SPLITS.items():
     print(f"  {name:5} {str(ERA5.time.values[index[0]])[:10]} -> {str(ERA5.time.values[index[-1]])[:10]}")
@@ -192,20 +183,16 @@ for problem in (check_grid_alignment(SRC, sample[-1, :, train_ds.variables.index
 print("data ok: samples land where the grid says, no spike channels")
 
 # ═══ 3 ═══ what each channel IS — decides what a rollout does with it ══════════════════════════════
-stepper = StateStepper.build(roll_ds, input_channels=WIDTH, grid=SRC, samples=8 if SMOKE_TEST else 64)
+stepper = StateStepper.build(roll_ds, input_channels=WIDTH, grid=SRC, samples=64)
 print(f"\nchannel roles:\n{stepper.roles.describe()}")
 WEIGHTS = channel_loss_weights(train_ds.variables, WIDTH)
 
 # ═══ 4 ═══ the model ═══════════════════════════════════════════════════════════════════════════════
-banner("MODEL" + ("  (SMOKE TEST: a 0.4M-parameter model to check the pipeline; SMOKE_TEST = False "
-                   "builds the real 89M one)" if SMOKE_TEST else ""))
-size = (dict(hidden_size=64, num_layers=2, num_heads=2, num_kv_heads=1, head_dim=32, intermediate_size=128,
-             latent_points=512) if SMOKE_TEST else
-        dict(hidden_size=512, num_layers=17, num_heads=8, num_kv_heads=4, head_dim=64, intermediate_size=2048,
-             latent_points=4096))
+banner("MODEL")
 CFG = NatureConfig(
-    analysis_channels=WIDTH, satellite_channels=6, environment_channels=8, **size,
-    min_radius_km=120.0, max_radius_km=1600.0, history_frames=6,
+    analysis_channels=WIDTH, satellite_channels=6, environment_channels=8,
+    hidden_size=512, num_layers=17, num_heads=8, num_kv_heads=4, head_dim=64, intermediate_size=2048,
+    latent_points=4096, min_radius_km=120.0, max_radius_km=1600.0, history_frames=6,
     lead_times_hours=(6, 12, 18, 24, 36, 48, 72, 96, 120), track_modes=6,
     state_channels=stepper.roles.num_prognostic,        # predict and evolve the whole atmosphere
     noise_dim=32 if MEMBERS > 1 else 0)                 # per-member noise for the CRPS ensemble
@@ -246,15 +233,12 @@ def make_step(batch_size):
     return step
 
 
-BATCH = min(autotune_batch_size(make_step, start=2 if SMOKE_TEST else 1, target_fraction=0.85), MAX_BATCH)
-if SMOKE_TEST:
-    BATCH = 2
-MARK = benchmark_steps(make_step(BATCH), BATCH, warmup=1, iterations=2 if SMOKE_TEST else 10,
-                       gradient_checkpointing=True)
+BATCH = min(autotune_batch_size(make_step, start=1, target_fraction=0.85), MAX_BATCH)
+MARK = benchmark_steps(make_step(BATCH), BATCH, warmup=1, iterations=10, gradient_checkpointing=True)
 print(f"batch {BATCH} | {MARK}")
 print(format_plan(training_plan(MARK.samples_per_second, corpus_samples=len(train_ds), epochs=EPOCHS,
                                 watts=600.0, electricity_per_kwh=0.15, cloud_per_hour=2.50)))
-WORKERS = 2 if SMOKE_TEST else 4
+WORKERS = 4
 loader = era5_loader(train_ds, batch_size=BATCH, num_workers=WORKERS, analysis_grid=SRC, output_grid=SRC,
                      prefetch_factor=2)
 val_loader = era5_loader(val_ds, batch_size=BATCH, num_workers=WORKERS, shuffle=False, analysis_grid=SRC,
@@ -264,11 +248,10 @@ val_loader = era5_loader(val_ds, batch_size=BATCH, num_workers=WORKERS, shuffle=
 if RUN_PRETRAIN:
     banner("STAGE ONE — pretraining on reanalysis")
     trainer = Trainer(model, TrainSettings(
-        stage="pretrain", learning_rate=3e-4, warmup_steps=2 if SMOKE_TEST else 1000,
-        precision=R["precision"], max_steps=3 if SMOKE_TEST else int(len(train_ds) * EPOCHS / BATCH),
+        stage="pretrain", learning_rate=3e-4, warmup_steps=1000,
+        precision=R["precision"], max_steps=int(len(train_ds) * EPOCHS / BATCH),
         checkpoint_dir=f"{CKPT_DIR}/stage1", checkpoint_seconds=60, hub_repo=HF_REPO,
-        ema_decay=0.999, log_every=1 if SMOKE_TEST else 25, val_every=2 if SMOKE_TEST else 500,
-        val_batches=1 if SMOKE_TEST else 32), device=DEVICE)
+        ema_decay=0.999, log_every=25, val_every=500, val_batches=32), device=DEVICE)
     trainer.resume()
     trainer.fit(loader, epochs=EPOCHS, val_loader=val_loader)
     if trainer.interrupted:
@@ -281,15 +264,15 @@ if RUN_ROLLOUT:
     banner(f"ROLLOUT — {ROLLOUT_STEPS}-step full-state training, {MEMBERS}-member CRPS ensemble")
     if not RUN_PRETRAIN and restore("stage1") is None:
         print("!! no stage-one checkpoint: rolling out an untrained backbone. Set RUN_PRETRAIN = True.")
-    steps = 4 if SMOKE_TEST else ROLLOUT_TRAIN
+    steps = ROLLOUT_TRAIN
     roll_loader = era5_loader(roll_ds, batch_size=max(BATCH // 2, 1), num_workers=WORKERS,
                               analysis_grid=SRC, output_grid=SRC, prefetch_factor=2)
     train_state_rollout(
         model, roll_loader, stepper, max_steps=steps,
         schedule=RolloutSchedule(start_step=max(steps // 10, 1), ramp_steps=max(steps // 2, 1),
-                                 max_steps=3 if SMOKE_TEST else ROLLOUT_STEPS),
+                                 max_steps=ROLLOUT_STEPS),
         channel_weights=WEIGHTS, members=MEMBERS, precision=R["precision"],
-        checkpoint_dir=f"{CKPT_DIR}/rollout", hub_repo=HF_REPO, log_every=1 if SMOKE_TEST else 25)
+        checkpoint_dir=f"{CKPT_DIR}/rollout", hub_repo=HF_REPO, log_every=25)
 
 # ═══ 8 ═══ stage two — hurricane heads, on the frozen backbone ═════════════════════════════════════
 banner("STAGE TWO — HURDAT2 best tracks")
@@ -305,8 +288,7 @@ STORE_TIMES = ERA5.time.values.astype("datetime64[s]").astype(np.int64)
 
 
 def paired(which):
-    chosen = GROUPS[which][:3] if SMOKE_TEST else GROUPS[which]
-    starts, targets, report = pair_tracks_with_reanalysis(chosen, STORE_TIMES, OFFSETS, history=6)
+    starts, targets, report = pair_tracks_with_reanalysis(GROUPS[which], STORE_TIMES, OFFSETS, history=6)
     return starts, targets, report
 
 
@@ -324,7 +306,7 @@ if RUN_STORMS:
                                     cache=f"{CKPT_DIR}/storm_bank_train.pt", precision=R["precision"])
     bank_val = storm_feature_bank(model, ERA5, stream, va_starts, va_targets, SRC,
                                   cache=f"{CKPT_DIR}/storm_bank_val.pt", precision=R["precision"])
-    history = train_storm_heads(model, bank_train, bank_val, epochs=3 if SMOKE_TEST else 300,
+    history = train_storm_heads(model, bank_train, bank_val, epochs=300,
                                 patience=25, checkpoint_dir=f"{CKPT_DIR}/stage2", hub_repo=HF_REPO)
     best = min(history, key=lambda h: h["val"])
     banner("SCOREBOARD — is it generalising, or memorising?")
@@ -353,14 +335,14 @@ card = state_card = None
 if RUN_SCORE:
     banner("SCORECARDS — area-weighted, physical units, identical batches for every baseline")
     climo = build_climatology(train_ds, np.arange(len(train_ds)), WIDTH, SRC.num_points,
-                              samples=4 if SMOKE_TEST else 200)
-    batches = 1 if SMOKE_TEST else 32
+                              samples=200)
+    batches = 32
     card = score_model(model, val_loader, SRC, LAT, len(LON), CFG.lead_times_hours,
                        fields=scoring_fields(train_ds.variables, _target_index(train_ds.variables)),
                        normalizer=train_ds.normalizer, climatology=climo, max_batches=batches, device=DEVICE)
     print("surface heads, direct multi-lead:\n" + card.table() + "\n" + card.verdict())
     state_card = score_state(model, val_loader, stepper, HEADLINE_STATE_FIELDS,
-                             steps=3 if SMOKE_TEST else ROLLOUT_STEPS, climatology=climo,
+                             steps=ROLLOUT_STEPS, climatology=climo,
                              max_batches=batches, precision=R["precision"])
     print("\nfull-state rollout (Z500 in m2/s2, as WeatherBench 2 reports it):\n"
           + state_card.table() + "\n" + state_card.verdict())
