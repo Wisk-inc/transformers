@@ -378,7 +378,7 @@ def storm_feature_bank(
     grid,
     cache: str | None = None,
     batch_size: int = 8,
-    precision: str = "bf16",
+    precision: str = "auto",
     workers: int = 4,
     progress: bool = True,
 ) -> dict:

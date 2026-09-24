@@ -512,3 +512,66 @@ def test_a_tie_with_persistence_is_not_skill():
 
     better = Scorecard([Score("z500", 24, 300.0, 0.9, 400.0, 1000.0)])
     assert "skill against both baselines out to +24h (z500)" in better.verdict()
+
+
+# --------------------------------------------------------------------- mixed precision (the GPU path) --
+#
+# Every earlier test ran in float32 on a CPU, so the bf16 autocast path the GPU takes was never executed
+# -- and it failed on the first real run: the index strand wrote a bf16 result into a float32 buffer
+# ("Index put requires the source and destination dtypes match"). These run that path on the CPU.
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_model_trains_under_autocast(dtype):
+    torch.manual_seed(0)
+    config = NatureConfig(analysis_channels=WIDTH, hidden_size=32, num_layers=4, num_heads=2, num_kv_heads=1,
+                          head_dim=16, intermediate_size=64, latent_points=128, history_frames=6,
+                          recurrent_chunk=4, lead_times_hours=(6, 12), track_modes=2, state_channels=5,
+                          noise_dim=4)
+    model = NatureV1(config, fibonacci_sphere(128, num_neighbours=16, cluster_size=16))
+    model.gradient_checkpointing_enable(True)
+    grid = _grid()
+    with torch.autocast("cpu", dtype=dtype):
+        out = model(analysis=torch.randn(2, 6, grid.num_points, WIDTH), analysis_grid=grid,
+                    calendar=torch.zeros(2, 6, 6), output_grid=grid, member_noise=torch.randn(2, 128, 4),
+                    storm_center=torch.tensor([[20.0, -60.0], [10.0, 100.0]]), storm_state=torch.randn(2, 6))
+        loss = sum(value.float().mean() for value in out.values())
+    loss.backward()
+    grads = [p.grad for p in model.parameters() if p.grad is not None]
+    assert grads and all(torch.isfinite(g).all() for g in grads)
+    assert any(isinstance(b.index, torch.nn.Module) for b in model.blocks if b.has_index), "index strand ran"
+
+
+def test_trainer_step_under_bf16(staged, tmp_path):
+    grid = _grid()
+    model = _model()
+    loader = era5_loader(CachedERA5(staged, history=2, lead_steps=(1, 2), channels=WIDTH, augment=False),
+                         batch_size=2, num_workers=0, analysis_grid=grid, output_grid=grid)
+    trainer = Trainer(model, TrainSettings(max_steps=2, checkpoint_dir=str(tmp_path), precision="bf16",
+                                           warmup_steps=1, log_every=1), device="cpu")
+    trainer.use_amp, trainer.amp_dtype = True, torch.bfloat16      # what it does on a GPU
+    state = trainer.fit(loader, epochs=1)
+    assert state.step == 2 and all(torch.isfinite(p).all() for p in model.parameters())
+
+
+def test_rollout_forecast_and_storm_features_under_bf16(staged):
+    grid = _grid()
+    dataset = CachedERA5(staged, history=2, lead_steps=1, channels=WIDTH, augment=True, state_steps=3)
+    stepper = StateStepper.build(dataset, WIDTH, grid, samples=8)
+    model = _model(state_channels=stepper.roles.num_prognostic, noise_dim=4)
+    batch = next(iter(era5_loader(dataset, batch_size=2, num_workers=0, analysis_grid=grid, output_grid=grid)))
+
+    from naturev1 import state_forecast, state_rollout_loss
+
+    loss, parts = state_rollout_loss(model, batch, stepper, 3, members=2, precision="bf16")
+    assert math.isfinite(float(loss)) and parts["state_horizon"] == 3.0
+    forecast = state_forecast(model, batch, stepper, steps=2, members=2, precision="bf16")
+    assert forecast.dtype == torch.float32 and torch.isfinite(forecast).all()
+
+    from naturev1.state import _autocast
+
+    with _autocast("cpu", "bf16"):
+        pooled = model.storm_features(batch["analysis"], grid, batch["calendar"], torch.tensor([[20.0, -60.0]] * 2))
+    assert torch.isfinite(pooled.float()).all()
+    import contextlib
+
+    assert isinstance(_autocast("cpu", "auto"), contextlib.nullcontext), "auto is full precision off-GPU"

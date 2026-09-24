@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
-#  NatureV1 0.8 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
+#  NatureV1 0.8.1 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
 #
 #  Paste and run. It installs what it needs, stages the data, trains in stages, scores itself against
 #  persistence and climatology, and only publishes if it earned it. Every stage checkpoints every
@@ -46,7 +46,7 @@ import sys
 
 os.environ.setdefault("GRPC_VERBOSITY", "ERROR")   # the cloud client logs every DataLoader fork otherwise
 
-_NEEDED = {"naturev1": ("naturev1[all]>=0.8.0", (0, 8, 0)), "ihelix": ("ihelix>=0.5.0", (0, 5, 0))}
+_NEEDED = {"naturev1": ("naturev1[all]>=0.8.1", (0, 8, 1)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
 
 
 def _version(module):

@@ -478,11 +478,24 @@ class StateStepper:
 
 
 def _autocast(device, precision: str):
-    """Autocast on CUDA for bf16/fp16, a no-op context everywhere else."""
+    """
+    The mixed-precision context for a forward pass: a fresh one per call.
+
+    ``"auto"`` is bf16 on CUDA and full precision elsewhere. An explicit ``"bf16"`` is honoured on any
+    device -- which is what lets the GPU's mixed-precision path be exercised on a CPU. ``"fp16"`` is
+    CUDA-only. Anything else is a plain no-op context rather than ``autocast(enabled=False)``, which
+    would switch off an autocast the caller had already entered.
+    """
+    import contextlib
+
     device = torch.device(device)
-    enabled = device.type == "cuda" and precision in ("bf16", "fp16")
-    dtype = torch.bfloat16 if precision == "bf16" else torch.float16
-    return torch.autocast(device.type, dtype=dtype, enabled=enabled)
+    if precision == "auto":
+        precision = "bf16" if device.type == "cuda" else "fp32"
+    if precision == "bf16":
+        return torch.autocast(device.type, dtype=torch.bfloat16)
+    if precision == "fp16" and device.type == "cuda":
+        return torch.autocast(device.type, dtype=torch.float16)
+    return contextlib.nullcontext()
 
 
 def _advance_calendar(calendar: torch.Tensor, step_hours: float) -> torch.Tensor:
@@ -503,6 +516,7 @@ def state_rollout_loss(
     accumulate: bool = True,
     rollout_member: int = 0,
     precision: str = "fp32",
+    scaler=None,
 ) -> tuple[torch.Tensor, dict]:
     """
     Train on the whole atmosphere, rolled forward on the model's own forecasts.
@@ -523,8 +537,9 @@ def state_rollout_loss(
         accumulate: backward each step and free its graph. Required for long horizons -- twelve graphs
             at once is roughly 115 GB at batch 16 on the full grid -- and exactly equivalent, since the
             trajectory is detached between steps.
-        precision: ``"bf16"`` or ``"fp16"`` runs the forward passes under autocast on CUDA -- the same
-            precision as stage one. The loss and the trajectory stay in float32.
+        precision: ``"bf16"``, ``"fp16"`` or ``"auto"`` runs the forward passes under autocast -- the
+            same precision as stage one. The loss and the trajectory stay in float32.
+        scaler: a ``torch.amp.GradScaler`` for fp16, whose small gradients underflow without one.
 
     Returns:
         ``(loss, parts)``. With ``accumulate`` the loss is already backpropagated and comes back detached.
@@ -536,7 +551,6 @@ def state_rollout_loss(
     valid_time = batch["valid_time"]
     roll = batch.get("roll_degrees")
     futures = batch["state_target"]                     # (B, S, P, C)
-    autocast = _autocast(history.device, precision)
 
     horizon = max(1, min(horizon, futures.shape[1]))
     if schedule is not None:
@@ -570,7 +584,7 @@ def state_rollout_loss(
             outputs = []
             for _ in range(members):
                 noise = torch.randn(history.shape[0], latent_points, noise_dim, device=history.device)
-                with autocast:
+                with _autocast(history.device, precision):
                     delta = model(analysis=history, analysis_grid=stepper.grid, calendar=calendar,
                                   output_grid=stepper.grid, member_noise=noise)["state_delta"]
                 outputs.append(delta.float())
@@ -579,7 +593,7 @@ def state_rollout_loss(
             forward_delta = ensemble[rollout_member]
             parts[f"spread_{step + 1}"] = float(ensemble.detach().std(0).mean())
         else:
-            with autocast:
+            with _autocast(history.device, precision):
                 out = model(analysis=history, analysis_grid=stepper.grid, calendar=calendar,
                             output_grid=stepper.grid)
             mean, log_var = out["state_delta"].float(), out["state_delta_log_var"].float()
@@ -591,7 +605,7 @@ def state_rollout_loss(
 
         weighted = step_weights[step] * step_loss
         if accumulate:
-            weighted.backward()
+            (scaler.scale(weighted) if scaler is not None else weighted).backward()
             total = total + weighted.detach()
         else:
             total = total + weighted
@@ -664,7 +678,7 @@ def train_state_rollout(
     warmup_steps: int = 200,
     weight_decay: float = 0.05,
     grad_clip: float = 1.0,
-    precision: str = "bf16",
+    precision: str = "auto",
     checkpoint_dir: str | None = None,
     hub_repo: str | None = None,
     checkpoint_seconds: float = 60.0,
@@ -729,6 +743,8 @@ def train_state_rollout(
 
     watchdog = TrainingWatchdog(patience=200)
     params = [p for p in model.parameters() if p.requires_grad]
+    # fp16 gradients underflow to zero without loss scaling; the scaler is a no-op for bf16 and fp32.
+    scaler = torch.amp.GradScaler(device.type, enabled=precision == "fp16" and device.type == "cuda")
     model.train()
     started = time.time() - state.wall_seconds
     last_log = [time.time(), state.step]
@@ -742,10 +758,13 @@ def train_state_rollout(
                 batch = move_batch(batch, device)
                 horizon = schedule.horizon(state.step)
                 loss, parts = state_rollout_loss(model, batch, stepper, horizon, schedule, channel_weights,
-                                                 members=members, accumulate=True, precision=precision)
+                                                 members=members, accumulate=True, precision=precision,
+                                                 scaler=scaler)
+                scaler.unscale_(optimizer)
                 norm = torch.nn.utils.clip_grad_norm_(params, grad_clip)
                 watchdog.observe(state.step, float(loss), float(norm))
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
 

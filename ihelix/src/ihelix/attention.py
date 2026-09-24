@@ -359,8 +359,12 @@ class IndexAttention(nn.Module):
         attended = attended.permute(0, 3, 4, 1, 2, 5).reshape(
             batch, num_clusters * cluster_size, proj.num_kv_heads, proj.groups, proj.head_dim
         )
+        # The buffer takes the dtype of what is written into it, not of the residual stream: under
+        # autocast the stream stays float32 while the attention product comes out in bf16/fp16, and an
+        # indexed write between the two is an error rather than a cast.
         output = torch.zeros(
-            batch, grid.num_points, proj.num_kv_heads, proj.groups, proj.head_dim, dtype=x.dtype, device=x.device
+            batch, grid.num_points, proj.num_kv_heads, proj.groups, proj.head_dim,
+            dtype=attended.dtype, device=x.device,
         )
         flat_order = grid.order
         keep = grid.cluster_valid.reshape(-1)
