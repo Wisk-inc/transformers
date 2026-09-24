@@ -39,7 +39,8 @@ HEADLINE = ("z500", "t850", "wind10m")
 
 #: Typical magnitudes, used only to print a score next to something human-readable. Z500 is in metres of
 #: geopotential height, T850 in kelvin, wind in m/s.
-UNITS = {"z500": "m", "t850": "K", "wind10m": "m/s", "t2m": "K", "mslp": "hPa", "precip_rate": "mm/6h"}
+UNITS = {"z500": "m2/s2", "t850": "K", "wind10m": "m/s", "t2m": "K", "mslp": "Pa", "msl": "Pa",
+         "u10": "m/s", "v10": "m/s", "q700": "kg/kg", "precip_rate": "m/6h"}
 
 
 def latitude_weights(latitudes, num_longitudes: int = 1, device=None, dtype=torch.float32) -> torch.Tensor:
@@ -50,8 +51,16 @@ def latitude_weights(latitudes, num_longitudes: int = 1, device=None, dtype=torc
     and is directly comparable to an unweighted one -- which is the convention every published score
     uses, and the reason a number from here can sit in a table next to GraphCast's.
     """
-    radians = torch.as_tensor(np.radians(np.asarray(latitudes, dtype=np.float64)))
-    weights = torch.cos(radians).clamp_min(0.0)
+    latitudes = np.asarray(latitudes, dtype=np.float64)
+    steps = np.diff(latitudes)
+    if latitudes.size > 2 and np.allclose(steps, steps[0]):
+        # True cell area, as WeatherBench 2 computes it. cos(latitude) gives a pole row exactly zero
+        # weight on a grid that includes the poles, and scores would silently omit the polar caps.
+        from .era5 import equiangular_weights
+
+        weights = torch.as_tensor(equiangular_weights(latitudes, 1))
+    else:
+        weights = torch.cos(torch.as_tensor(np.radians(latitudes))).clamp_min(0.0)
     weights = weights / weights.mean()
     if num_longitudes > 1:
         weights = weights.repeat_interleave(num_longitudes)
@@ -156,11 +165,11 @@ class Scorecard:
             lines.append(
                 f"{score.field:12} {score.lead_hours:>5}h "
                 f"{score.rmse:>10.3f} "
-                f"{'' if score.acc is None else f'{score.acc:>7.3f}'} "
-                f"{'' if score.persistence_rmse is None else f'{score.persistence_rmse:>10.3f}'} "
-                f"{'' if score.climatology_rmse is None else f'{score.climatology_rmse:>10.3f}'} "
-                f"{'' if score.skill_vs_persistence is None else f'{score.skill_vs_persistence:>8.1%}'} "
-                f"{'' if score.skill_vs_climatology is None else f'{score.skill_vs_climatology:>8.1%}'}"
+                f"{'-' if score.acc is None else f'{score.acc:.3f}':>7} "
+                f"{'-' if score.persistence_rmse is None else f'{score.persistence_rmse:.3f}':>10} "
+                f"{'-' if score.climatology_rmse is None else f'{score.climatology_rmse:.3f}':>10} "
+                f"{'-' if score.skill_vs_persistence is None else f'{score.skill_vs_persistence:.1%}':>9} "
+                f"{'-' if score.skill_vs_climatology is None else f'{score.skill_vs_climatology:.1%}':>9}"
             )
         return "\n".join(lines)
 
@@ -209,10 +218,20 @@ def build_climatology(dataset, indices, channels: int, points: int, samples: int
     stride = max(len(indices) // max(samples, 1), 1)
     total = torch.zeros(points, channels)
     seen = 0
-    for position in range(0, len(indices), stride):
-        item = dataset[int(position)]
-        total += item["analysis"][-1, :, :channels]
-        seen += 1
+    # Augmentation rotates each sample's globe by a random longitude. Averaging rotated globes smears
+    # the climatology into a zonal mean -- a much weaker baseline than the real one, which then makes
+    # any model look better against it. Read the unrotated data.
+    augment = getattr(dataset, "augment", False)
+    if augment:
+        dataset.augment = False
+    try:
+        for position in range(0, len(indices), stride):
+            item = dataset[int(indices[position])]
+            total += item["analysis"][-1, :, :channels]
+            seen += 1
+    finally:
+        if augment:
+            dataset.augment = augment
     return total / max(seen, 1)
 
 
@@ -291,7 +310,13 @@ def score_model(
     device = device or next(model.parameters()).device
     was_training = model.training
     model.eval()
-    weights = latitude_weights(latitudes, num_longitudes, device=device)
+    grid_weights = getattr(analysis_grid, "weights", None)
+    if grid_weights is not None and grid_weights.shape[0] == len(latitudes) * num_longitudes:
+        # The grid's own quadrature weights: the same ones the training loss uses.
+        weights = grid_weights.to(device, torch.float32)
+        weights = weights / weights.mean()
+    else:
+        weights = latitude_weights(latitudes, num_longitudes, device=device)
 
     # Accumulate squared error rather than averaging per batch: a mean of RMSEs is not an RMSE.
     totals: dict[tuple[str, int], dict[str, float]] = {}
@@ -325,7 +350,8 @@ def score_model(
                     actual = normalizer.decode(actual, entry.variable)
 
                 key = (name, hours)
-                bucket = totals.setdefault(key, {"model": 0.0, "persist": 0.0, "climo": 0.0, "count": 0.0})
+                bucket = totals.setdefault(key, {"model": 0.0, "persist": 0.0, "climo": 0.0, "count": 0.0,
+                                                 "cov": 0.0, "pp": 0.0, "tt": 0.0})
                 spread = weights.view(1, -1)
                 if spot is not None:
                     spread = spread * spot
@@ -345,6 +371,11 @@ def score_model(
                     if decodes:
                         reference = normalizer.decode(reference, entry.variable)
                     bucket["climo"] += float(((reference - actual) ** 2 * spread).sum())
+                    # Anomaly correlation, pooled over batches: the pattern skill RMSE cannot see.
+                    anomaly_pred, anomaly_true = predicted - reference, actual - reference
+                    bucket["cov"] += float((anomaly_pred * anomaly_true * spread).sum())
+                    bucket["pp"] += float((anomaly_pred**2 * spread).sum())
+                    bucket["tt"] += float((anomaly_true**2 * spread).sum())
 
     if was_training:
         model.train()
@@ -352,8 +383,11 @@ def score_model(
     card = Scorecard()
     for (name, hours), bucket in totals.items():
         count = max(bucket["count"], 1e-12)
+        acc = None
+        if climatology is not None and bucket["pp"] > 0 and bucket["tt"] > 0:
+            acc = bucket["cov"] / math.sqrt(bucket["pp"] * bucket["tt"])
         card.add(Score(
-            field=name, lead_hours=hours,
+            field=name, lead_hours=hours, acc=acc,
             rmse=math.sqrt(bucket["model"] / count),
             persistence_rmse=math.sqrt(bucket["persist"] / count),
             climatology_rmse=math.sqrt(bucket["climo"] / count) if climatology is not None else None,

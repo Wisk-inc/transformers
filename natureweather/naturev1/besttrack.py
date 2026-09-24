@@ -141,7 +141,9 @@ def parse_hurdat2(path: str | Path) -> list[Track]:
             radii.append([[float(field[8 + group * 4 + quadrant]) for quadrant in range(4)] for group in range(3)])
             rmws.append(float(field[20]) if len(field) > 20 else MISSING)
 
-        as_nan = lambda values: np.where(np.asarray(values, dtype=np.float32) == MISSING, np.nan, values)
+        def as_nan(values):
+            return np.where(np.asarray(values, dtype=np.float32) == MISSING, np.nan, values)
+
         tracks.append(
             Track(
                 storm_id=storm_id, name=name, time=np.array(times),

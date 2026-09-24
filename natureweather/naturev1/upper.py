@@ -91,7 +91,7 @@ def open_weatherbench_levels(
 
     subset = dataset[surface_names + upper_names]
     if upper_names and "level" in subset.dims:
-        available = [level for level in levels if level in set(int(x) for x in subset.level.values)]
+        available = [level for level in levels if level in {int(x) for x in subset.level.values}]
         subset = subset.sel(level=available)
     return subset, surface_names, upper_names
 

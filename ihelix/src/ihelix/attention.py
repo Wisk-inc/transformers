@@ -425,14 +425,19 @@ class CrossAttention(nn.Module):
         spread = distances.view(num_target, 1, 1, -1) / radii
         window = -(spread**2) / 2
         # Compact support, as in `GeodesicAttention`: a read is decided by its radius, never by how many
-        # samples happened to be within reach. The nearest source is always inside the cutoff, so no row
-        # can be fully masked.
-        window = window.masked_fill(
-            (spread > self.cutoff_sigmas) & (distances > 0).view(num_target, 1, 1, -1), NEG_SCORE
-        )
+        # samples happened to be within reach.
+        outside = (spread > self.cutoff_sigmas) & (distances > 0).view(num_target, 1, 1, -1)
+        window = window.masked_fill(outside, NEG_SCORE)
         quadrature = torch.log(link.weights.to(target.dtype).clamp_min(1e-30)).view(num_target, 1, 1, -1)
 
         attention = (logits + (bias + window + quadrature).unsqueeze(0)).softmax(-1)
+        # A target with no source inside the cutoff reads nothing. A row that is masked everywhere does
+        # not come out of the softmax as zero -- it comes out uniform, because the mask shifts every
+        # logit by the same constant -- so without this a mesh point on the far side of the planet from
+        # a satellite box read the box's edge pixels at full weight, and the whole globe was filled
+        # with one scene's boundary.
+        reachable = (~outside).any(-1, keepdim=True).to(attention.dtype)
+        attention = attention * reachable.unsqueeze(0)
         attended = torch.einsum("bphgk,bphkd->bphgd", attention, gathered_v)
         return proj.merge(attended)
 

@@ -92,6 +92,10 @@ class CheckpointManager:
         repo_id: Hub repository to mirror to, e.g. ``"you/NatureV1"``. Needs ``HF_TOKEN`` in the
             environment or a prior ``huggingface-cli login``.
         push_every_seconds: uploads are slower than local writes, so they get their own, longer interval.
+        snapshot_every_seconds: how often a numbered copy is kept beside ``latest.pt``. With the
+            optimizer state a checkpoint of the full model is about a gigabyte; copying it on every
+            one-minute save wrote two gigabytes a minute to Google Drive and left the GPU waiting on
+            the disk. ``latest.pt`` is still rewritten every ``every_seconds``.
     """
 
     LATEST = "latest.pt"
@@ -104,6 +108,7 @@ class CheckpointManager:
         repo_id: str | None = None,
         push_every_seconds: float = 900.0,
         private: bool = False,
+        snapshot_every_seconds: float = 1800.0,
     ) -> None:
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -111,10 +116,28 @@ class CheckpointManager:
         self.keep = keep
         self.repo_id = repo_id
         self.push_every_seconds = push_every_seconds
+        self.snapshot_every_seconds = snapshot_every_seconds
         self.private = private
         self._last_save = 0.0
         self._last_push = 0.0
+        self._last_snapshot = 0.0
         self._api = None
+
+    @property
+    def tag(self) -> str:
+        """Which run this directory holds -- ``stage1``, ``stage2``, ``rollout`` -- for the Hub path."""
+        return self.directory.name or "run"
+
+    @property
+    def hub_path(self) -> str:
+        """
+        Where this run's checkpoint lives in the Hub repository.
+
+        One path per run. Every stage used to push to the same ``latest.pt``, so on a fresh machine a
+        stage pulled whichever stage had pushed last: stage two resumed from stage one's step count,
+        found itself past its own ``max_steps`` and stopped without training anything.
+        """
+        return f"checkpoints/{self.tag}/{self.LATEST}"
 
     # ------------------------------------------------------------------ saving --
 
@@ -150,7 +173,8 @@ class CheckpointManager:
             "config": config or {},
             "rng": _rng_state(),
             "saved_at": time.time(),
-            "format": 1,
+            "format": 2,
+            "tag": self.tag,
         }
 
         target = self.directory / self.LATEST
@@ -158,9 +182,10 @@ class CheckpointManager:
         torch.save(payload, temporary)
         os.replace(temporary, target)  # atomic; readers see either the old file or the new one
 
-        numbered = self.directory / f"step_{state.step:09d}.pt"
-        shutil.copy2(target, numbered)
-        self._prune()
+        if force or (time.time() - self._last_snapshot) >= self.snapshot_every_seconds:
+            shutil.copy2(target, self.directory / f"step_{state.step:09d}.pt")
+            self._prune()
+            self._last_snapshot = time.time()
         self._last_save = time.time()
 
         (self.directory / "state.json").write_text(json.dumps(state.to_dict(), indent=2, default=str) + "\n")
@@ -182,8 +207,8 @@ class CheckpointManager:
                 self._api = HfApi()
                 self._api.create_repo(self.repo_id, repo_type="model", exist_ok=True, private=self.private)
             self._api.upload_file(
-                path_or_fileobj=str(path), path_in_repo="latest.pt", repo_id=self.repo_id, repo_type="model",
-                commit_message=f"step {state.step}",
+                path_or_fileobj=str(path), path_in_repo=self.hub_path, repo_id=self.repo_id,
+                repo_type="model", commit_message=f"{self.tag} step {state.step}",
             )
             self._last_push = time.time()
         except Exception as error:  # a failed upload must never kill a training run
@@ -211,9 +236,20 @@ class CheckpointManager:
             except Exception as error:
                 print(f"[checkpoint] {path.name} unreadable ({type(error).__name__}), trying an older one", flush=True)
                 continue
-            model.load_state_dict(payload["model"], strict=strict)
+            try:
+                model.load_state_dict(payload["model"], strict=strict)
+            except RuntimeError as error:
+                # A checkpoint from a different configuration -- 24 input channels where the model now
+                # has 96, say -- cannot be resumed. Crashing here strands the user; resuming into it is
+                # impossible. Set it aside where it can still be recovered, say so, and move on.
+                self._quarantine(path, error)
+                continue
             if optimizer is not None and payload.get("optimizer"):
-                optimizer.load_state_dict(payload["optimizer"])
+                try:
+                    optimizer.load_state_dict(payload["optimizer"])
+                except (ValueError, KeyError, RuntimeError) as error:
+                    print(f"[checkpoint] optimizer state not restored ({type(error).__name__}: the set of "
+                          "trainable parameters changed); weights are restored, moments restart", flush=True)
             if scheduler is not None and payload.get("scheduler"):
                 scheduler.load_state_dict(payload["scheduler"])
             if scaler is not None and payload.get("scaler"):
@@ -225,22 +261,41 @@ class CheckpointManager:
             return state
         return None
 
+    def _quarantine(self, path: Path, error: Exception) -> None:
+        """Move an incompatible checkpoint out of the way, keeping it recoverable."""
+        aside = self.directory / "incompatible"
+        aside.mkdir(exist_ok=True)
+        destination = aside / f"{int(time.time())}_{path.name}"
+        shutil.move(str(path), destination)
+        reason = str(error).splitlines()[0][:200]
+        print(f"[checkpoint] {path.name} was trained with a different configuration and cannot be "
+              f"resumed ({reason}). Moved to {destination}; starting this run fresh.", flush=True)
+
     def _candidates(self) -> list[Path]:
         latest = self.directory / self.LATEST
         numbered = sorted(self.directory.glob("step_*.pt"), reverse=True)
         return ([latest] if latest.exists() else []) + numbered
 
     def fetch_from_hub(self) -> bool:
-        """Pull ``latest.pt`` from the Hub when the local directory is empty -- a fresh VM, same run."""
+        """
+        Pull this run's checkpoint from the Hub when the local directory is empty -- a fresh VM, same run.
+
+        Reads :attr:`hub_path`. Releases before 0.8 pushed every stage to a bare ``latest.pt``; that
+        file is accepted only for ``stage1``, the one stage it can safely be assumed to belong to.
+        """
         if not self.repo_id or (self.directory / self.LATEST).exists():
             return False
-        try:
-            from huggingface_hub import hf_hub_download
+        from huggingface_hub import hf_hub_download
 
-            downloaded = hf_hub_download(repo_id=self.repo_id, filename="latest.pt", repo_type="model")
+        sources = [self.hub_path] + ([self.LATEST] if self.tag == "stage1" else [])
+        for filename in sources:
+            try:
+                downloaded = hf_hub_download(repo_id=self.repo_id, filename=filename, repo_type="model")
+            except Exception as error:
+                last = error
+                continue
             shutil.copy2(downloaded, self.directory / self.LATEST)
-            print(f"[checkpoint] pulled latest.pt from {self.repo_id}", flush=True)
+            print(f"[checkpoint] pulled {filename} from {self.repo_id}", flush=True)
             return True
-        except Exception as error:
-            print(f"[checkpoint] nothing to pull from the Hub ({type(error).__name__})", flush=True)
-            return False
+        print(f"[checkpoint] nothing to pull from the Hub for {self.tag} ({type(last).__name__})", flush=True)
+        return False

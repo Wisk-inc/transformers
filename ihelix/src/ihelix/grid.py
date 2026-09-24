@@ -23,11 +23,42 @@ they are computed once at startup and amortize to nothing.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 from pathlib import Path
 
 import torch
 
 from .geometry import Geometry
+
+
+def grid_fingerprint(grid) -> str:
+    """
+    A content key for a grid: equal for two grids with the same points, weights and geometry.
+
+    Caches of grid correspondences used to be keyed on ``id(grid)``, which is wrong twice over. A
+    DataLoader worker hands back a fresh unpickled copy of the same grid with every batch, so an
+    identity key built -- and kept -- a new correspondence on every step: about 45 MB of GPU memory per
+    step at ERA5 size, and an out-of-memory crash a few thousand steps in. And CPython reuses the ids of
+    freed objects, so a new grid could be served the correspondence of an old one with a different
+    number of points. Keying on content fixes both.
+
+    Computed once per grid object and remembered on it. Grids are treated as immutable; build a new one
+    rather than editing coordinates in place.
+    """
+    cached = getattr(grid, "_fingerprint", None)
+    if cached is not None:
+        return cached
+    if grid.coords.is_meta:
+        return f"meta:{id(grid)}"                 # no data to hash; only ever seen in tests
+    digest = hashlib.blake2b(digest_size=16)
+    for tensor in (grid.coords, grid.weights):
+        digest.update(tensor.detach().to("cpu", torch.float64).contiguous().numpy().tobytes())
+    digest.update(repr(grid.geometry).encode())
+    value = f"{grid.coords.shape[0]}:{digest.hexdigest()}"
+    with contextlib.suppress(AttributeError):
+        grid._fingerprint = value
+    return value
 
 
 def _knn(points: torch.Tensor, num_neighbours: int, chunk: int = 2048) -> tuple[torch.Tensor, torch.Tensor]:

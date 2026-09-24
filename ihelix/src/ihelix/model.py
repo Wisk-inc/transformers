@@ -21,6 +21,7 @@ parameters.
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
@@ -301,9 +302,15 @@ class GridBound:
         result = super()._apply(fn, recurse) if recurse else super()._apply(fn)
         grid = getattr(result, "latent_grid", None)
         if grid is not None:
-            for name, value in list(grid.__dict__.items()):
-                if isinstance(value, torch.Tensor):
-                    setattr(grid, name, fn(value))
+            # Device only. `model.half()` routes through here too, and casting the mesh's float64
+            # coordinates to float16 would put neighbour distances out by tens of km -- so ask `fn`
+            # where it sends a probe, and move the grid there without touching its precision.
+            current = next((v.device for v in grid.__dict__.values() if isinstance(v, torch.Tensor)), None)
+            if current is not None:
+                device = fn(torch.zeros(1, device=current)).device
+                for name, value in list(grid.__dict__.items()):
+                    if isinstance(value, torch.Tensor):
+                        setattr(grid, name, value.to(device))
         if getattr(result, "_links", None):
             result._links.clear()
         return result
@@ -319,6 +326,37 @@ class GridBound:
         if points is not None and points.device != self.device:
             grid.to(self.device)
         return grid
+
+    #: Correspondences kept at once. Enough for every grid a run really uses; small enough that a
+    #: watcher building a new scene grid every hour cannot grow it without bound.
+    link_cache_size: int = 16
+
+    def cached_link(self, target: FieldGrid, source: FieldGrid, num_neighbours: int) -> GridLink:
+        """
+        The correspondence between two grids, built once per *content* and reused.
+
+        Keyed on :func:`~ihelix.grid.grid_fingerprint`, not on object identity -- see there for the two
+        failures an identity key caused. Least recently used entries are dropped past
+        :attr:`link_cache_size`.
+        """
+        from collections import OrderedDict
+
+        from .grid import grid_fingerprint
+
+        if not isinstance(getattr(self, "_links", None), OrderedDict):
+            self._links = OrderedDict(getattr(self, "_links", None) or {})
+        key = (grid_fingerprint(target), grid_fingerprint(source), num_neighbours)
+        link = self._links.get(key)
+        if link is None:
+            # Both grids must sit on the model's device before the correspondence is built: the kNN
+            # inside GridLink compares their coordinates directly, and a CPU/GPU pair fails there.
+            link = GridLink(self._aligned(target), self._aligned(source), num_neighbours).to(self.device)
+            self._links[key] = link
+            while len(self._links) > self.link_cache_size:
+                self._links.popitem(last=False)
+        else:
+            self._links.move_to_end(key)
+        return link
 
 
 class GradientCheckpointing:
@@ -432,17 +470,11 @@ class IHelixFieldModel(GridBound, GradientCheckpointing, nn.Module):
         self.decode_norm = IHelixRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.head = nn.Linear(config.hidden_size, config.out_channels)
         self.apply(lambda m: init_weights(m, config))
-        self._links: dict[tuple[int, int], GridLink] = {}
+        self._links: OrderedDict = OrderedDict()
 
     def link(self, target: FieldGrid, source: FieldGrid, num_neighbours: int) -> GridLink:
-        """Cached correspondence between two grids, built on first use."""
-        key = (id(target), id(source))
-        if key not in self._links:
-            # Both grids must sit on the model's device before the correspondence is built: the kNN
-            # inside GridLink compares their coordinates directly, and a CPU/GPU pair fails there.
-            link = GridLink(self._aligned(target), self._aligned(source), num_neighbours)
-            self._links[key] = link.to(self.device)
-        return self._links[key]
+        """Cached correspondence between two grids, built on first use. See :meth:`cached_link`."""
+        return self.cached_link(target, source, num_neighbours)
 
     def forward(
         self,

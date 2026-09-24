@@ -504,3 +504,77 @@ def test_link_cache_does_not_survive_a_device_change():
 
     model = model.to("meta")
     assert len(model._links) == 0
+
+
+# ---------------------------------------------------------------------------------------------- 0.5.0 --
+
+def _field_model():
+    config = IHelixConfig(in_channels=3, hidden_size=32, num_layers=2, num_heads=2, num_kv_heads=1,
+                          head_dim=16, min_radius=200.0, max_radius=800.0, use_temporal=False,
+                          latent_points=64)
+    return IHelixFieldModel(config, fibonacci_sphere(64, num_neighbours=8, cluster_size=16))
+
+
+def test_link_cache_is_keyed_on_content_not_identity():
+    """A DataLoader worker returns a fresh copy of the same grid per batch; that must hit the cache."""
+    import pickle
+
+    model = _field_model()
+    source = fibonacci_sphere(32, num_neighbours=8, cluster_size=16)
+    first = model.link(model.latent_grid, source, 8)
+    for _ in range(5):
+        copy = pickle.loads(pickle.dumps(source))
+        assert copy is not source
+        assert model.link(model.latent_grid, copy, 8) is first
+    assert len(model._links) == 1, "one grid, copied five times, must be one correspondence"
+
+
+def test_link_cache_never_serves_another_grids_correspondence():
+    """Two different grids, even if one is freed and its id reused, get their own links."""
+    import gc
+
+    model = _field_model()
+    sizes = []
+    for points in (20, 40, 20, 33):
+        grid = fibonacci_sphere(points, num_neighbours=8, cluster_size=16)
+        sizes.append(model.link(grid, model.latent_grid, 8).neighbours.shape[0])
+        del grid
+        gc.collect()
+    assert sizes == [20, 40, 20, 33]
+
+
+def test_link_cache_is_bounded():
+    model = _field_model()
+    for points in range(20, 60):
+        model.link(fibonacci_sphere(points, num_neighbours=8, cluster_size=16), model.latent_grid, 8)
+    assert len(model._links) <= model.link_cache_size
+
+
+def test_a_target_with_nothing_in_reach_reads_nothing():
+    """The far side of the planet from a small satellite box must read zero, not the box's edge."""
+    import math
+
+    torch.manual_seed(0)
+    from ihelix import CrossAttention, GridLink
+
+    attention = CrossAttention(32, 2, 1, 16, 3, radius=200.0)
+    mesh = fibonacci_sphere(128, num_neighbours=8, cluster_size=16)
+    box = torch.stack(torch.meshgrid(torch.linspace(0.3, 0.5, 8, dtype=torch.float64),
+                                     torch.linspace(4.9, 5.1, 8, dtype=torch.float64), indexing="ij"), -1)
+    scene = FieldGrid.source(box.reshape(-1, 2), Geometry.globe())
+    link = GridLink(mesh, scene, 16)
+    out = attention(torch.randn(1, 128, 32), torch.randn(1, scene.num_points, 32), link)
+
+    far = link.distances[:, 0] > 3 * 200.0
+    assert far.any() and (~far).any()
+    assert float(out[0, far].abs().max()) == 0.0
+    assert float(out[0, ~far].abs().max()) > 0.0
+    assert math.isfinite(float(out.sum()))
+
+
+def test_half_precision_does_not_quantise_the_mesh():
+    model = _field_model()
+    before = model.latent_grid.coords.clone()
+    model.half()
+    assert model.latent_grid.coords.dtype == before.dtype
+    assert torch.equal(model.latent_grid.coords, before)

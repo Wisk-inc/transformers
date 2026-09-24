@@ -76,6 +76,14 @@ Every output is a distribution, never a bare number.
 
 Lead times: {lead_times} hours.
 
+## Training status
+
+Optimizer steps each output actually received. **An output at 0 has never been trained**, and
+`naturev1.build_forecast(..., trained=model.trained_heads())` reports it as unavailable rather than
+printing its initialisation.
+
+{training_status}
+
 ## Architecture
 
 {parameters:,} parameters ({parameters_m:.1f}M). {num_layers} braided blocks on a {latent_points}-point
@@ -160,8 +168,14 @@ def save_for_hub(
                   "climatology, so no claim is made about forecast skill. Run `naturev1.score_model` "
                   "on held-out years before trusting any output.")
 
+    trained = model.trained_heads() if hasattr(model, "trained_heads") else {}
+    training_status = "\n".join(
+        ["| Output | Steps |", "|---|---|"]
+        + [f"| {head} | {steps:,}{'' if steps else ' -- untrained'} |" for head, steps in trained.items()]
+    ) if trained else "Not recorded."
+
     card = CARD_TEMPLATE.format(
-        name=name, repo_id=repo_id,
+        name=name, repo_id=repo_id, training_status=training_status,
         parameters=model.num_parameters(), parameters_m=model.num_parameters() / 1e6,
         num_layers=config.num_layers, latent_points=config.latent_points,
         min_radius=config.min_radius_km, max_radius=config.max_radius_km,
@@ -216,7 +230,7 @@ def from_pretrained(repo_id: str, device: str | None = None, token: str | None =
 
     config_path = hf_hub_download(repo_id=repo_id, filename="config.json", repo_type="model", token=token)
     raw = json.loads(Path(config_path).read_text())
-    known = {f for f in NatureConfig.__dataclass_fields__}
+    known = set(NatureConfig.__dataclass_fields__)
     values = {k: (tuple(v) if isinstance(v, list) else v) for k, v in raw.items() if k in known}
     config = NatureConfig(**values)
 

@@ -242,18 +242,33 @@ def responds_to_input(model, make_batch, grid, trials: int = 3, threshold: float
     """
     was_training = model.training
     model.eval()
-    peaks = []
+    signals: dict[str, list[float]] = {"eyewall": [], "state": []}
+    inputs = []
     for trial in range(trials):
         torch.manual_seed(1000 + trial)
         batch = make_batch()
+        inputs.append(float(batch["analysis"].double().sum()))
         outputs = model(analysis=batch["analysis"], analysis_grid=grid,
                         calendar=batch["calendar"], output_grid=grid)
-        peaks.append(float(outputs["eyewall_peak_wind_kt"].mean()))
+        signals["eyewall"].append(float(outputs["eyewall_peak_wind_kt"].mean()))
+        if "state_delta" in outputs:
+            signals["state"].append(float(outputs["state_delta"].abs().mean()))
     if was_training:
         model.train()
 
-    centre = abs(float(np.mean(peaks))) + 1e-9
-    spread = float(np.std(peaks)) / centre
+    if len(set(inputs)) < 2:
+        # The check compares outputs across different atmospheres; given the same one three times it
+        # reports "does not respond" for any model, trained or not. That is what happened when the
+        # probe was `next(iter(val_loader))` on an unshuffled loader: every model was refused.
+        raise PreflightError("responds_to_input was given the same batch every trial. Pass a make_batch "
+                             "that returns different atmospheres, e.g. next() on one shared iterator.")
+
+    spread = 0.0
+    for values in signals.values():
+        if len(values) >= 2:
+            centre = abs(float(np.mean(values)))
+            if centre > 1e-9:
+                spread = max(spread, float(np.std(values)) / centre)
     return spread > threshold, spread
 
 
@@ -266,18 +281,28 @@ def check_forecast(bundle: dict) -> list[str]:
     it is that if it ever does, that must be an error and not a headline.
     """
     problems = []
+    if bundle.get("trustworthy") is False:
+        problems.append(bundle.get("warning", "this forecast was built from an untrained input path"))
 
-    for entry in bundle.get("eyewall", []):
+    def rows(key):
+        # A section that was never trained is a dict saying so, not a list of rows.
+        value = bundle.get(key, [])
+        return value if isinstance(value, list) else []
+
+    for entry in rows("eyewall"):
         lead = entry["lead_hours"]
         problems += PHYSICAL["eyewall_peak_wind_kt"].check(
             torch.tensor([entry["peak_wind_kt"]]), f"+{lead}h peak wind")
-        problems += PHYSICAL["eyewall_rmw_nmi"].check(
-            torch.tensor([entry["rmw_nmi"]]), f"+{lead}h RMW")
-        for threshold, quadrants in entry.get("wind_radii_nmi", {}).items():
-            problems += PHYSICAL["wind_radii_nmi"].check(
-                torch.tensor(list(quadrants.values())), f"+{lead}h {threshold} radii")
+        if "rmw_nmi" in entry:
+            problems += PHYSICAL["eyewall_rmw_nmi"].check(
+                torch.tensor([entry["rmw_nmi"]]), f"+{lead}h RMW")
+        radii = entry.get("wind_radii_nmi", {})
+        for threshold, quadrants in radii.items():
+            if isinstance(quadrants, dict):
+                problems += PHYSICAL["wind_radii_nmi"].check(
+                    torch.tensor(list(quadrants.values())), f"+{lead}h {threshold} radii")
 
-    for entry in bundle.get("intensity", []):
+    for entry in rows("intensity"):
         lead = entry["lead_hours"]
         problems += PHYSICAL["intensity_wind_ms"].check(
             torch.tensor([entry["max_wind_ms"]]), f"+{lead}h max wind")
@@ -286,17 +311,17 @@ def check_forecast(bundle: dict) -> list[str]:
 
     ri = bundle.get("rapid_intensification", {})
     for key, value in ri.items():
-        if key.startswith("probability_") and not 0.0 <= value <= 1.0:
+        if key.startswith("probability_") and isinstance(value, float) and not 0.0 <= value <= 1.0:
             problems.append(f"{key} is {value}, which is not a probability")
     if "expected_change_kt" in ri:
         problems += PHYSICAL["ri_delta_wind_kt"].check(
             torch.tensor([ri["expected_change_kt"]]), "RI 24h change")
 
-    total = sum(s["probability"] for s in bundle.get("track_scenarios", []))
-    if bundle.get("track_scenarios") and not 0.95 < total < 1.05:
+    total = sum(s["probability"] for s in rows("track_scenarios"))
+    if rows("track_scenarios") and not 0.95 < total < 1.05:
         problems.append(f"track scenario probabilities sum to {total:.3f}, not 1")
 
-    for scenario in bundle.get("track_scenarios", []):
+    for scenario in rows("track_scenarios"):
         for point in scenario.get("track", []):
             if not -90.0 <= point["latitude"] <= 90.0:
                 problems.append(f"track latitude {point['latitude']:.1f} is off the planet")
@@ -304,7 +329,7 @@ def check_forecast(bundle: dict) -> list[str]:
                 problems.append(f"+{point['lead_hours']}h cone is {point['cone_radius_km_95']:.0f} km, "
                                 "wider than an ocean -- the forecast carries no information")
 
-    if "enso" in bundle:
+    if "nino34_index" in bundle.get("enso", {}):
         problems += PHYSICAL["enso_index"].check(
             torch.tensor([bundle["enso"]["nino34_index"]]), "Nino 3.4")
 

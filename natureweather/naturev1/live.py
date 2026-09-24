@@ -64,6 +64,7 @@ def latest_scene_keys(
     now = now or dt.datetime.now(dt.timezone.utc)
 
     found: dict[str, tuple[dt.datetime, str]] = {}
+    scans: dict[dt.datetime, dict[str, str]] = {}
     for hours_back in range(within_hours):
         moment = now - dt.timedelta(hours=hours_back)
         prefix = f"{product_code}/{moment:%Y}/{moment.timetuple().tm_yday:03d}/{moment:%H}/"
@@ -77,10 +78,15 @@ def latest_scene_keys(
             except ValueError:
                 continue
             name = f"C{meta['channel']:02d}" if meta["channel"] else None
-            if name in channels and (name not in found or meta["timestamp"] > found[name][0]):
-                found[name] = (meta["timestamp"], key)
-        if len(found) == len(channels):
-            break
+            if name in channels:
+                scans.setdefault(meta["timestamp"], {})[name] = key
+                if name not in found or meta["timestamp"] > found[name][0]:
+                    found[name] = (meta["timestamp"], key)
+        complete = [stamp for stamp, keys in scans.items() if len(keys) == len(channels)]
+        if complete:
+            # One scan for every channel: pairing C13 from 18:01 with C09 from 17:56 stacks two
+            # different moments of a moving storm as if they were one picture.
+            return dict(scans[max(complete)])
     return {name: key for name, (_, key) in found.items()}
 
 

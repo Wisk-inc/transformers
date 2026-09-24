@@ -42,7 +42,7 @@ Made by Nathan.
 from .attention import CrossAttention, GeodesicAttention, GridLink, IndexAttention, RelativeEncoder
 from .domains import CATALOGUE, channel_flow, cylinder, describe, image, ocean, seismic, volume
 from .geometry import EARTH_RADIUS_KM, Axis, Geometry
-from .grid import FieldGrid, fibonacci_sphere, latlon_grid
+from .grid import FieldGrid, fibonacci_sphere, grid_fingerprint, latlon_grid
 from .model import (
                     GradientCheckpointing,
                     GridBound,
@@ -53,7 +53,7 @@ from .model import (
                     TemporalStrand,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __author__ = "Nathan"
 
 __all__ = [
@@ -82,6 +82,7 @@ __all__ = [
     "RelativeEncoder",
     "TemporalStrand",
     "__version__",
+    "grid_fingerprint",
     "fibonacci_sphere",
     "latlon_grid",
 ]

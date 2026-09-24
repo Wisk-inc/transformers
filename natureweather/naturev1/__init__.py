@@ -59,10 +59,12 @@ from .guards import (
 )
 from .hub import from_pretrained, push_to_hub, save_for_hub
 from .live import fetch_latest, latest_scene_keys, watch
-from .losses import focal_bce, masked_gaussian_nll, total_loss, track_mixture_nll
+from .losses import area_weights, focal_bce, masked_gaussian_nll, total_loss, track_mixture_nll
 from .model import (
                    RI_THRESHOLDS_KT,
+                   STORM_STATE_FEATURES,
                    SURFACE_FIELDS,
+                   TRACKED_HEADS,
                    WEATHER_TYPES,
                    WIND_RADII_THRESHOLDS_KT,
                    EyewallHead,
@@ -82,7 +84,37 @@ from .rollout import (
                    rollout_loss,
 )
 from .satellite import SatelliteScene, fixed_grid_to_latlon, footprint_area_km2, normalize_channels, scene_from_netcdf
-from .storms import StormTargets, StormWindow, format_pairing, pair_tracks_with_reanalysis
+from .state import (
+                   FORCING_VARIABLES,
+                   HEADLINE_STATE_FIELDS,
+                   STATIC_VARIABLES,
+                   ChannelRoles,
+                   StateStepper,
+                   channel_loss_weights,
+                   channel_roles,
+                   conserve_mass,
+                   fair_crps,
+                   score_state,
+                   solar_forcing,
+                   spread_skill_ratio,
+                   state_forecast,
+                   state_rollout_loss,
+                   tendency_std,
+                   toa_accumulated,
+                   toa_flux,
+                   train_state_rollout,
+)
+from .storms import (
+    StormTargets,
+    StormWindow,
+    format_pairing,
+    lead_track_points,
+    pair_tracks_with_reanalysis,
+    storm_feature_bank,
+    storm_scorecard,
+    storm_state_vector,
+    train_storm_heads,
+)
 from .train import Trainer, TrainSettings, apply_ema, load_for_inference, next_state_targets
 from .upper import (
                    HEADLINE_LEVELS,
@@ -113,7 +145,7 @@ from .wb2 import (
 )
 
 
-__version__ = "0.7.2"
+__version__ = "0.8.0"
 __author__ = "Nathan"
 __all__ = [
     "CORPORA", "RI_THRESHOLDS_KT", "WIND_RADII_THRESHOLDS_KT", "EyewallHead", "RapidIntensificationHead",
@@ -125,6 +157,12 @@ __all__ = [
     "from_pretrained", "push_to_hub", "save_for_hub",
     "Plan", "Choice", "resolve_all", "resolve_variables", "resolve_staging",
     "resolve_precision", "resolve_batch", "with_retry", "ensure_packages", "install_packages",
+    "ChannelRoles", "StateStepper", "channel_roles", "channel_loss_weights", "conserve_mass",
+    "fair_crps", "solar_forcing", "spread_skill_ratio", "state_forecast", "state_rollout_loss",
+    "tendency_std", "toa_accumulated", "toa_flux", "STATIC_VARIABLES", "FORCING_VARIABLES",
+    "HEADLINE_STATE_FIELDS", "score_state", "train_state_rollout", "lead_track_points",
+    "area_weights", "TRACKED_HEADS", "STORM_STATE_FEATURES", "storm_feature_bank", "storm_scorecard",
+    "storm_state_vector", "train_storm_heads",
     "preflight", "format_preflight", "PreflightError", "TrainingWatchdog", "check_forecast",
     "check_grid_alignment", "check_weights", "check_normalization", "check_device_agreement",
     "check_environment", "responds_to_input", "PHYSICAL", "Bounds",

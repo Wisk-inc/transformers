@@ -147,10 +147,17 @@ class Trainer:
             trainable, total = model.freeze_backbone(True)
             print(f"[train] fine-tuning stage: {trainable:,} of {total:,} parameters trainable "
                   f"({trainable / total:.1%}) -- the backbone is frozen", flush=True)
-        self._install_signal_handlers()
+        self._previous_handlers: dict = {}
 
     def _install_signal_handlers(self) -> None:
-        """On SIGINT/SIGTERM, finish the current step and checkpoint rather than dying mid-update."""
+        """
+        On SIGINT/SIGTERM, finish the current step and checkpoint rather than dying mid-update.
+
+        Installed only for the duration of :meth:`fit` and restored afterwards. Installed for good --
+        as it was -- the notebook's own interrupt handler was replaced for the rest of the session, so
+        after the first ``Trainer`` existed the Stop button stopped stopping anything else: staging,
+        the rollout loop, scoring.
+        """
 
         def handler(signum, frame):
             print(f"\n[train] signal {signum}: finishing this step and checkpointing", flush=True)
@@ -158,9 +165,17 @@ class Trainer:
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
-                signal.signal(sig, handler)
+                self._previous_handlers[sig] = signal.signal(sig, handler)
             except (ValueError, OSError):
                 pass  # not the main thread, e.g. inside some notebook runtimes
+
+    def _restore_signal_handlers(self) -> None:
+        for sig, previous in self._previous_handlers.items():
+            try:
+                signal.signal(sig, previous if previous is not None else signal.SIG_DFL)
+            except (ValueError, OSError, TypeError):
+                pass
+        self._previous_handlers.clear()
 
     def resume(self) -> TrainingState:
         """Restore the newest checkpoint, pulling from the Hub first if this machine has none."""
@@ -169,6 +184,11 @@ class Trainer:
                                          map_location=str(self.device))
         if restored is not None:
             self.state = restored
+            # The average was seeded at construction, from the weights as they were *before* this load
+            # -- the random initialisation. Reseed it from what was restored.
+            if self.ema is not None:
+                self.ema = {name: p.detach().clone() for name, p in self.model.named_parameters()
+                            if p.requires_grad}
         else:
             print("[train] no checkpoint found; starting from scratch", flush=True)
         return self.state
@@ -207,6 +227,7 @@ class Trainer:
                     satellite=batch.get("satellite"), satellite_grid=batch.get("satellite_grid"),
                     analysis=batch.get("analysis"), analysis_grid=batch.get("analysis_grid"),
                     calendar=batch["calendar"], output_grid=batch.get("output_grid"),
+                    storm_center=batch.get("storm_center"), storm_state=batch.get("storm_state"),
                 )
                 _, parts = total_loss(outputs, batch, SURFACE_FIELDS)
             for key, value in parts.items():
@@ -229,9 +250,16 @@ class Trainer:
         one, and early-stops on it. Without it there is no overfitting signal at all: the training curve
         goes down either way.
         """
+        self._install_signal_handlers()
+        try:
+            return self._fit(loader, epochs, val_loader)
+        finally:
+            self._restore_signal_handlers()
+
+    def _fit(self, loader, epochs: int, val_loader) -> TrainingState:
         settings = self.settings
         self.model.train()
-        started = time.time()
+        started = time.time() - self.state.wall_seconds
         micro = 0
         self.optimizer.zero_grad(set_to_none=True)
 
@@ -246,6 +274,7 @@ class Trainer:
                         satellite=batch.get("satellite"), satellite_grid=batch.get("satellite_grid"),
                         analysis=batch.get("analysis"), analysis_grid=batch.get("analysis_grid"),
                         calendar=batch["calendar"], output_grid=batch.get("output_grid"),
+                        storm_center=batch.get("storm_center"), storm_state=batch.get("storm_state"),
                     )
                     loss, parts = total_loss(outputs, batch, SURFACE_FIELDS)
                     loss = loss / settings.grad_accum
@@ -267,6 +296,8 @@ class Trainer:
                 self.optimizer.zero_grad(set_to_none=True)
 
                 self.state.step += 1
+                if hasattr(self.model, "mark_trained"):
+                    self.model.mark_trained(parts, batch)
                 self.state.samples_seen += int(batch["calendar"].shape[0]) * settings.grad_accum
                 self.state.wall_seconds = time.time() - started
                 if parts["total"] < self.state.best_loss:

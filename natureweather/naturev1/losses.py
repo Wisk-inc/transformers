@@ -155,6 +155,23 @@ def lead_weights(num_leads: int, decay: float = 0.9) -> torch.Tensor:
     return torch.tensor([decay**i for i in range(num_leads)], dtype=torch.float32)
 
 
+def area_weights(batch: dict, points: int, device) -> torch.Tensor | None:
+    """
+    Per-point area weights, mean one, from whichever grid in the batch the fields live on.
+
+    An unweighted mean over an equiangular grid counts every polar row as heavily as the equator even
+    though it covers a sliver of the area -- about six to one over-weighting of the polar caps. The
+    score the model is judged on (:mod:`naturev1.wb2`) is area-weighted, so an unweighted training loss
+    optimises a different objective from the one being scored.
+    """
+    for key in ("output_grid", "analysis_grid"):
+        weights = getattr(batch.get(key), "weights", None)
+        if weights is not None and weights.shape[0] == points:
+            weights = weights.to(device, torch.float32)
+            return weights / weights.mean()
+    return None
+
+
 def total_loss(outputs: dict, batch: dict, field_names: tuple[str, ...], weights: dict | None = None) -> tuple[torch.Tensor, dict]:
     """
     Combine every head's likelihood into one scalar, and report the parts.
@@ -167,7 +184,7 @@ def total_loss(outputs: dict, batch: dict, field_names: tuple[str, ...], weights
     """
     weights = {"field": 1.0, "type": 0.3, "track": 1.0, "landfall": 0.5, "intensity": 0.5, "enso": 0.1,
                "ri": 2.0, "ri_delta": 0.5, "eyewall": 1.0, **(weights or {})}
-    device = outputs["field_mean"].device
+    device = next(value.device for value in outputs.values() if torch.is_tensor(value))
     parts: dict[str, float] = {}
     loss = torch.zeros((), device=device)
 
@@ -181,6 +198,9 @@ def total_loss(outputs: dict, batch: dict, field_names: tuple[str, ...], weights
         )
         mask = batch.get("field_mask")
         combined = per * lead_w * field_w
+        area = area_weights(batch, outputs["field_mean"].shape[1], device)
+        if area is not None:
+            combined = combined * area.view(1, -1, 1, 1)
         term = (combined * mask).sum() / mask.sum().clamp_min(1.0) if mask is not None else combined.mean()
         loss = loss + weights["field"] * term
         parts["field"] = float(term.detach())

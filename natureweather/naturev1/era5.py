@@ -477,7 +477,8 @@ def _build_window(
     offsets: tuple[int, ...],
     channels: int | None,
     shift: int | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    state_steps: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """
     Shared item construction: normalized ``(T, lat, lon, C)`` to ``(analysis, target)``.
 
@@ -514,7 +515,17 @@ def _build_window(
             if source >= 0:
                 target[:, lead, field] = flat[frame, :, source]
                 mask[:, lead, field] = flat_observed[frame, :, source].float()
-    return analysis, target, mask
+
+    # The full future state at each of the next ``state_steps`` consecutive steps, laid out exactly
+    # like ``analysis`` -- same channels, same padding -- so a rollout compares like with like. The lead
+    # offsets cannot serve here: past +24 h they skip steps (6, 8, 12...), and a rollout advances one
+    # step at a time.
+    state = None
+    if state_steps:
+        state = flat[history : history + state_steps]
+        if channels is not None and channels > state.shape[-1]:
+            state = torch.nn.functional.pad(state, (0, channels - state.shape[-1]))
+    return analysis, target, mask, state
 
 
 def _roll(augment: bool, seed: int, start: int, num_longitudes: int) -> int | None:
@@ -522,6 +533,17 @@ def _roll(augment: bool, seed: int, start: int, num_longitudes: int) -> int | No
     if not augment:
         return None
     return int(np.random.default_rng(seed * 1_000_003 + start).integers(num_longitudes))
+
+
+def _roll_degrees(shift: int | None, num_longitudes: int) -> torch.Tensor:
+    """
+    How far east this sample's globe was rotated, in degrees -- zero when it was not.
+
+    A rollout recomputes solar radiation from orbital geometry at every step. On a rotated sample the
+    sun has to be rotated with everything else, or it shines on the wrong side of the planet from the
+    weather it is lighting; :class:`naturev1.StateStepper` reads this to do that.
+    """
+    return torch.tensor(0.0 if not shift else shift * 360.0 / num_longitudes, dtype=torch.float64)
 
 
 class ERA5Window(torch.utils.data.Dataset):
@@ -554,6 +576,7 @@ class ERA5Window(torch.utils.data.Dataset):
         stats_cache: str | os.PathLike | None = None,
         seed: int = 0,
         levels=None,
+        state_steps: int = 0,
     ) -> None:
         self._resolution, self._variables = resolution, tuple(variables)
         self.levels = tuple(levels) if levels is not None else None
@@ -566,8 +589,9 @@ class ERA5Window(torch.utils.data.Dataset):
         self.history = history
         self.offsets = (lead_steps,) if isinstance(lead_steps, int) else tuple(lead_steps)
         self.augment, self.channels, self.seed = augment, channels, seed
+        self.state_steps = int(state_steps)
 
-        steps, span = self._dataset.sizes["time"], history + max(self.offsets)
+        steps, span = self._dataset.sizes["time"], history + max(max(self.offsets), self.state_steps)
         indices = np.arange(steps - span) if indices is None else np.asarray(indices)
         self.indices = indices[indices <= steps - span]
 
@@ -616,18 +640,24 @@ class ERA5Window(torch.utils.data.Dataset):
 
     def __getitem__(self, item: int) -> dict:
         start = int(self.indices[item])
-        span = self.history + max(self.offsets)
+        span = self.history + max(max(self.offsets), self.state_steps)
         raw = read_block(self.store, self.source_variables, slice(start, start + span), self.levels)
 
-        analysis, target, mask = _build_window(
+        shift = _roll(self.augment, self.seed, start, self.num_longitudes)
+        analysis, target, mask, state = _build_window(
             self.normalizer.prepare(raw), self.normalizer, self.target_index, self.history, self.offsets,
-            self.channels, _roll(self.augment, self.seed, start, self.num_longitudes),
+            self.channels, shift, self.state_steps,
         )
         stamps = (self.store.time.values[start : start + self.history]
                   .astype("datetime64[s]").astype(np.int64))
         return {
             "analysis": analysis,
             "calendar": calendar_features(torch.tensor(stamps, dtype=torch.float64)),
+            # The "now" frame's valid time, in unix seconds. A rollout needs it to recompute forcings
+            # -- solar radiation -- for every step it invents, rather than freezing the sun.
+            "valid_time": torch.tensor(float(stamps[-1]), dtype=torch.float64),
+            "roll_degrees": _roll_degrees(shift, self.num_longitudes),
+            **({"state_target": state} if state is not None else {}),
             "field_target": target,
             "field_mask": mask,
         }
@@ -635,6 +665,22 @@ class ERA5Window(torch.utils.data.Dataset):
     def denormalise(self, values, variable: str):
         """Put a normalized value back into the variable's own physical units."""
         return self.normalizer.decode(values, variable)
+
+
+def _portable_grid(grid):
+    """A CPU copy of a grid that pickles cheaply and keeps its content fingerprint."""
+    if grid is None or not hasattr(grid, "coords"):
+        return grid
+    import copy
+
+    from ihelix import grid_fingerprint
+
+    grid_fingerprint(grid)
+    clone = copy.copy(grid)
+    for name, value in list(clone.__dict__.items()):
+        if isinstance(value, torch.Tensor):
+            setattr(clone, name, value.detach().to("cpu"))
+    return clone
 
 
 @dataclass
@@ -650,6 +696,14 @@ class GridCollate:
 
     analysis_grid: object
     output_grid: object | None = None
+
+    def __post_init__(self) -> None:
+        # Workers pickle every batch back to the main process, grid included. A grid already moved
+        # to the GPU -- which the model does to the grids it is handed -- cannot be pickled from a
+        # forked worker at all ("Cannot re-initialize CUDA in forked subprocess"). So the collate keeps
+        # its own CPU copy, fingerprinted once so the model's link cache recognises every copy.
+        self.analysis_grid = _portable_grid(self.analysis_grid)
+        self.output_grid = _portable_grid(self.output_grid)
 
     def __call__(self, batch: list[dict]) -> dict:
         stacked = {key: torch.stack([item[key] for item in batch]) for key in batch[0]}
@@ -757,6 +811,21 @@ def materialise(
     gigabytes = float(np.prod(shape)) * np.dtype(dtype).itemsize / 1e9
     marker = path.with_suffix(".progress.json")
 
+    # Already finished with exactly this request: nothing to do. Without this, the only safe thing a
+    # notebook could do was skip staging when the file existed -- which also skipped it when a previous
+    # run had died at 4%, and then trained on a file that was 96% empty.
+    sidecar = path.with_suffix(".json")
+    if resume and path.exists() and sidecar.exists() and not marker.exists():
+        try:
+            staged = json.loads(sidecar.read_text())
+            if (staged.get("shape") == list(shape) and staged.get("variables") == names
+                    and staged.get("indices") == ordered.tolist()):
+                if progress:
+                    print(f"[era5] already staged: {path} ({gigabytes:.2f} GB, {len(ordered):,} steps)")
+                return path
+        except (json.JSONDecodeError, OSError):
+            pass
+
     # Resume only when the existing file matches exactly. A shape mismatch means the request changed,
     # and continuing into it would interleave two different datasets in one array.
     done: set[int] = set()
@@ -837,6 +906,7 @@ class CachedERA5(torch.utils.data.Dataset):
         stats_cache: str | os.PathLike | None = None,
         indices: np.ndarray | None = None,
         seed: int = 0,
+        state_steps: int = 0,
     ) -> None:
         path = Path(path)
         meta = json.loads(path.with_suffix(".json").read_text())
@@ -846,10 +916,12 @@ class CachedERA5(torch.utils.data.Dataset):
         self.history = history
         self.offsets = (lead_steps,) if isinstance(lead_steps, int) else tuple(lead_steps)
         self.augment, self.channels, self.seed = augment, channels, seed
+        self.state_steps = int(state_steps)
         self.num_longitudes = self.values.shape[2]
 
-        span = history + max(self.offsets)
-        available = np.arange(max(len(self.values) - span, 0))
+        span = history + max(max(self.offsets), self.state_steps)
+        # A window starting at len - span still fits exactly; the "+ 1" keeps the last one.
+        available = np.arange(max(len(self.values) - span + 1, 0))
         self.indices = available if indices is None else np.asarray(indices)[np.asarray(indices) < len(available)]
 
         # The staged array is already normalized, and the statistics that did it travel with it.
@@ -875,11 +947,12 @@ class CachedERA5(torch.utils.data.Dataset):
 
     def __getitem__(self, item: int) -> dict:
         start = int(self.indices[item])
-        span = self.history + max(self.offsets)
+        span = self.history + max(max(self.offsets), self.state_steps)
         prepared = np.asarray(self.values[start : start + span], np.float32)
-        analysis, target, mask = _build_window(
+        shift = _roll(self.augment, self.seed, start, self.num_longitudes)
+        analysis, target, mask, state = _build_window(
             prepared, self.normalizer, self.target_index, self.history, self.offsets,
-            self.channels, _roll(self.augment, self.seed, start, self.num_longitudes),
+            self.channels, shift, self.state_steps,
         )
         if len(self.times):
             stamps = torch.tensor(self.times[start : start + self.history], dtype=torch.float64)
@@ -890,6 +963,9 @@ class CachedERA5(torch.utils.data.Dataset):
         return {
             "analysis": analysis,
             "calendar": calendar_features(stamps),
+            "valid_time": stamps[-1].clone(),
+            "roll_degrees": _roll_degrees(shift, self.num_longitudes),
+            **({"state_target": state} if state is not None else {}),
             "field_target": target,
             "field_mask": mask,
         }
