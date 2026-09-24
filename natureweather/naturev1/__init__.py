@@ -58,6 +58,7 @@ from .guards import (
                    responds_to_input,
 )
 from .hub import from_pretrained, push_to_hub, save_for_hub
+from .launch import follow, launch, status, stop
 from .live import fetch_latest, latest_scene_keys, watch
 from .losses import area_weights, focal_bce, masked_gaussian_nll, total_loss, track_mixture_nll
 from .model import (
@@ -105,15 +106,15 @@ from .state import (
                    train_state_rollout,
 )
 from .storms import (
-    StormTargets,
-    StormWindow,
-    format_pairing,
-    lead_track_points,
-    pair_tracks_with_reanalysis,
-    storm_feature_bank,
-    storm_scorecard,
-    storm_state_vector,
-    train_storm_heads,
+                   StormTargets,
+                   StormWindow,
+                   format_pairing,
+                   lead_track_points,
+                   pair_tracks_with_reanalysis,
+                   storm_feature_bank,
+                   storm_scorecard,
+                   storm_state_vector,
+                   train_storm_heads,
 )
 from .train import Trainer, TrainSettings, apply_ema, load_for_inference, next_state_targets
 from .upper import (
@@ -145,7 +146,7 @@ from .wb2 import (
 )
 
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 __author__ = "Nathan"
 __all__ = [
     "CORPORA", "RI_THRESHOLDS_KT", "WIND_RADII_THRESHOLDS_KT", "EyewallHead", "RapidIntensificationHead",
@@ -161,6 +162,7 @@ __all__ = [
     "fair_crps", "solar_forcing", "spread_skill_ratio", "state_forecast", "state_rollout_loss",
     "tendency_std", "toa_accumulated", "toa_flux", "STATIC_VARIABLES", "FORCING_VARIABLES",
     "HEADLINE_STATE_FIELDS", "score_state", "train_state_rollout", "lead_track_points",
+    "launch", "follow", "status", "stop",
     "area_weights", "TRACKED_HEADS", "STORM_STATE_FEATURES", "storm_feature_bank", "storm_scorecard",
     "storm_state_vector", "train_storm_heads",
     "preflight", "format_preflight", "PreflightError", "TrainingWatchdog", "check_forecast",

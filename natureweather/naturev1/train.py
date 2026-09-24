@@ -148,6 +148,9 @@ class Trainer:
             print(f"[train] fine-tuning stage: {trainable:,} of {total:,} parameters trainable "
                   f"({trainable / total:.1%}) -- the backbone is frozen", flush=True)
         self._previous_handlers: dict = {}
+        #: True once a stop signal ended :meth:`fit` early. A pipeline must not carry on to its next
+        #: stage from a half-trained model; checking this is how it knows.
+        self.interrupted = False
 
     def _install_signal_handlers(self) -> None:
         """
@@ -162,6 +165,7 @@ class Trainer:
         def handler(signum, frame):
             print(f"\n[train] signal {signum}: finishing this step and checkpointing", flush=True)
             self._stop = True
+            self.interrupted = True
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:

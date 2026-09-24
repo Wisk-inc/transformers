@@ -1,3 +1,9 @@
+# ruff: noqa
+# The whole training pipeline -- the same code as colab_naturev1.py, packaged so naturev1.launch() can run
+# it as a background process that survives a dropped connection. Importing it would start training.
+if __name__ not in ("__main__", "__naturev1_pipeline__"):
+    raise ImportError("naturev1._pipeline is the training pipeline itself; start it with naturev1.launch()")
+
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 #  NatureV1 0.8.2 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
 #
