@@ -45,6 +45,10 @@ import subprocess
 import sys
 
 os.environ.setdefault("GRPC_VERBOSITY", "ERROR")   # the cloud client logs every DataLoader fork otherwise
+# Let the GPU allocator grow segments instead of fragmenting them. Training at batch 8 fills a 96 GB card
+# to within ~130 MB, and without this the allocator has to flush and retry. Only takes effect if torch
+# has not touched the GPU yet in this kernel -- restart the kernel for it to apply.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 _NEEDED = {"naturev1": ("naturev1[all]>=0.8.1", (0, 8, 1)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
 
