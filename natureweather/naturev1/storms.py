@@ -537,7 +537,7 @@ def train_storm_heads(
             torch.nn.utils.clip_grad_norm_(heads, 1.0)
             optimizer.step()
             model.mark_trained(parts, {"storm_center": batch["storm_center"], "storm_state": batch["storm_state"]})
-            running += float(loss) * len(index)
+            running += float(loss.detach()) * len(index)
         entry = {"epoch": epoch, "train": running / count}
 
         if val_bank is not None:

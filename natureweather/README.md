@@ -90,6 +90,19 @@ Checkpoints go down on a wall-clock interval, written to a temp file and renamed
 cell leaves the previous checkpoint intact. Resume restores optimizer moments, LR schedule, scaler and RNG
 state — not just weights.
 
+## 0.8: the whole atmosphere, and an audit
+
+The model now predicts and evolves every prognostic channel — 13 pressure levels included — as a residual
+from persistence, with solar forcing computed from orbital geometry, mass conserved, a pressure- and
+area-weighted loss, and fair-CRPS ensembles. Storm heads pool around the storm and are given its current
+intensity and motion. Stage two runs the frozen backbone once per storm and trains the heads on the
+cached features, which turned days per epoch into seconds.
+
+A full read of the code found and fixed, among others: a GPU memory leak on every training step with
+DataLoader workers; hurricane lead targets at the wrong valid time on 10.9% of samples (92% of them on
+landfalling stretches); a rollout loop that never rolled out; a publish gate that could never open; and
+untrained heads printed as forecasts. Each has a regression test in `tests/test_fixes_080.py`.
+
 ## Not trained
 
 No weights here have seen real data. The architecture, losses, ingest and training loop are complete and

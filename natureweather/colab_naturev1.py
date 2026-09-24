@@ -1,451 +1,497 @@
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
-#  NatureV1 — the whole thing in one cell. Paste and run; it installs what it needs.
+#  NatureV1 0.8 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
 #
-#  Set the RUN_* switches below and execute. Everything resumes: if the cell dies, re-run it and it
-#  picks up from the last checkpoint (written every 60 s, and mirrored to the Hub every 15 min).
-#
-#  Rough costs on an RTX 6000 Blackwell (96 GB). Cell 5 measures the real numbers on your card.
-#    STAGE_YEARS=20 staging      ~10 GB disk, one-off download
-#    RUN_PRETRAIN                the long pole — hours to days; watch the [val] lines
-#    RUN_FINETUNE                ~24,585 samples, far quicker, early-stops on held-out loss
-#    RUN_FORECAST                seconds
+#  Paste and run. It installs what it needs, stages the data, trains in stages, scores itself against
+#  persistence and climatology, and only publishes if it earned it. Every stage checkpoints every
+#  minute and resumes where it stopped -- re-running the cell after a crash continues, it does not
+#  restart. Set SMOKE_TEST = True first: a tiny model through every stage in a few minutes, so a typo
+#  or a missing package shows up now instead of three days into a run.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 
-RUN_PRETRAIN  = True      # stage one: self-supervised on ERA5 reanalysis
-RUN_FINETUNE  = True      # stage two: storm heads on HURDAT2, backbone frozen
-RUN_FORECAST  = True      # live forecast from the newest GOES scene
-RUN_WATCHER   = False     # then keep re-forecasting every hour, forever
+SMOKE_TEST    = False     # True: tiny model, a few steps of every stage -- checks the whole pipeline
 
-STAGE_YEARS   = 20        # years of ERA5 staged to local disk (~0.5 GB/year at float16)
-EPOCHS        = 8         # passes over the staged corpus in stage one
-GRAD_CKPT     = True      # recompute activations: ~30% slower, much bigger batch. Worth it on 96 GB.
-CKPT_DIR      = "/content/drive/MyDrive/naturev1_ckpt"   # Drive outlives the VM
-HUB_REPO      = "Sigmandndnns/NatureV1-500"
-STORM         = (24.6, -78.2)      # current storm centre (lat, lon)
-CITY          = (25.77, -80.19)    # somewhere you want a local forecast
+RUN_PRETRAIN  = True      # stage one: every channel at every lead, on ERA5 reanalysis
+RUN_ROLLOUT   = True      # stage 1b: the whole atmosphere rolled forward 12 steps, CRPS ensemble
+RUN_STORMS    = True      # stage two: hurricane heads on HURDAT2, backbone frozen
+RUN_SCORE     = True      # WeatherBench-style scorecards against persistence and climatology
+RUN_HINDCAST  = True      # forecast a held-out hurricane from its real analysis; compare with truth
+RUN_PUBLISH   = False     # push to the Hub -- only if it beats persistence somewhere
+RUN_FORECAST  = False     # live GOES forecast (refused while the satellite path is untrained)
+RUN_WATCHER   = False     # then re-forecast every hour
 
-# ═══ 0 ═══ bootstrap ═══════════════════════════════════════════════════════════════════════════════
-# Standard library only, and it runs before numpy or torch are imported. That ordering is the whole
-# point: pip may upgrade numpy while satisfying zarr or gcsfs, and a numpy that changes underneath an
-# already-imported torch gives binary-incompatibility errors that look like a bug in this code.
+STAGE_YEARS   = 5         # training years staged to local disk, ~7.5 GB each at 89 channels
+VAL_YEARS     = 1         # held-out years staged too, so validation and scoring are not network-bound
+EPOCHS        = 8         # passes over the staged years in stage one
+MAX_BATCH     = 16        # ceiling on the autotuned batch: host RAM, not VRAM, is the limit above this
+ROLLOUT_STEPS = 12        # longest rollout trained: 12 x 6 h = 72 h, GraphCast's curriculum
+ROLLOUT_TRAIN = 4_000     # optimizer steps of rollout training (the log prints the time per step)
+MEMBERS       = 2         # CRPS ensemble members; 1 = deterministic Gaussian training
+STORM_FIRST_SEASON = 1979 # the satellite era; earlier best-track intensities are much less reliable
+HINDCAST      = ("DORIAN", 2019)       # a held-out storm: 2019 is never trained on
+STORM         = (24.6, -78.2)          # live forecast: current storm centre (lat, lon)
+CITY          = (25.77, -80.19)        # live forecast: somewhere you want a local forecast
+HF_REPO       = "Sigmandndnns/NatureV1-500"
+HF_TOKEN      = ""        # a write token, to publish and mirror checkpoints; or set the HF_TOKEN env var
+
+# ═══ 0 ═══ install ═════════════════════════════════════════════════════════════════════════════════
+# Standard library only, before numpy or torch are imported: pip may upgrade numpy while satisfying
+# zarr or gcsfs, and a numpy that changes under an imported torch fails far from here.
 import importlib
+import importlib.metadata
 import importlib.util
+import os
+import shutil
 import subprocess
 import sys
 
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")   # the cloud client logs every DataLoader fork otherwise
 
-_NEEDED = {                                    # import name -> pip requirement
-    "naturev1":        "naturev1[all]>=0.7.0",
-    "ihelix":          "ihelix>=0.4.0",
-    "xarray":          "xarray>=2023.1",
-    "zarr":            "zarr>=2.16",
-    "gcsfs":           "gcsfs>=2023.1",
-    "netCDF4":         "netCDF4>=1.6",
-    "huggingface_hub": "huggingface_hub>=0.20",
-}
-_MIN_NATUREV1 = (0, 7, 0)
+_NEEDED = {"naturev1": ("naturev1[all]>=0.8.0", (0, 8, 0)), "ihelix": ("ihelix>=0.5.0", (0, 5, 0))}
 
 
-def _present(module: str) -> bool:
-    """Is this importable right now? A broken install counts as absent."""
+def _version(module):
     try:
-        return importlib.util.find_spec(module) is not None
-    except (ImportError, ValueError):
-        return False
-
-
-def _naturev1_too_old() -> bool:
-    """The cell below uses APIs added in 0.7.0, so an older copy is as good as missing."""
-    try:
-        import naturev1
-        parts = tuple(int(piece) for piece in naturev1.__version__.split(".")[:3])
-        return parts < _MIN_NATUREV1
+        return tuple(int(p) for p in importlib.metadata.version(module).split(".")[:3])
     except Exception:
-        return True
+        return None
 
 
-def _bootstrap() -> bool:
-    """Install whatever is missing. Returns True if anything was installed."""
-    missing = [req for module, req in _NEEDED.items() if not _present(module)]
-    if not missing and _naturev1_too_old():
-        missing = [_NEEDED["naturev1"]]
-    if not missing:
-        return False
-
-    print(f"installing {len(missing)} package(s): {', '.join(missing)}")
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--upgrade", *missing])
-    except subprocess.CalledProcessError as error:
-        print(f"\n!! pip failed (exit {error.returncode}). Install by hand and re-run:")
-        print(f"!!   !pip install --upgrade {' '.join(missing)}")
-        raise SystemExit(1) from None
-    importlib.invalidate_caches()
-    return True
-
-
-def _stale_after_install() -> list[str]:
-    """
-    Which already-imported packages did pip move out from under us.
-
-    Colab usually has numpy loaded before any user cell runs, so "was it imported" is the wrong
-    question -- it would demand a restart every single time. The right question is whether the copy in
-    memory still matches the copy on disk, which is only false when pip actually upgraded it.
-    """
-    import importlib.metadata
-
-    stale = []
-    for name in ("numpy", "torch"):
-        loaded = getattr(sys.modules.get(name), "__version__", None)
-        if loaded is None:
-            continue
+_missing = [req for mod, (req, low) in _NEEDED.items()
+            if importlib.util.find_spec(mod) is None or (_version(mod) or (0,)) < low]
+if _missing:
+    print(f"installing: {' '.join(_missing)}")
+    _loaded = {name: getattr(sys.modules.get(name), "__version__", None) for name in ("numpy", "torch")}
+    _tries = ([("uv", ["uv", "pip", "install", "--python", sys.executable, "--upgrade", *_missing])]
+              if shutil.which("uv") else [])
+    _pip = [sys.executable, "-m", "pip", "install", "--upgrade"]
+    _tries += [("pip, fresh index", [*_pip, "--no-cache-dir", "--index-url", "https://pypi.org/simple", *_missing]),
+               ("pip, no cache", [*_pip, "--no-cache-dir", *_missing]),
+               ("pip", [*_pip, *_missing])]
+    for _label, _command in _tries:
         try:
-            if importlib.metadata.version(name) != loaded:
-                stale.append(f"{name} {loaded} -> {importlib.metadata.version(name)}")
+            subprocess.check_call(_command)
+            print(f"installed via {_label}")
+            break
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print(f"  {_label} failed, trying the next way")
+    else:
+        raise SystemExit("could not install; add these in your package manager, then re-run: " + " ".join(_missing))
+    importlib.invalidate_caches()
+    # A restart is needed only if an old copy is already in memory, or pip moved numpy/torch under us.
+    _stale = [m for m in _NEEDED if m in sys.modules]
+    for _name, _was in _loaded.items():
+        try:
+            if _was and importlib.metadata.version(_name) != _was:
+                _stale.append(f"{_name} {_was}")
         except importlib.metadata.PackageNotFoundError:
-            continue
-    return stale
+            pass
+    if _stale:
+        raise SystemExit(f"\n>> installed. {', '.join(_stale)} was already loaded: RESTART THE KERNEL, then run this cell again.")
 
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
 
-_INSTALLED = _bootstrap()
-_STALE = _stale_after_install() if _INSTALLED else []
-if _STALE:
-    # The version in memory no longer matches the one on disk. Carrying on gives binary-incompatibility
-    # errors far from here; restarting is the only reliable fix.
-    print(f"\n!! pip upgraded something already loaded: {', '.join(_STALE)}")
-    print("!! Runtime -> Restart session, then run this cell again. Nothing is lost.")
-    raise SystemExit(0)
-print("dependencies ready\n")
-
-# ───────────────────────────────────────────────────────────────────────────────────────────────────
+# ═══ 1 ═══ imports, paths, hardware ════════════════════════════════════════════════════════════════
 import datetime as dt
 import json
-import os
 
 import numpy as np
 import torch
-from naturev1 import (
-    CachedERA5,
-    ERA5Window,
-    NatureConfig,
-    NatureV1,
-    StormWindow,
-    Trainer,
-    TrainSettings,
-    autotune_batch_size,
-    benchmark_steps,
-    build_forecast,
-    calendar_features,
-    catalogue,
-    corpus_scale,
-    device_report,
-    era5_loader,
-    era5_source_grid,
-    era5_splits,
-    fetch_latest,
-    format_pairing,
-    format_plan,
-    lead_offsets,
-    masked_gaussian_nll,
-    materialise,
-    normalize_channels,
-    open_weatherbench,
-    pair_tracks_with_reanalysis,
-    parse_hurdat2,
-    rapid_intensification,
-    scene_from_netcdf,
-    split_by_storm,
-    training_plan,
-    watch,
-)
-from naturev1.besttrack import download
-
 from ihelix import FieldGrid, Geometry, fibonacci_sphere
+from naturev1 import (HEADLINE_STATE_FIELDS, CachedERA5, CheckpointManager, ERA5Window, NatureConfig, NatureV1,
+                      RolloutSchedule, StateStepper, Trainer, TrainSettings, autotune_batch_size,
+                      benchmark_steps, build_climatology, build_forecast, calendar_features, catalogue,
+                      channel_loss_weights, check_forecast, check_grid_alignment, check_normalization,
+                      check_weights, corpus_scale, device_report, era5_loader, era5_source_grid, era5_splits,
+                      expand_variables, fetch_latest, format_pairing, format_plan, format_preflight,
+                      lead_offsets, masked_gaussian_nll, materialise, normalize_channels,
+                      open_weatherbench_levels, pair_tracks_with_reanalysis, parse_hurdat2, preflight,
+                      push_to_hub, rapid_intensification, resolve_all, responds_to_input, scene_from_netcdf,
+                      score_model, score_state, scoring_fields, split_by_storm, spread_skill_ratio,
+                      state_forecast, storm_feature_bank, storm_scorecard, storm_state_vector,
+                      train_state_rollout, train_storm_heads, training_plan, upper_air_report, watch)
+from naturev1.besttrack import download
+from naturev1.era5 import _target_index
 
-
-DEVICE   = "cuda" if torch.cuda.is_available() else "cpu"
-CHANNELS = ("C13", "C09")          # clean IR window + mid-level water vapour
-DATA_DIR = "./test_data"
-STATS    = "/content/era5_stats.json"
-CACHE    = "/content/era5_cache.npy"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+COLAB_DRIVE = "/content/drive/MyDrive"
+DATA_DIR = "/content" if os.path.isdir("/content") else os.path.expanduser("~/naturev1_data")
+CKPT_DIR = (f"{COLAB_DRIVE}/naturev1_ckpt" if os.path.isdir(COLAB_DRIVE)       # Drive outlives the VM
+            else os.path.join(DATA_DIR, "naturev1_ckpt"))
+os.makedirs(DATA_DIR, exist_ok=True)
+CACHE, VAL_CACHE, STATS = (os.path.join(DATA_DIR, name) for name in ("era5.npy", "era5_val.npy", "stats.json"))
 
 
 def banner(text):
     print(f"\n{'═' * 99}\n  {text}\n{'═' * 99}")
 
 
-# ═══ 1 ═══ hardware ════════════════════════════════════════════════════════════════════════════════
 banner("HARDWARE")
 print(device_report())
+print(f"data {DATA_DIR} | checkpoints {CKPT_DIR}")
 
-# ═══ 2 ═══ the model ═══════════════════════════════════════════════════════════════════════════════
-banner("MODEL")
-CFG = NatureConfig(
-    satellite_channels=6, analysis_channels=24, environment_channels=8,
-    hidden_size=512, num_layers=17, num_heads=8, num_kv_heads=4,
-    head_dim=64, intermediate_size=2048,
-    latent_points=4096, min_radius_km=120.0, max_radius_km=1600.0,
-    history_frames=6, lead_times_hours=(6, 12, 18, 24, 36, 48, 72, 96, 120), track_modes=6,
-)
-LATENT = fibonacci_sphere(CFG.latent_points, num_neighbours=CFG.latent_neighbours,
-                          cluster_size=CFG.latent_cluster)
-model = NatureV1(CFG, LATENT).to(DEVICE)
-print(f"NatureV1: {model.num_parameters()/1e6:.2f}M parameters on {DEVICE}")
-print(f"local head radii (km): {[round(float(r), 1) for r in model.blocks[0].local.radii.detach()]}")
-with torch.no_grad():
-    prior = model.eyewall_head(torch.zeros(1, CFG.hidden_size, device=DEVICE))
-print(f"untrained prior: peak wind {float(prior['eyewall_peak_wind_kt'][0, 0]):.0f}"
-      f" +/- {float(prior['eyewall_peak_wind_log_var'][0, 0].mul(0.5).exp()):.0f} kt  (Atlantic climatology)")
-
-# ═══ 3 ═══ the corpora, and why this trains twice ══════════════════════════════════════════════════
-banner("CORPORA")
-ERA5 = open_weatherbench()          # streams from cloud storage; nothing downloads yet
-print(corpus_scale(ERA5, parameters=model.num_parameters()))
-print()
-print(catalogue())
-
-# ═══ 4 ═══ stage one data — ERA5 ═══════════════════════════════════════════════════════════════════
-banner("STAGE ONE DATA — ERA5 reanalysis")
+# ═══ 2 ═══ data: 13 pressure levels + surface + static, resolved against this machine ══════════════
+banner("DATA — ERA5 (WeatherBench 2), surface and 13 pressure levels")
+ERA5, SURFACE, UPPER = open_weatherbench_levels()
+LEVELS = [int(x) for x in ERA5.level.values]
 SRC, LAT, LON = era5_source_grid(ERA5)
-SPLITS  = era5_splits(ERA5, val_years=4, test_years=2)
-OFFSETS = lead_offsets(CFG.lead_times_hours)
+plan = resolve_all(ERA5, tuple(SURFACE) + tuple(UPPER), LEVELS, STAGE_YEARS + VAL_YEARS, SRC.num_points,
+                   layers=17, batch=MAX_BATCH, precision="bf16", path=DATA_DIR)
+print(plan.summary())
+R = plan.resolved
+CHANNELS = expand_variables(ERA5, R["variables"], R["levels"])
+WIDTH = len(CHANNELS) + 7                         # room for observation-mask channels, zero-padded
+print(f"\n{upper_air_report(SURFACE, UPPER, LEVELS)}")
+assert not check_weights(SRC), check_weights(SRC)  # poles present, not deleted by cos(latitude)
 
+OFFSETS, SPLITS = lead_offsets((6, 12, 18, 24, 36, 48, 72, 96, 120)), era5_splits(ERA5)
+TRAIN_STEPS = 64 if SMOKE_TEST else max(R["years"] - VAL_YEARS, 1) * 1460
+VAL_STEPS = 48 if SMOKE_TEST else VAL_YEARS * 1460
+common = dict(history=6, lead_steps=OFFSETS, variables=tuple(R["variables"]), levels=R["levels"], channels=WIDTH)
 for name, index in SPLITS.items():
-    print(f"  {name:5} {len(index):>7,} windows  "
-          f"{str(ERA5.time.values[index[0]])[:10]} -> {str(ERA5.time.values[index[-1]])[:10]}")
-print(f"\nlead times {CFG.lead_times_hours} h -> store offsets {OFFSETS}")
-print("split by TIME. Weather is autocorrelated for days, so a random split lets the model")
-print("interpolate between two states it has already seen and report a skill it does not have.")
+    print(f"  {name:5} {str(ERA5.time.values[index[0]])[:10]} -> {str(ERA5.time.values[index[-1]])[:10]}")
+print("split by TIME: weather is autocorrelated for days, so a random split leaks the answer.")
 
-train_stream = ERA5Window(ERA5, indices=SPLITS["train"], history=CFG.history_frames,
-                          lead_steps=OFFSETS, channels=CFG.analysis_channels, stats_cache=STATS)
-print(f"\n{train_stream.normalizer.report()}")
+stream = ERA5Window(ERA5, indices=SPLITS["train"], stats_cache=STATS, **common)
+print(f"\n{stream.normalizer.report()}")
+print(f"\n{corpus_scale(ERA5, tuple(R['variables']))}\n\n{catalogue()}")
 
-if not os.path.exists(CACHE):
-    print(f"\nstaging {STAGE_YEARS} years to local disk (one-off; streaming is 105x slower per window)")
-    materialise(ERA5, SPLITS["train"][-STAGE_YEARS * 1460:], CACHE, normalizer=train_stream.normalizer)
-train_ds = CachedERA5(CACHE, history=CFG.history_frames, lead_steps=OFFSETS,
-                      channels=CFG.analysis_channels, augment=True)
-val_ds = ERA5Window(ERA5, indices=SPLITS["val"], history=CFG.history_frames, lead_steps=OFFSETS,
-                    augment=False, channels=CFG.analysis_channels, stats_cache=STATS)
-print(f"\ntrain {len(train_ds):,} staged windows | validate on {len(val_ds):,} held-out windows")
+if R["streaming"]:
+    print("\nnot enough disk to stage: streaming from the network (~100x slower per window)")
+    train_ds, roll_ds = stream, ERA5Window(ERA5, indices=SPLITS["train"], stats_cache=STATS,
+                                           state_steps=ROLLOUT_STEPS, **common)
+    val_ds = ERA5Window(ERA5, indices=SPLITS["val"], augment=False, stats_cache=STATS,
+                        state_steps=ROLLOUT_STEPS, **common)
+else:
+    # Always called: it returns at once when the staging is complete, and resumes when it is not.
+    materialise(ERA5, SPLITS["train"][-TRAIN_STEPS:], CACHE, variables=tuple(R["variables"]),
+                levels=R["levels"], normalizer=stream.normalizer, workers=8)
+    materialise(ERA5, SPLITS["val"][:VAL_STEPS], VAL_CACHE, variables=tuple(R["variables"]),
+                levels=R["levels"], normalizer=stream.normalizer, workers=8)
+    train_ds = CachedERA5(CACHE, history=6, lead_steps=OFFSETS, channels=WIDTH, augment=True)
+    roll_ds = CachedERA5(CACHE, history=6, lead_steps=OFFSETS, channels=WIDTH, augment=True,
+                         state_steps=ROLLOUT_STEPS)
+    val_ds = CachedERA5(VAL_CACHE, history=6, lead_steps=OFFSETS, channels=WIDTH, augment=False,
+                        state_steps=ROLLOUT_STEPS)
+print(f"\ntrain {len(train_ds):,} windows | validate on {len(val_ds):,} held-out windows")
 
-# ═══ 5 ═══ fill the card, and price the run ════════════════════════════════════════════════════════
+sample = train_ds[0]["analysis"]
+for problem in (check_grid_alignment(SRC, sample[-1, :, train_ds.variables.index("2m_temperature")])
+                + check_normalization(sample, "analysis")):
+    raise SystemExit(f"DATA PROBLEM: {problem}")
+print("data ok: samples land where the grid says, no spike channels")
+
+# ═══ 3 ═══ what each channel IS — decides what a rollout does with it ══════════════════════════════
+stepper = StateStepper.build(roll_ds, input_channels=WIDTH, grid=SRC, samples=8 if SMOKE_TEST else 64)
+print(f"\nchannel roles:\n{stepper.roles.describe()}")
+WEIGHTS = channel_loss_weights(train_ds.variables, WIDTH)
+
+# ═══ 4 ═══ the model ═══════════════════════════════════════════════════════════════════════════════
+banner("MODEL")
+size = (dict(hidden_size=64, num_layers=2, num_heads=2, num_kv_heads=1, head_dim=32, intermediate_size=128,
+             latent_points=512) if SMOKE_TEST else
+        dict(hidden_size=512, num_layers=17, num_heads=8, num_kv_heads=4, head_dim=64, intermediate_size=2048,
+             latent_points=4096))
+CFG = NatureConfig(
+    analysis_channels=WIDTH, satellite_channels=6, environment_channels=8, **size,
+    min_radius_km=120.0, max_radius_km=1600.0, history_frames=6,
+    lead_times_hours=(6, 12, 18, 24, 36, 48, 72, 96, 120), track_modes=6,
+    state_channels=stepper.roles.num_prognostic,        # predict and evolve the whole atmosphere
+    noise_dim=32 if MEMBERS > 1 else 0)                 # per-member noise for the CRPS ensemble
+model = NatureV1(CFG, fibonacci_sphere(CFG.latent_points, num_neighbours=CFG.latent_neighbours,
+                                       cluster_size=CFG.latent_cluster)).to(DEVICE)
+model.gradient_checkpointing_enable(True)
+stepper.grid = SRC.to(DEVICE)
+print(f"NatureV1 {model.num_parameters()/1e6:.2f}M parameters on {DEVICE}; state head over "
+      f"{CFG.state_channels} channels; {MEMBERS}-member ensemble")
+print(format_preflight(preflight(model=model, dataset=train_ds, grid=SRC, strict=True)))
+
+
+def restore(*stages):
+    """Load the newest checkpoint of the first stage that has one -- locally, else from the Hub."""
+    for stage in stages:
+        manager = CheckpointManager(f"{CKPT_DIR}/{stage}", repo_id=HF_REPO)
+        manager.fetch_from_hub()
+        if manager.load(model, map_location=DEVICE) is not None:
+            return stage
+    return None
+
+
+# ═══ 5 ═══ the largest batch that fits, and what the run costs ═════════════════════════════════════
 banner("BENCHMARK — largest batch that fits, and what the run costs")
-model.gradient_checkpointing_enable(GRAD_CKPT)
 
 
 def make_step(batch_size):
-    """One full training step at this batch size, for the autotuner and the benchmark."""
     items = [train_ds[i] for i in range(batch_size)]
-    batch = {k: torch.stack([x[k] for x in items]).to(DEVICE) for k in items[0]}
+    batch = {k: torch.stack([x[k] for x in items]).to(DEVICE) for k in ("analysis", "calendar", "field_target", "field_mask")}
 
     def step():
         with torch.autocast(DEVICE, dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
-            out = model(analysis=batch["analysis"], analysis_grid=SRC,
-                        calendar=batch["calendar"], output_grid=SRC)
-            loss = masked_gaussian_nll(
-                out["field_mean"], out["field_log_var"],
-                torch.where(batch["field_mask"] > 0, batch["field_target"], torch.nan),
-            )
+            out = model(analysis=batch["analysis"], analysis_grid=SRC, calendar=batch["calendar"], output_grid=SRC)
+            loss = masked_gaussian_nll(out["field_mean"], out["field_log_var"],
+                                       torch.where(batch["field_mask"] > 0, batch["field_target"], torch.nan))
         loss.backward()
         model.zero_grad(set_to_none=True)
     return step
 
 
-BATCH = autotune_batch_size(make_step, start=1, target_fraction=0.85)
-MARK  = benchmark_steps(make_step(BATCH), BATCH, gradient_checkpointing=GRAD_CKPT)
-print(f"batch {BATCH} at 85% of VRAM | {MARK}")
-PLAN = training_plan(MARK.samples_per_second, corpus_samples=len(train_ds), epochs=EPOCHS,
-                     watts=600.0, electricity_per_kwh=0.15, cloud_per_hour=2.50)
-print(f"\nstage one, {EPOCHS} epochs:")
-print(format_plan(PLAN))
-MAX_STEPS = int(len(train_ds) * EPOCHS / BATCH)
-print(f"\n  optimizer steps {MAX_STEPS:,}")
+BATCH = min(autotune_batch_size(make_step, start=2 if SMOKE_TEST else 1, target_fraction=0.85), MAX_BATCH)
+if SMOKE_TEST:
+    BATCH = 2
+MARK = benchmark_steps(make_step(BATCH), BATCH, warmup=1, iterations=2 if SMOKE_TEST else 10,
+                       gradient_checkpointing=True)
+print(f"batch {BATCH} | {MARK}")
+print(format_plan(training_plan(MARK.samples_per_second, corpus_samples=len(train_ds), epochs=EPOCHS,
+                                watts=600.0, electricity_per_kwh=0.15, cloud_per_hour=2.50)))
+WORKERS = 2 if SMOKE_TEST else 4
+loader = era5_loader(train_ds, batch_size=BATCH, num_workers=WORKERS, analysis_grid=SRC, output_grid=SRC,
+                     prefetch_factor=2)
+val_loader = era5_loader(val_ds, batch_size=BATCH, num_workers=WORKERS, shuffle=False, analysis_grid=SRC,
+                         output_grid=SRC, prefetch_factor=2)
 
-# ═══ 6 ═══ stage one — pretrain the backbone ═══════════════════════════════════════════════════════
+# ═══ 6 ═══ stage one — every channel, every lead ═══════════════════════════════════════════════════
 if RUN_PRETRAIN:
     banner("STAGE ONE — pretraining on reanalysis")
-    pretrain = TrainSettings(
-        stage="pretrain", learning_rate=3e-4, warmup_steps=1000, max_steps=MAX_STEPS,
-        grad_accum=1, precision="bf16",
-        checkpoint_dir=f"{CKPT_DIR}/stage1", checkpoint_seconds=60,
-        hub_repo=HUB_REPO, hub_push_seconds=900,
-        ema_decay=0.999, log_every=25, val_every=500, val_batches=32,
-    )
-    loader     = era5_loader(train_ds, batch_size=BATCH, num_workers=4, shuffle=True,
-                             analysis_grid=SRC, output_grid=SRC)
-    val_loader = era5_loader(val_ds, batch_size=BATCH, num_workers=2, shuffle=False,
-                             analysis_grid=SRC, output_grid=SRC)
-    trainer = Trainer(model, pretrain, device=DEVICE)
-    trainer.resume()        # picks up wherever the last run died; pulls from the Hub on a fresh VM
+    trainer = Trainer(model, TrainSettings(
+        stage="pretrain", learning_rate=3e-4, warmup_steps=2 if SMOKE_TEST else 1000,
+        precision=R["precision"], max_steps=3 if SMOKE_TEST else int(len(train_ds) * EPOCHS / BATCH),
+        checkpoint_dir=f"{CKPT_DIR}/stage1", checkpoint_seconds=60, hub_repo=HF_REPO,
+        ema_decay=0.999, log_every=1 if SMOKE_TEST else 25, val_every=2 if SMOKE_TEST else 500,
+        val_batches=1 if SMOKE_TEST else 32), device=DEVICE)
+    trainer.resume()
     trainer.fit(loader, epochs=EPOCHS, val_loader=val_loader)
-    print("\nRead the [val] lines: held-out falling = learning. Held-out rising while training")
-    print("keeps falling = memorising, and the gap is how much.")
+    print("held-out falling = learning; held-out rising while training falls = memorising.")
 
-# ═══ 7 ═══ stage two data — best tracks paired with the same reanalysis ════════════════════════════
-banner("STAGE TWO DATA — HURDAT2 best tracks")
-HURDAT = download("https://www.nhc.noaa.gov/data/hurdat/hurdat2-1851-2024-040425.txt",
-                  "/content/hurdat2.txt")
-tracks = parse_hurdat2(HURDAT)
+# ═══ 7 ═══ stage 1b — the whole atmosphere, rolled forward on its own forecasts ════════════════════
+if RUN_ROLLOUT:
+    banner(f"ROLLOUT — {ROLLOUT_STEPS}-step full-state training, {MEMBERS}-member CRPS ensemble")
+    if not RUN_PRETRAIN and restore("stage1") is None:
+        print("!! no stage-one checkpoint: rolling out an untrained backbone. Set RUN_PRETRAIN = True.")
+    steps = 4 if SMOKE_TEST else ROLLOUT_TRAIN
+    roll_loader = era5_loader(roll_ds, batch_size=max(BATCH // 2, 1), num_workers=WORKERS,
+                              analysis_grid=SRC, output_grid=SRC, prefetch_factor=2)
+    train_state_rollout(
+        model, roll_loader, stepper, max_steps=steps,
+        schedule=RolloutSchedule(start_step=max(steps // 10, 1), ramp_steps=max(steps // 2, 1),
+                                 max_steps=3 if SMOKE_TEST else ROLLOUT_STEPS),
+        channel_weights=WEIGHTS, members=MEMBERS, precision=R["precision"],
+        checkpoint_dir=f"{CKPT_DIR}/rollout", hub_repo=HF_REPO, log_every=1 if SMOKE_TEST else 25)
+
+# ═══ 8 ═══ stage two — hurricane heads, on the frozen backbone ═════════════════════════════════════
+banner("STAGE TWO — HURDAT2 best tracks")
+tracks = parse_hurdat2(download("https://www.nhc.noaa.gov/data/hurdat/hurdat2-1851-2024-040425.txt",
+                                os.path.join(DATA_DIR, "hurdat2.txt")))
 print(f"HURDAT2: {len(tracks):,} storms, {sum(len(t) for t in tracks):,} points, "
       f"{sum(int(t.landfall.sum()) for t in tracks):,} landfalls")
-
 walk = rapid_intensification(tracks, threshold_kt=30.0)
 print(f"rapid intensification: {walk['positives']:,} of {walk['eligible']:,} eligible = "
-      f"{100 * walk['base_rate']:.2f}%")
-print("  a classifier that always says 'no' scores 96% here and saves nobody, which is why the RI")
-print("  head uses a focal loss and is judged on precision, recall and Brier score, not accuracy.")
-
-GROUPS      = split_by_storm(tracks)       # by SEASON, never by point
+      f"{100 * walk['base_rate']:.2f}%  (an always-'no' classifier scores {100 - 100 * walk['base_rate']:.0f}%)")
+GROUPS = split_by_storm([t for t in tracks if t.year >= STORM_FIRST_SEASON])
 STORE_TIMES = ERA5.time.values.astype("datetime64[s]").astype(np.int64)
 
 
-def storm_split(which):
-    """Pair one split's storms with the reanalysis hour each was observed at."""
-    starts, targets, report = pair_tracks_with_reanalysis(
-        GROUPS[which], STORE_TIMES, OFFSETS, history=CFG.history_frames)
-    base = ERA5Window(ERA5, indices=starts, history=CFG.history_frames, lead_steps=OFFSETS,
-                      augment=False,       # a rolled globe moves the coastline the storm hit
-                      channels=CFG.analysis_channels, stats_cache=STATS)
-    return StormWindow(base, targets), report
+def paired(which):
+    chosen = GROUPS[which][:3] if SMOKE_TEST else GROUPS[which]
+    starts, targets, report = pair_tracks_with_reanalysis(chosen, STORE_TIMES, OFFSETS, history=6)
+    return starts, targets, report
 
 
-storm_train, train_report = storm_split("train")
-storm_val,   val_report   = storm_split("validation")
-print(f"\n{format_pairing(train_report)}")
-print(f"\n{storm_train.describe()}")
-print(f"\nvalidation: {val_report['paired']:,} samples from {val_report['storms']} unseen storms "
-      f"(seasons 2017/2019/2021)")
-
-# ═══ 8 ═══ stage two — fine-tune the heads, backbone frozen ════════════════════════════════════════
-if RUN_FINETUNE:
-    banner("STAGE TWO — fine-tuning the storm heads")
-
-    # If stage one ran in a previous session, its weights are on disk but not in this process. Load
-    # them before freezing, or the "frozen backbone" is a frozen *untrained* backbone -- which trains
-    # without complaint and produces a model that has never seen the atmosphere.
-    if not RUN_PRETRAIN:
-        from naturev1 import CheckpointManager
-        stage_one = CheckpointManager(f"{CKPT_DIR}/stage1", repo_id=HUB_REPO)
-        stage_one.fetch_from_hub()
-        restored = stage_one.load(model, map_location=DEVICE)
-        if restored is None:
-            print("!! no stage-one checkpoint found. The backbone is UNTRAINED, and freezing it now")
-            print("!! would fine-tune storm heads on random features. Set RUN_PRETRAIN = True first.")
-            raise SystemExit(1)
-        print(f"loaded stage one from {CKPT_DIR}/stage1 (step {restored.step:,})")
-
-    trainable, total = model.freeze_backbone(True)
-    print(f"trainable {trainable:,} of {total:,} ({100 * trainable / total:.1f}%)")
-    print(f"{train_report['paired']:,} storm points cannot fit {total/1e6:.0f}M parameters.")
-    print(f"They can fit {trainable/1e6:.2f}M — on a backbone that saw 1.6e10 values in stage one.")
-
-    finetune = TrainSettings(
-        stage="finetune", learning_rate=1e-4, warmup_steps=200, max_steps=20_000,
-        precision="bf16",
-        checkpoint_dir=f"{CKPT_DIR}/stage2", checkpoint_seconds=60,
-        hub_repo=HUB_REPO, hub_push_seconds=900,
-        ema_decay=0.999, log_every=25, val_every=200, val_batches=32,
-        early_stopping_patience=10,        # 10 held-out passes without improvement -> stop
-    )
-    storm_loader     = era5_loader(storm_train, batch_size=max(BATCH // 2, 1), num_workers=4,
-                                   shuffle=True, analysis_grid=SRC, output_grid=SRC)
-    storm_val_loader = era5_loader(storm_val, batch_size=max(BATCH // 2, 1), num_workers=2,
-                                   shuffle=False, analysis_grid=SRC, output_grid=SRC)
-    storm_trainer = Trainer(model, finetune, device=DEVICE)
-    storm_trainer.resume()
-    storm_trainer.fit(storm_loader, epochs=50, val_loader=storm_val_loader)
-
-    # ─── the honest scoreboard ───
+if RUN_STORMS:
+    if not (RUN_PRETRAIN or RUN_ROLLOUT) and restore("rollout", "stage1") is None:
+        raise SystemExit("no pretrained backbone found. Freezing an untrained one would fine-tune the storm "
+                         "heads on noise -- set RUN_PRETRAIN = True.")
+    (tr_starts, tr_targets, tr_report), (va_starts, va_targets, va_report) = paired("train"), paired("validation")
+    print(f"\n{format_pairing(tr_report)}")
+    print(f"validation: {va_report['paired']:,} samples from {va_report['storms']} unseen storms "
+          f"(seasons 2017/2019/2021)")
+    print("\nreading each storm's reanalysis once and running the frozen backbone over it "
+          "(cached; resumes if interrupted):")
+    bank_train = storm_feature_bank(model, ERA5, stream, tr_starts, tr_targets, SRC,
+                                    cache=f"{CKPT_DIR}/storm_bank_train.pt", precision=R["precision"])
+    bank_val = storm_feature_bank(model, ERA5, stream, va_starts, va_targets, SRC,
+                                  cache=f"{CKPT_DIR}/storm_bank_val.pt", precision=R["precision"])
+    history = train_storm_heads(model, bank_train, bank_val, epochs=3 if SMOKE_TEST else 300,
+                                patience=25, checkpoint_dir=f"{CKPT_DIR}/stage2", hub_repo=HF_REPO)
+    best = min(history, key=lambda h: h["val"])
     banner("SCOREBOARD — is it generalising, or memorising?")
-    held_out = storm_trainer.evaluate(storm_val_loader, max_batches=64)
-    on_train = storm_trainer.evaluate(storm_loader, max_batches=64)
-    gap = held_out["val_total"] - on_train["val_total"]
-    print(f"held-out {held_out['val_total']:.4f}   training {on_train['val_total']:.4f}   gap {gap:+.4f}")
-    print("  a large positive gap means it memorised the training storms\n")
-    for key in sorted(held_out):
-        if key != "val_total":
-            print(f"  {key:24} {held_out[key]:.4f}")
-    print("\nThese are likelihoods, not skill. Skill only means something against a baseline:")
-    print("score persistence ('tomorrow = today') and climatology on these same batches before")
-    print("trusting any forecast this model makes.")
+    print(f"best epoch {best['epoch']}: held-out {best['val']:.4f}  training {best['train']:.4f}  "
+          f"gap {best['val'] - best['train']:+.4f}   (a large positive gap = memorised the training storms)")
+    print(f"\nheld-out storms, seasons never trained on:\n{storm_scorecard(model, bank_val, CFG.lead_times_hours)}")
 
-# ═══ 9 ═══ live forecast from real GOES imagery ════════════════════════════════════════════════════
+# ═══ 9 ═══ did it learn? scorecards against persistence and climatology ════════════════════════════
+if not (RUN_PRETRAIN or RUN_ROLLOUT or RUN_STORMS):
+    print(f"loaded: {restore('stage2', 'rollout', 'stage1') or 'nothing -- untrained'}")
+print(f"\ntraining record (steps per output; 0 = never trained, never shown as a forecast):\n"
+      f"  {model.trained_heads()}")
+
+_probe_stream = iter(val_loader)
+
+
+def _probe():
+    batch = next(_probe_stream)
+    return {"analysis": batch["analysis"].to(DEVICE), "calendar": batch["calendar"].to(DEVICE)}
+
+
+responds, spread = responds_to_input(model, _probe, SRC)
+print(f"\nresponds to the weather: {responds}  (spread {spread:.2e})")
+
+card = state_card = None
+if RUN_SCORE:
+    banner("SCORECARDS — area-weighted, physical units, identical batches for every baseline")
+    climo = build_climatology(train_ds, np.arange(len(train_ds)), WIDTH, SRC.num_points,
+                              samples=4 if SMOKE_TEST else 200)
+    batches = 1 if SMOKE_TEST else 32
+    card = score_model(model, val_loader, SRC, LAT, len(LON), CFG.lead_times_hours,
+                       fields=scoring_fields(train_ds.variables, _target_index(train_ds.variables)),
+                       normalizer=train_ds.normalizer, climatology=climo, max_batches=batches, device=DEVICE)
+    print("surface heads, direct multi-lead:\n" + card.table() + "\n" + card.verdict())
+    state_card = score_state(model, val_loader, stepper, HEADLINE_STATE_FIELDS,
+                             steps=3 if SMOKE_TEST else ROLLOUT_STEPS, climatology=climo,
+                             max_batches=batches, precision=R["precision"])
+    print("\nfull-state rollout (Z500 in m2/s2, as WeatherBench 2 reports it):\n"
+          + state_card.table() + "\n" + state_card.verdict())
+    if MEMBERS > 1 and "geopotential@500" in train_ds.variables:
+        batch = {k: (v.to(DEVICE) if torch.is_tensor(v) else v) for k, v in next(iter(val_loader)).items()}
+        lead = min(4, batch["state_target"].shape[1])
+        ensemble = state_forecast(model, batch, stepper, steps=lead, members=max(MEMBERS, 4),
+                                  precision=R["precision"])
+        z500 = train_ds.variables.index("geopotential@500")
+        ratio = spread_skill_ratio(ensemble[:, -1, ..., z500], batch["state_target"][:, lead - 1, :, z500])
+        print(f"\nZ500 +{6 * lead}h ensemble spread/skill {ratio:.2f}   (1.0 calibrated, <1 overconfident)")
+        if ratio < 0.05:
+            print("  no spread yet: the noise path starts at exactly zero and CRPS training grows it.")
+
+# ═══ 10 ═══ hindcast — a held-out hurricane, from its real analysis ════════════════════════════════
+if RUN_HINDCAST:
+    banner(f"HINDCAST — {HINDCAST[0].title()} {HINDCAST[1]}, a season the model never trained on")
+    storm = next((t for t in tracks if t.name.strip().upper() == HINDCAST[0] and t.year == HINDCAST[1]), None)
+    starts, targets, _ = (pair_tracks_with_reanalysis([storm], STORE_TIMES, OFFSETS, history=6)
+                          if storm is not None else ([], [], None))
+    if not len(starts):
+        print("that storm is not in the reanalysis window (1959-2021); pick another in HINDCAST")
+    else:
+        peak = int(np.nanargmax(storm.max_wind_kt))
+        choice = min(range(len(targets)), key=lambda i: abs(targets[i].point - max(peak - 8, 0)))   # ~48 h before peak
+        target = targets[choice].build()
+        window = ERA5Window(ERA5, indices=starts[choice:choice + 1], augment=False, stats_cache=STATS, **common)[0]
+        issued = dt.datetime.fromtimestamp(float(window["valid_time"]), tz=dt.timezone.utc)
+        with torch.no_grad(), torch.autocast(DEVICE, dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
+            out = model.eval()(analysis=window["analysis"][None].to(DEVICE), analysis_grid=SRC,
+                               calendar=window["calendar"][None].to(DEVICE), output_grid=SRC,
+                               storm_center=target["storm_center"][None].to(DEVICE),
+                               storm_state=target["storm_state"][None].to(DEVICE))
+        out = {k: v.float().cpu() for k, v in out.items()}
+        centre = target["storm_center"].tolist()
+        fc = build_forecast(out, CFG.lead_times_hours, issued, storm_center=centre,
+                            normalizer=train_ds.normalizer, trained=model.trained_heads(), inputs=("analysis",))
+        print(f"issued {issued:%Y-%m-%d %H:%M}Z at {centre[0]:.1f}N {-centre[1]:.1f}W, "
+              f"{float(target['current_wind_kt']):.0f} kt now")
+        if isinstance(fc["track_scenarios"], list):
+            top = fc["track_scenarios"][0]
+            print(f"most likely scenario ({top['probability']:.0%}) vs what happened:")
+            for lead, point in enumerate(top["track"]):
+                if target["track_valid"][lead] > 0:
+                    lat = centre[0] + float(target["track_target"][lead, 0])
+                    lon = centre[1] + float(target["track_target"][lead, 1])
+                    error = 111.2 * np.hypot(point["latitude"] - lat, (point["longitude"] - lon) * np.cos(np.radians(lat)))
+                    wind = ""
+                    if isinstance(fc["intensity"], list):
+                        wind = f"{fc['intensity'][lead]['max_wind_ms'] * 1.94384:5.0f} kt forecast"
+                        if target["intensity_mask"][lead, 0] > 0:
+                            wind += f" / {float(target['intensity_target'][lead, 0]) * 1.94384:3.0f} kt actual"
+                    print(f"  +{point['lead_hours']:3d}h  {point['latitude']:5.1f},{point['longitude']:6.1f}  "
+                          f"actual {lat:5.1f},{lon:6.1f}  error {error:5.0f} km   {wind}")
+        else:
+            print("track head untrained -- run RUN_STORMS first")
+        problems = check_forecast(fc)
+        print("forecast checks: " + ("pass" if not problems else "; ".join(problems)))
+
+# ═══ 11 ═══ publish only if it earned it ═══════════════════════════════════════════════════════════
+if RUN_PUBLISH:
+    cards = [c for c in (state_card, card) if c is not None]
+    beats = [s for c in cards for s in c.scores if s.beats_persistence]
+    if not cards:
+        print("\nnot publishing: nothing was scored (set RUN_SCORE = True).")
+    elif not responds:
+        print("\nnot publishing: the model gives the same answer whatever weather it is shown.")
+    elif not beats:
+        print("\nnot publishing: it loses to persistence at every field and lead.")
+    else:
+        url = push_to_hub(model, HF_REPO, normalizer=train_ds.normalizer, scorecard=cards[0], name="NatureV1",
+                          author="Nathan", token=HF_TOKEN or None,
+                          training_data=f"ERA5 (WeatherBench 2), {len(CHANNELS)} channels, {R['years']} years; "
+                                        f"full-state {ROLLOUT_STEPS}-step rollout, {MEMBERS}-member CRPS; "
+                                        f"HURDAT2 {STORM_FIRST_SEASON}+ for the storm heads.")
+        print(f"\npublished: {url}  (beats persistence on {len(beats)} field-lead pairs)")
+
+# ═══ 12 ═══ live forecast from GOES — only once that input path is trained ═════════════════════════
 def load_scene(paths, center, half_width_deg=9.0, stride=4):
     """Geolocated samples plus true pixel footprints, cropped to a real box on the planet."""
-    scene = scene_from_netcdf(
-        {c: str(p) for c, p in paths.items()},
-        bounds=(center[0] - half_width_deg, center[0] + half_width_deg,
-                center[1] - half_width_deg, center[1] + half_width_deg),
-        stride=stride,
-    )
-    coords = torch.tensor(
-        np.stack([np.radians(scene.latitude), np.radians(scene.longitude) % (2 * np.pi)], -1),
-        dtype=torch.float64,
-    )
+    scene = scene_from_netcdf({c: str(p) for c, p in paths.items()}, stride=stride,
+                              bounds=(center[0] - half_width_deg, center[0] + half_width_deg,
+                                      center[1] - half_width_deg, center[1] + half_width_deg))
+    coords = torch.tensor(np.stack([np.radians(scene.latitude), np.radians(scene.longitude) % (2 * np.pi)], -1),
+                          dtype=torch.float64)
     grid = FieldGrid.from_points(coords, Geometry.globe(), num_neighbours=16, cluster_size=64,
                                  weights=torch.tensor(scene.area_km2, dtype=torch.float64))
     values = torch.tensor(normalize_channels(scene.values, scene.channels), dtype=torch.float32)
-    pad = CFG.satellite_channels - values.shape[-1]
-    if pad > 0:
-        values = torch.cat([values, torch.zeros(values.shape[0], pad)], -1)
+    if CFG.satellite_channels > values.shape[-1]:
+        values = torch.cat([values, torch.zeros(values.shape[0], CFG.satellite_channels - values.shape[-1])], -1)
     return grid, values, scene
 
 
 @torch.no_grad()
 def forecast_now(storm=STORM, city=CITY):
-    paths = fetch_latest(DATA_DIR, CHANNELS, satellite="east", product="conus")
+    paths = fetch_latest(os.path.join(DATA_DIR, "goes"), ("C13", "C09"), satellite="east", product="conus")
     grid, values, scene = load_scene(paths, storm)
     print(scene)
     frames = CFG.history_frames
-    sat = values[None, None].expand(1, frames, -1, -1).contiguous().to(DEVICE)
-    cal = calendar_features(torch.full((1, frames), scene.timestamp.timestamp())).to(DEVICE)
     out_grid = fibonacci_sphere(2000, num_neighbours=16, cluster_size=50)
-    model.eval()
-    out = model(satellite=sat, satellite_grid=grid, calendar=cal,
-                output_grid=out_grid, neighbours=12)
-    return build_forecast(out, CFG.lead_times_hours, scene.timestamp,
-                          storm_center=storm, output_grid=out_grid, point_of_interest=city)
+    out = model.eval()(satellite=values[None, None].expand(1, frames, -1, -1).contiguous().to(DEVICE),
+                       satellite_grid=grid, output_grid=out_grid, neighbours=12,
+                       calendar=calendar_features(torch.full((1, frames), scene.timestamp.timestamp())).to(DEVICE),
+                       storm_center=torch.tensor([storm], dtype=torch.float32, device=DEVICE))
+    return build_forecast({k: v.float().cpu() for k, v in out.items()}, CFG.lead_times_hours, scene.timestamp,
+                          storm_center=storm, output_grid=out_grid, point_of_interest=city,
+                          normalizer=train_ds.normalizer, trained=model.trained_heads(), inputs=("satellite",))
 
 
 def show(fc):
-    print(f"\nissued {fc['issued']}   ENSO {fc['enso']['phase']} ({fc['enso']['nino34_index']:+.2f})")
-    print(f"landfall: {({k: v for k, v in fc['landfall'].items() if k != 'by_lead'})}")
-    print("\ntrack scenarios at +48 h:")
-    for s in fc["track_scenarios"][:4]:
-        p = s["track"][5]
-        print(f"  {s['probability']:>5.0%}  -> {p['latitude']:6.2f},{p['longitude']:7.2f}   "
-              f"95% cone {p['cone_radius_km_95']:.0f} km")
-    print("\neyewall:")
-    for e in fc["eyewall"][:4]:
-        print(f"  +{e['lead_hours']:3d}h  peak {e['peak_wind_kt']:5.0f} kt  {e['saffir_simpson']:<12} "
-              f"RMW {e['rmw_nmi']:4.0f} nmi   34kt NE {e['wind_radii_nmi']['34kt']['NE']:.0f} nmi")
-    ri = fc["rapid_intensification"]
-    print(f"\nrapid intensification (24 h): 25kt {ri['probability_25kt']:.0%}  "
-          f"30kt {ri['probability_30kt']:.0%}  35kt {ri['probability_35kt']:.0%}")
-    print(f"  expected change {ri['expected_change_kt']:+.0f} kt {ri['expected_change_90pct']}  "
-          f"likeliest onset +{ri['likeliest_onset_hours']}h")
-    pf = fc["point_forecast"]["forecast"][3]
-    print(f"\nlocal +{pf['lead_hours']}h: {pf['weather']} ({pf['weather_confidence']:.0%})")
+    print(f"\nissued {fc['issued']}   trustworthy: {fc['trustworthy']}")
+    for key in ("warning", "note"):
+        if key in fc:
+            print(f"  !! {fc[key]}")
+    for section in ("enso", "landfall", "track_scenarios", "eyewall", "rapid_intensification"):
+        value = fc.get(section)
+        if isinstance(value, dict) and value.get("available") is False:
+            print(f"  {section}: not available -- {value['reason']}")
+    if isinstance(fc.get("track_scenarios"), list):
+        for s in fc["track_scenarios"][:4]:
+            p = s["track"][5]
+            print(f"  {s['probability']:>5.0%} -> +{p['lead_hours']}h {p['latitude']:6.2f},{p['longitude']:7.2f}"
+                  f"  95% cone {p['cone_radius_km_95']:.0f} km")
+    print("  checks: " + ("pass" if not check_forecast(fc) else "; ".join(check_forecast(fc))))
 
 
-if RUN_FORECAST:
-    banner("LIVE FORECAST — newest GOES scene")
-    show(forecast_now())
+if RUN_FORECAST or RUN_WATCHER:
+    if model.trained_heads()["satellite_encoder"] == 0:
+        print("\nlive GOES forecast refused: no training stage has ever fed this model satellite imagery, so "
+              "its satellite encoder is at initialisation and every number it produced would be noise shaped "
+              "like a forecast. Use the HINDCAST section, which runs from the analysis the model was trained on.")
+    elif RUN_FORECAST:
+        banner("LIVE FORECAST — newest GOES scene")
+        show(forecast_now())
 
-# ═══ 10 ═══ hourly watcher ═════════════════════════════════════════════════════════════════════════
+
 def on_new_scene(paths):
     result = forecast_now()
+    os.makedirs(os.path.join(DATA_DIR, "forecasts"), exist_ok=True)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M")
-    os.makedirs("./forecasts", exist_ok=True)
-    with open(f"./forecasts/forecast_{stamp}.json", "w") as handle:
+    with open(os.path.join(DATA_DIR, "forecasts", f"forecast_{stamp}.json"), "w") as handle:
         json.dump(result, handle, indent=2)
-    top = result["track_scenarios"][0]
-    print(f"  most likely ({top['probability']:.0%}): +120h -> "
-          f"{top['track'][-1]['latitude']:.2f},{top['track'][-1]['longitude']:.2f}")
-    print(f"  landfall peak probability {result['landfall']['peak_probability']:.0%}")
+    show(result)
 
 
-if RUN_WATCHER:
+if RUN_WATCHER and model.trained_heads()["satellite_encoder"] > 0:
     banner("WATCHING — a new forecast every hour")
-    watch(on_new_scene, interval_seconds=3600, directory=DATA_DIR, channels=CHANNELS)
+    watch(on_new_scene, interval_seconds=3600, directory=os.path.join(DATA_DIR, "goes"), channels=("C13", "C09"))

@@ -108,6 +108,12 @@ def weighted_acc(prediction: torch.Tensor, truth: torch.Tensor, climatology: tor
     return float(covariance / torch.sqrt(pred_power * true_power).clamp_min(1e-12))
 
 
+#: How much better than a baseline counts as beating it. A model that is persistence plus rounding
+#: error "beats" persistence by 0.001% -- which is a tie, and the verdict must say so rather than
+#: report skill that is not there.
+SKILL_MARGIN = 0.01
+
+
 @dataclass
 class Score:
     """One field at one lead time, for the model and for the baselines it has to beat."""
@@ -125,6 +131,14 @@ class Score:
         if not self.persistence_rmse:
             return None
         return 1.0 - self.rmse / self.persistence_rmse
+
+    @property
+    def beats_persistence(self) -> bool:
+        return (self.skill_vs_persistence or 0.0) > SKILL_MARGIN
+
+    @property
+    def beats_climatology(self) -> bool:
+        return (self.skill_vs_climatology or 0.0) > SKILL_MARGIN
 
     @property
     def skill_vs_climatology(self) -> float | None:
@@ -175,20 +189,28 @@ class Scorecard:
 
     def verdict(self) -> str:
         """The one line that says whether any of this was worth it."""
-        beats_persistence = [s for s in self.scores if (s.skill_vs_persistence or 0) > 0]
-        beats_climatology = [s for s in self.scores if (s.skill_vs_climatology or 0) > 0]
+        margin = f"{SKILL_MARGIN:.0%}"
+        beats_persistence = [s for s in self.scores if s.beats_persistence]
+        beats_climatology = [s for s in self.scores if s.beats_climatology]
+        both = [s for s in self.scores if s.beats_persistence and s.beats_climatology]
+        ties = [s for s in self.scores if s.skill_vs_persistence is not None
+                and abs(s.skill_vs_persistence) <= SKILL_MARGIN]
         total = len(self.scores)
         lines = [
-            f"beats persistence on {len(beats_persistence)}/{total} field-lead pairs",
-            f"beats climatology on {len(beats_climatology)}/{total}",
+            f"beats persistence by more than {margin} on {len(beats_persistence)}/{total} field-lead pairs"
+            + (f" (ties it on {len(ties)})" if ties else ""),
+            f"beats climatology by more than {margin} on {len(beats_climatology)}/{total}",
         ]
         if not beats_persistence:
-            lines.append("-> not a forecast yet: doing nothing scores better at every lead.")
-        elif not beats_climatology:
-            lines.append("-> beats persistence but not climatology: it knows the season, not the weather.")
+            lines.append(f"-> not a forecast yet: nowhere better than persistence by more than {margin}.")
+        elif not both:
+            lines.append("-> beats persistence only where climatology is better still: it knows the season, "
+                         "not the weather.")
         else:
-            longest = max(beats_climatology, key=lambda s: s.lead_hours)
-            lines.append(f"-> genuine skill out to at least +{longest.lead_hours}h.")
+            longest = max(both, key=lambda s: s.lead_hours)
+            fields = sorted({s.field for s in both})
+            lines.append(f"-> skill against both baselines out to +{longest.lead_hours}h "
+                         f"({', '.join(fields)}).")
         return "\n".join(lines)
 
 

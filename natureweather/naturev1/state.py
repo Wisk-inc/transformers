@@ -709,6 +709,8 @@ def train_state_rollout(
     optimizer = torch.optim.AdamW([{"params": decay, "weight_decay": weight_decay},
                                    {"params": no_decay, "weight_decay": 0.0}],
                                   lr=learning_rate, betas=(0.9, 0.95))
+    # Warmup is capped at a tenth of the run, so a short run is not spent entirely warming up.
+    warmup_steps = min(warmup_steps, max(max_steps // 10, 1))
     scheduler = build_scheduler(optimizer, TrainSettings(warmup_steps=warmup_steps, max_steps=max_steps))
 
     manager = state = None
@@ -729,6 +731,7 @@ def train_state_rollout(
     params = [p for p in model.parameters() if p.requires_grad]
     model.train()
     started = time.time() - state.wall_seconds
+    last_log = [time.time(), state.step]
     try:
         while state.step < max_steps:
             seen = 0
@@ -753,10 +756,16 @@ def train_state_rollout(
                 if state.step % log_every == 0 or state.step == 1:
                     spread = parts.get("spread_1")
                     state.history.append({"step": state.step, **parts})
+                    # Time per step grows with the horizon, so the estimate is for the current one.
+                    now = time.time()
+                    pace = (now - last_log[0]) / max(state.step - last_log[1], 1)
+                    last_log[:] = [now, state.step]
+                    left = pace * (max_steps - state.step) / 3600
                     print(f"[state] step {state.step:>7,}/{max_steps:,}  horizon {horizon:>2}  "
                           f"loss {float(loss):.4f}  drift {parts['state_drift']:+.4f}"
                           + (f"  spread {spread:.4f}" if spread is not None else "")
-                          + f"  lr {scheduler.get_last_lr()[0]:.2e}", flush=True)
+                          + f"  lr {scheduler.get_last_lr()[0]:.2e}  {pace:.1f} s/step  ~{left:.1f} h left",
+                          flush=True)
                 save()
             if seen == 0:
                 raise ValueError("the loader produced no batches: the dataset is smaller than one batch "

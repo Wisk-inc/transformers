@@ -240,7 +240,38 @@ well determined.
 
 ---
 
-## 10. What is not claimed
+## 10. What 0.8 added, and why each one helps accuracy
+
+**Full-state residual prediction.** A `state_head` predicts the 6-hour *change* of every prognostic
+channel — all 86 of them, including all 13 pressure levels — rather than seven surface fields. Before
+this, a 12-step rollout froze 84 of 89 channels: Z500 never moved. The head is zero-initialised, so an
+untrained model is *exactly* persistence and training can only move it from the strongest trivial
+baseline. Changes are scaled by each channel's own 6-hour tendency spread (0.067σ for Z500, 1.08σ for
+ω@500), so no channel dominates the gradient by being volatile.
+
+**Channel roles.** Every input channel is prognostic (predicted), forcing (recomputed) or static
+(carried). Top-of-atmosphere solar radiation is computed from orbital geometry at each step's valid time,
+matching ERA5 at correlation 1.00000; it rotates with an augmented globe.
+
+**Physical constraints.** Mass conservation removes any change in the area-weighted mean surface pressure
+each step. Pressure levels are weighted in proportion to pressure (GraphCast), and every loss is
+area-weighted — the same weighting the WeatherBench score uses.
+
+**Fair-CRPS ensembles.** Per-member noise enters before the processor; a fair CRPS over members trains
+sharp members with calibrated spread. A model trained on squared error learns the conditional mean, and
+the mean of all the ways a hurricane could go is a weak, smeared vortex — the documented intensity low
+bias of deterministic AI models.
+
+**Storm-centred heads.** Storm heads used to read a mean over the whole planet, so two storms at the same
+hour got identical answers. They now pool the mesh around the storm (Gaussian, 500 km), and are told
+where it is and what it is doing: current intensity and 12-hour motion — the predictors every operational
+intensity scheme starts from, and exactly what a 1.5° reanalysis cannot show.
+
+**A training record.** Every output counts its optimizer steps, saved with the weights. Forecasts show a
+section only if its head was trained, and refuse outright when the input path (e.g. GOES imagery) never
+was.
+
+## 11. What is not claimed
 
 **No weights here have been trained.** The architecture, losses, ingest and training loop are complete and
 exercised end to end on real data, but no accuracy has been measured, and nothing here should inform a

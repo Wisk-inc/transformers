@@ -498,3 +498,17 @@ def test_every_advertised_name_exists():
     for package in (naturev1, ihelix):
         missing = [name for name in package.__all__ if not hasattr(package, name)]
         assert not missing, f"{package.__name__}.__all__ lists names it does not define: {missing}"
+
+
+def test_a_tie_with_persistence_is_not_skill():
+    """234.954 against 234.956 is a tie; the verdict used to call it genuine skill."""
+    from naturev1.wb2 import Score, Scorecard
+
+    card = Scorecard([Score("z500", 6, 234.954, 0.97, 234.956, 1064.0),
+                      Score("z500", 12, 361.709, 0.94, 361.714, 1066.0)])
+    verdict = card.verdict()
+    assert "not a forecast yet" in verdict and "ties it on 2" in verdict
+    assert not any(score.beats_persistence for score in card.scores)
+
+    better = Scorecard([Score("z500", 24, 300.0, 0.9, 400.0, 1000.0)])
+    assert "skill against both baselines out to +24h (z500)" in better.verdict()

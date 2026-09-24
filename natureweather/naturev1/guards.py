@@ -426,7 +426,10 @@ def preflight(
         analysis = item["analysis"]
         problems += check_normalization(analysis, "analysis")
         if grid is not None:
-            problems += check_grid_alignment(grid, analysis[-1, :, 0])
+            # The probe needs a temperature-like channel; channel 0 is one only by convention.
+            variables = list(getattr(dataset, "variables", []))
+            probe = variables.index("2m_temperature") if "2m_temperature" in variables else 0
+            problems += check_grid_alignment(grid, analysis[-1, :, probe])
         if "field_target" in item:
             target = item["field_target"]
             if torch.isnan(target).any():
