@@ -118,8 +118,14 @@ COLAB_DRIVE = "/content/drive/MyDrive"
 DATA_DIR = "/content" if os.path.isdir("/content") else os.path.expanduser("~/naturev1_data")
 CKPT_DIR = (f"{COLAB_DRIVE}/naturev1_ckpt" if os.path.isdir(COLAB_DRIVE)       # Drive outlives the VM
             else os.path.join(DATA_DIR, "naturev1_ckpt"))
+if SMOKE_TEST:
+    # The smoke run's tiny model and 64-step staging live apart from the real run's, and never go to
+    # the Hub -- so switching SMOKE_TEST off starts the real 89M model clean.
+    CKPT_DIR, HF_REPO = os.path.join(CKPT_DIR, "smoke"), None
 os.makedirs(DATA_DIR, exist_ok=True)
-CACHE, VAL_CACHE, STATS = (os.path.join(DATA_DIR, name) for name in ("era5.npy", "era5_val.npy", "stats.json"))
+_prefix = "smoke_" if SMOKE_TEST else ""
+CACHE, VAL_CACHE = (os.path.join(DATA_DIR, _prefix + name) for name in ("era5.npy", "era5_val.npy"))
+STATS = os.path.join(DATA_DIR, "stats.json")          # normalization statistics are the same for both
 
 
 def banner(text):
@@ -187,7 +193,8 @@ print(f"\nchannel roles:\n{stepper.roles.describe()}")
 WEIGHTS = channel_loss_weights(train_ds.variables, WIDTH)
 
 # ═══ 4 ═══ the model ═══════════════════════════════════════════════════════════════════════════════
-banner("MODEL")
+banner("MODEL" + ("  (SMOKE TEST: a 0.4M-parameter model to check the pipeline; SMOKE_TEST = False "
+                   "builds the real 89M one)" if SMOKE_TEST else ""))
 size = (dict(hidden_size=64, num_layers=2, num_heads=2, num_kv_heads=1, head_dim=32, intermediate_size=128,
              latent_points=512) if SMOKE_TEST else
         dict(hidden_size=512, num_layers=17, num_heads=8, num_kv_heads=4, head_dim=64, intermediate_size=2048,
