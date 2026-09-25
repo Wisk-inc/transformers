@@ -33,6 +33,18 @@ LOG = "train.log"
 PID = "train.pid"
 SCRIPT = "naturev1_pipeline.py"
 RUNNER = "naturev1_runner.py"
+SUPERVISOR = "naturev1_supervisor.py"
+HEARTBEAT = "heartbeat"
+
+#: The supervisor loads this file directly rather than importing the package, so it stays a small
+#: process that never imports torch and never touches the GPU the run is using.
+_SUPERVISOR = """import importlib.util
+spec = importlib.util.spec_from_file_location("naturev1_launch", {module!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.supervise({runner!r}, {home!r}, stall_minutes={stall_minutes!r}, max_restarts={max_restarts!r},
+                 poll_seconds={poll_seconds!r})
+"""
 
 #: The runner is what the process executes. It exists for one reason: a DataLoader that uses the
 #: ``spawn`` start method re-imports the main module in every worker, and a pipeline script run as
@@ -78,7 +90,8 @@ def _alive(pid: int) -> bool:
     cmdline = Path(f"/proc/{pid}/cmdline")
     if cmdline.exists():
         # A recycled pid belonging to some other program is not our run.
-        return RUNNER.encode() in cmdline.read_bytes() or b"naturev1" in cmdline.read_bytes()
+        text = cmdline.read_bytes()
+        return RUNNER.encode() in text or SUPERVISOR.encode() in text or b"naturev1" in text
     return True
 
 
@@ -95,7 +108,8 @@ def status(directory: str | os.PathLike | None = None) -> dict | None:
 
 
 def launch(directory: str | os.PathLike | None = None, script: str | os.PathLike | None = None,
-           restart: bool = False, **settings) -> int:
+           restart: bool = False, supervise: bool = True, stall_minutes: float = 30.0,
+           max_restarts: int = 20, poll_seconds: float = 30.0, **settings) -> int:
     """
     Start the training pipeline as a background process on this machine. Returns its pid.
 
@@ -107,10 +121,16 @@ def launch(directory: str | os.PathLike | None = None, script: str | os.PathLike
     Only one run at a time: two would fight over the GPU and write the same checkpoints. If one is
     already going, this says so and returns its pid; ``restart=True`` stops it first.
 
+    With ``supervise`` (the default) the run is watched, and brought back when it stops for any reason
+    but finishing: a crash, an out-of-memory error, a cloud read that hangs, a worker that deadlocks.
+    See :func:`supervise`.
+
     Args:
         settings: any setting from the top of the cell, by name -- ``ROLLOUT_TRAIN=1000``,
-            ``SMOKE_TEST=True``, ``RUN_PUBLISH=True``. ``HF_TOKEN`` is passed through the environment,
-            never written into the script on disk.
+            ``RUN_PUBLISH=True``. ``HF_TOKEN`` is passed through the environment, never written into the
+            script on disk.
+        stall_minutes: with ``supervise``, restart a run that has made no progress for this long.
+        max_restarts: with ``supervise``, give up after this many restarts in total.
         script: run this file instead of the packaged pipeline (for testing).
     """
     home = data_directory(directory)
@@ -123,7 +143,7 @@ def launch(directory: str | os.PathLike | None = None, script: str | os.PathLike
     if running:
         stop(home)
 
-    environment = dict(os.environ, PYTHONUNBUFFERED="1")
+    environment = dict(os.environ, PYTHONUNBUFFERED="1", NATUREV1_BACKGROUND_CHILD="1")
     token = settings.pop("HF_TOKEN", None) or settings.pop("hf_token", None)
     if token:
         environment["HF_TOKEN"] = token
@@ -139,20 +159,148 @@ def launch(directory: str | os.PathLike | None = None, script: str | os.PathLike
 
     log = home / LOG
     stamp = dt.datetime.now().isoformat(timespec="seconds")
+    shown = {k: ("<set>" if "TOKEN" in k.upper() else v) for k, v in settings.items()}
+    command = [sys.executable, "-u", str(runner)]
+    if supervise:
+        watcher = home / SUPERVISOR
+        watcher.write_text(_SUPERVISOR.format(module=str(Path(__file__).resolve()), runner=str(runner),
+                                              home=str(home), stall_minutes=float(stall_minutes),
+                                              max_restarts=int(max_restarts),
+                                              poll_seconds=float(poll_seconds)))
+        command = [sys.executable, "-u", str(watcher)]
     with open(log, "a") as handle:
-        handle.write(f"\n{'=' * 99}\n[launch] {stamp}  settings {settings or 'defaults'}\n{'=' * 99}\n")
+        handle.write(f"\n{'=' * 99}\n[launch] {stamp}  settings {shown or 'defaults'}"
+                     f"{'  (supervised)' if supervise else ''}\n{'=' * 99}\n")
         process = subprocess.Popen(
-            [sys.executable, "-u", str(runner)], cwd=str(home), env=environment,
+            command, cwd=str(home), env=environment,
             stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT,
             start_new_session=True,          # detached: its own session, not the notebook's child
         )
     (home / PID).write_text(json.dumps({"pid": process.pid, "started": stamp, "log": str(log),
-                                        "settings": {k: repr(v) for k, v in settings.items()}}))
+                                        "supervised": bool(supervise),
+                                        "settings": {k: repr(v) for k, v in shown.items()}}))
     print(f"[launch] training started in the background (pid {process.pid}).\n"
-          f"         It keeps running if this notebook disconnects or restarts.\n"
+          f"         It keeps running if this notebook disconnects or restarts"
+          f"{', and restarts itself if it crashes or stalls' if supervise else ''}.\n"
           f"         Log: {log}\n"
           f"         naturev1.follow() shows progress; naturev1.stop() ends it.")
     return process.pid
+
+
+def supervise(runner: str, directory: str, stall_minutes: float = 30.0, max_restarts: int = 20,
+              poll_seconds: float = 30.0, quick_failure_seconds: float = 600.0,
+              max_quick_failures: int = 3) -> None:
+    """
+    Run the pipeline, and bring it back whenever it stops for any reason other than finishing.
+
+    Every loop in the pipeline that makes progress -- a training step, a staged chunk, a storm, a
+    scored batch -- touches a heartbeat file (:func:`naturev1.heartbeat.beat`). A run whose heartbeat is
+    older than ``stall_minutes`` is stuck, whatever the cause: a cloud read that never returns, a
+    deadlocked DataLoader worker, a GPU driver that has stopped answering. It is stopped and started
+    again, and resumes from its last checkpoint -- at most a minute behind.
+
+    A run that crashes is restarted too, after a pause that grows with each restart. But a run that
+    fails within ``quick_failure_seconds`` of starting, ``max_quick_failures`` times in a row, is not
+    unlucky: it is broken, and restarting it forever would only hide the error. Then the supervisor
+    stops and says so, and the error is in the log above.
+    """
+    home = Path(directory)
+    log, heartbeat, marker = home / LOG, home / HEARTBEAT, home / PID
+    environment = dict(os.environ, NATUREV1_HEARTBEAT=str(heartbeat))
+    stopping, child = [False], [None]
+
+    def say(message: str) -> None:
+        with open(log, "a") as handle:
+            handle.write(f"[supervisor] {dt.datetime.now().isoformat(timespec='seconds')}  {message}\n")
+
+    def on_stop(signum, frame):
+        stopping[0] = True
+        if child[0] is not None and child[0].poll() is None:
+            try:
+                os.kill(child[0].pid, signal.SIGTERM)       # the run checkpoints on its way out
+            except ProcessLookupError:
+                pass
+
+    signal.signal(signal.SIGTERM, on_stop)
+    signal.signal(signal.SIGINT, on_stop)
+
+    def end_child(grace: float) -> None:
+        process = child[0]
+        try:
+            os.kill(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        deadline = time.time() + grace
+        while time.time() < deadline and process.poll() is None:
+            time.sleep(0.5)
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        process.wait()
+
+    restarts = quick = 0
+    while True:
+        heartbeat.write_text(f"{time.time():.0f} starting\n")
+        started = time.time()
+        with open(log, "a") as handle:
+            child[0] = subprocess.Popen([sys.executable, "-u", runner], cwd=str(home), env=environment,
+                                        stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT,
+                                        start_new_session=True)
+        try:
+            info = json.loads(marker.read_text())
+            info["child"] = child[0].pid
+            marker.write_text(json.dumps(info))
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        stalled, checked = False, time.time()
+        while child[0].poll() is None and not stopping[0]:
+            time.sleep(min(1.0, poll_seconds))              # wakes every second, so a stop is prompt
+            if time.time() - checked < poll_seconds:
+                continue
+            checked = time.time()
+            try:
+                age = time.time() - heartbeat.stat().st_mtime
+                last = heartbeat.read_text().strip().partition(" ")[2]
+            except OSError:
+                age, last = 0.0, ""
+            if age > stall_minutes * 60 and child[0].poll() is None:
+                stalled = True
+                say(f"no progress for {age / 60:.0f} min (last: {last or 'nothing'}) -- stopping the run "
+                    "to restart it from its last checkpoint")
+                end_child(grace=90.0)
+        if stopping[0]:
+            end_child(grace=120.0)
+            say("stopped on request")
+            return
+        code = child[0].wait()
+        if code == 0 and not stalled:
+            say("the pipeline finished")
+            return
+
+        ran = time.time() - started
+        quick = quick + 1 if ran < quick_failure_seconds else 0
+        restarts += 1
+        reason = "stalled" if stalled else f"exited with code {code}"
+        if quick >= max_quick_failures:
+            say(f"the run {reason} within {quick_failure_seconds / 60:.0f} min of starting, {quick} times in "
+                "a row: that is an error, not a stall or a dropped connection. Not restarting -- the "
+                "cause is in the lines above.")
+            return
+        if restarts > max_restarts:
+            say(f"{max_restarts} restarts used up; not restarting. The last error is above.")
+            return
+        pause = min(60 * restarts, 600) if poll_seconds >= 5 else poll_seconds
+        say(f"the run {reason} after {ran / 60:.0f} min; restart {restarts} of {max_restarts} in "
+            f"{pause:.0f} s, from its last checkpoint")
+        deadline = time.time() + pause
+        while time.time() < deadline and not stopping[0]:
+            time.sleep(min(1.0, pause))
+        if stopping[0]:
+            say("stopped on request")
+            return
 
 
 def follow(lines: int = 40, directory: str | os.PathLike | None = None) -> str:
@@ -197,21 +345,24 @@ def stop(directory: str | os.PathLike | None = None, wait: float = 60.0) -> bool
         print("[stop] nothing is running")
         return False
     pid = int(running["pid"])
+    child = running.get("child")
     # The main process only: its DataLoader workers are shut down by it on the way out. Signalling the
-    # whole group would kill the workers first and fail the step the trainer is trying to finish.
+    # whole group would kill the workers first and fail the step the trainer is trying to finish. A
+    # supervisor passes the signal on to the run it is watching and does not restart it.
     try:
         os.kill(pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         pass
     deadline = time.time() + wait
-    while time.time() < deadline and _alive(pid):
+    while time.time() < deadline and (_alive(pid) or (child and _alive(int(child)))):
         time.sleep(1.0)
-    if _alive(pid):
-        try:
-            os.killpg(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        time.sleep(1.0)
+    for leftover in (child, pid):
+        if leftover and _alive(int(leftover)):
+            try:
+                os.killpg(int(leftover), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    time.sleep(1.0)
     (home / PID).unlink(missing_ok=True)
     print(f"[stop] run {pid} ended; re-launching resumes from its last checkpoint")
     return True

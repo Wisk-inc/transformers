@@ -101,9 +101,14 @@ def resolve_variables(dataset, wanted, levels=None, plan: Plan | None = None):
 
 
 def resolve_staging(years: int, channels: int, points: int, path: str = ".",
-                    headroom: float = 1.3, plan: Plan | None = None):
+                    headroom: float = 1.3, plan: Plan | None = None, staged=()):
     """
     Stage as many years as the disk will actually hold, rather than filling it and dying.
+
+    ``staged`` names the staging files this run would reuse or replace. Their size counts as available:
+    measured against free space alone, a finished staging made the next run's plan smaller -- 45 GB
+    of ERA5 on disk is 45 GB less free -- the smaller plan did not match the file, and the file was
+    downloaded all over again. With it, the same request gives the same plan whatever is on disk.
 
     Returns:
         ``(years, streaming, plan)``. ``streaming`` is True when nothing fits and the run must read
@@ -118,6 +123,9 @@ def resolve_staging(years: int, channels: int, points: int, path: str = ".",
     except OSError:
         plan.note("staging", "as asked", "a disk check", f"cannot stat {path}")
         return years, False, plan
+    from pathlib import Path
+
+    free_gb += sum(Path(name).stat().st_size for name in staged if Path(name).exists()) / 1e9
 
     affordable = int(free_gb / (per_year_gb * headroom))
     if affordable >= years:
@@ -210,7 +218,7 @@ def with_retry(call, attempts: int = 4, delay: float = 2.0, what: str = "request
 
 
 def resolve_all(dataset, wanted, levels, years: int, points: int, layers: int,
-                batch: int, precision: str = "bf16", path: str = ".") -> Plan:
+                batch: int, precision: str = "bf16", path: str = ".", staged=()) -> Plan:
     """
     Every fallback in one call, returning the configuration a run will actually use.
 
@@ -223,7 +231,7 @@ def resolve_all(dataset, wanted, levels, years: int, points: int, layers: int,
     from .era5 import expand_variables
 
     channels = len(expand_variables(dataset, kept, levels))
-    years, streaming, plan = resolve_staging(years, channels, points, path, plan=plan)
+    years, streaming, plan = resolve_staging(years, channels, points, path, plan=plan, staged=staged)
     precision, plan = resolve_precision(precision, plan)
     batch, plan = resolve_batch(batch, points, channels, layers, plan=plan)
 

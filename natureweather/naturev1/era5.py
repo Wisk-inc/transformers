@@ -63,6 +63,7 @@ import numpy as np
 import torch
 
 from .corpora import latlon_to_coords, open_weatherbench
+from .heartbeat import beat
 from .model import SURFACE_FIELDS, calendar_features
 
 
@@ -811,34 +812,75 @@ def materialise(
     gigabytes = float(np.prod(shape)) * np.dtype(dtype).itemsize / 1e9
     marker = path.with_suffix(".progress.json")
 
-    # Already finished with exactly this request: nothing to do. Without this, the only safe thing a
-    # notebook could do was skip staging when the file existed -- which also skipped it when a previous
-    # run had died at 4%, and then trained on a file that was 96% empty.
+    # What is already on disk is never thrown away. Three cases, in order:
+    #  * a finished staging that covers every step asked for -- exactly, or more -- is used as it is;
+    #  * one that covers part of it is the start of a bigger one: its steps are copied across from
+    #    disk and only the new ones are downloaded;
+    #  * a download that died part-way resumes, but only into a file for exactly the same steps.
+    # The first case used to require an exact match, and the plan asked for fewer years whenever the
+    # staged data had used up the free disk it was measured against -- so every re-run wiped a
+    # finished 45 GB staging and downloaded it again.
     sidecar = path.with_suffix(".json")
+    previous = path.with_name(path.stem + ".previous.npy")
+    previous_meta = previous.with_suffix(".json")
+    wanted = ordered.tolist()
+    fingerprint = _indices_fingerprint(ordered)
     if resume and path.exists() and sidecar.exists() and not marker.exists():
         try:
             staged = json.loads(sidecar.read_text())
-            if (staged.get("shape") == list(shape) and staged.get("variables") == names
-                    and staged.get("indices") == ordered.tolist()):
-                if progress:
-                    print(f"[era5] already staged: {path} ({gigabytes:.2f} GB, {len(ordered):,} steps)")
-                return path
         except (json.JSONDecodeError, OSError):
-            pass
+            staged = {}
+        staged_steps = staged.get("indices") or []
+        if staged.get("variables") == names and staged_steps:
+            have = set(staged_steps)
+            overlap = sum(1 for step in wanted if step in have)
+            if overlap == len(wanted):
+                if progress:
+                    extra = (f"; {len(staged_steps):,} staged, {len(wanted):,} asked for"
+                             if len(staged_steps) != len(wanted) else "")
+                    print(f"[era5] already staged: {path} ({len(wanted):,} steps{extra})")
+                return path
+            if overlap:
+                free = _free_bytes(path.parent)
+                if free is not None and free < gigabytes * 1e9 * 1.05:
+                    if progress:
+                        print(f"[era5] {path.name} holds {overlap:,} of the {len(wanted):,} steps asked for; "
+                              f"adding the rest needs {gigabytes:.1f} GB free beside it and there are "
+                              f"{free / 1e9:.1f}. Keeping what is staged -- nothing is deleted.")
+                    return path
+                os.replace(path, previous)
+                os.replace(sidecar, previous_meta)
+                if progress:
+                    print(f"[era5] growing the staging: {overlap:,} steps copied from disk, "
+                          f"{len(wanted) - overlap:,} to download")
+        elif progress and staged_steps:
+            print(f"[era5] {path.name} holds different variables; staging it again")
 
-    # Resume only when the existing file matches exactly. A shape mismatch means the request changed,
-    # and continuing into it would interleave two different datasets in one array.
+    # Resume only when the existing file is for exactly this request -- the same steps, not just the
+    # same number of them. A shape match alone would resume one year's download into another's file.
     done: set[int] = set()
     existing = path.exists() and marker.exists()
     if resume and existing:
         try:
             state = json.loads(marker.read_text())
-            if state.get("shape") == list(shape) and state.get("variables") == names:
+            if (state.get("shape") == list(shape) and state.get("variables") == names
+                    and state.get("steps", fingerprint) == fingerprint):
                 done = set(state.get("done", []))
             elif progress:
                 print("[era5] existing staging does not match this request; starting over")
         except (json.JSONDecodeError, OSError):
             done = set()
+
+    # Steps that an earlier, smaller staging already holds are copied from it rather than downloaded.
+    reuse, reused = None, [0]
+    if previous.exists() and previous_meta.exists():
+        try:
+            prior = json.loads(previous_meta.read_text())
+            if prior.get("variables") == names:
+                reuse = (np.load(previous, mmap_mode="r"),
+                         {int(step): row for row, step in enumerate(prior.get("indices") or [])})
+        except (json.JSONDecodeError, OSError, ValueError):
+            reuse = None
 
     mode = "r+" if (done and path.exists()) else "w+"
     store = np.lib.format.open_memmap(path, mode=mode, dtype=dtype, shape=shape)
@@ -855,16 +897,26 @@ def materialise(
 
     def fetch(offset: int) -> None:
         take = ordered[offset : offset + chunk]
-        block = read_block(dataset, source, take, levels)
-        store[offset : offset + len(take)] = normalizer.prepare(block).astype(dtype)
+        if reuse is not None and all(int(step) in reuse[1] for step in take):
+            rows = [reuse[1][int(step)] for step in take]
+            store[offset : offset + len(take)] = reuse[0][rows]
+            reused[0] += len(take)
+        else:
+            # Cloud reads drop; one dropped connection used to end the whole staging.
+            from .fallback import with_retry
+
+            block = with_retry(lambda: read_block(dataset, source, take, levels), attempts=5,
+                               what=f"ERA5 read of steps {int(take[0])}-{int(take[-1])}")
+            store[offset : offset + len(take)] = normalizer.prepare(block).astype(dtype)
         with lock:
             done.add(offset)
             completed[0] += len(take)
+            beat("staging")
             if progress:
                 share = 100 * completed[0] / len(ordered)
                 print(f"\r[era5]   {completed[0]:,}/{len(ordered):,}  ({share:.1f}%)", end="", flush=True)
             # Checkpoint the marker as we go, so an interruption loses one chunk and not the run.
-            marker.write_text(json.dumps({"shape": list(shape), "variables": names,
+            marker.write_text(json.dumps({"shape": list(shape), "variables": names, "steps": fingerprint,
                                           "done": sorted(done)}))
 
     if offsets:
@@ -883,7 +935,29 @@ def materialise(
          "statistics": normalizer.to_dict(), "indices": ordered.tolist(), "time": stamps.tolist()},
         indent=2))
     marker.unlink(missing_ok=True)
+    if reuse is not None:
+        del reuse
+        previous.unlink(missing_ok=True)
+        previous_meta.unlink(missing_ok=True)
+        if progress:
+            print(f"[era5] {reused[0]:,} steps came from the earlier staging, "
+                  f"{len(ordered) - reused[0]:,} from the network")
     return path
+
+
+def _indices_fingerprint(indices: np.ndarray) -> str:
+    """A short identity for a list of store steps, so a resume can tell two requests apart."""
+    import hashlib
+
+    return hashlib.blake2b(np.asarray(indices, dtype=np.int64).tobytes(), digest_size=12).hexdigest()
+
+
+def _free_bytes(directory) -> int | None:
+    try:
+        usage = os.statvfs(directory)
+    except OSError:
+        return None
+    return usage.f_bavail * usage.f_frsize
 
 
 class CachedERA5(torch.utils.data.Dataset):
@@ -907,6 +981,7 @@ class CachedERA5(torch.utils.data.Dataset):
         indices: np.ndarray | None = None,
         seed: int = 0,
         state_steps: int = 0,
+        restrict_to: np.ndarray | None = None,
     ) -> None:
         path = Path(path)
         meta = json.loads(path.with_suffix(".json").read_text())
@@ -923,6 +998,13 @@ class CachedERA5(torch.utils.data.Dataset):
         # A window starting at len - span still fits exactly; the "+ 1" keeps the last one.
         available = np.arange(max(len(self.values) - span + 1, 0))
         self.indices = available if indices is None else np.asarray(indices)[np.asarray(indices) < len(available)]
+        if restrict_to is not None and meta.get("indices"):
+            # Windows starting at the store steps asked for. A staging can hold more than a run wants --
+            # it is kept rather than re-downloaded when the request shrinks -- and this is how the run
+            # still gets exactly the years it asked for.
+            staged_steps = np.asarray(meta["indices"], dtype=np.int64)
+            wanted = np.isin(staged_steps[self.indices], np.asarray(restrict_to, dtype=np.int64))
+            self.indices = self.indices[wanted]
 
         # The staged array is already normalized, and the statistics that did it travel with it.
         # Preferring the sidecar over any passed-in cache is deliberate: decoding a prediction with

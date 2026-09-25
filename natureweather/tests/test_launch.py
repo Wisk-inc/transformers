@@ -136,3 +136,75 @@ def test_an_interrupted_stage_says_so(tmp_path):
     state = trainer.fit(batches(), epochs=1)
     assert trainer.interrupted and state.step < 50
     assert json.loads((tmp_path / "state.json").read_text())["step"] == state.step, "checkpointed on the way out"
+
+
+# ----------------------------------------------------------------------------------- the supervisor --
+
+def _script(tmp_path, body: str) -> Path:
+    fake = tmp_path / "fake_pipeline.py"
+    fake.write_text("SMOKE_TEST = False\nimport pathlib, sys, time\nhere = pathlib.Path.cwd()\n"
+                    "attempt = int((here / 'attempts').read_text()) + 1 if (here / 'attempts').exists() else 1\n"
+                    "(here / 'attempts').write_text(str(attempt))\nprint('attempt', attempt, flush=True)\n"
+                    + textwrap.dedent(body))
+    return fake
+
+
+def _finished(home):
+    return _wait(lambda: status(home) is None, seconds=60)
+
+
+def test_a_stalled_run_is_restarted_from_its_checkpoint(tmp_path):
+    """A read that never returns: alive, silent, stuck. The supervisor must notice and restart it."""
+    fake = _script(tmp_path, """
+        if attempt == 1:
+            time.sleep(600)          # hangs, and never touches the heartbeat
+        print('finished', flush=True)
+    """)
+    home = tmp_path / "data"
+    launch(directory=home, script=fake, stall_minutes=0.05, poll_seconds=0.5)
+    assert _finished(home)
+    log = (home / "train.log").read_text()
+    assert "no progress for" in log and "attempt 2" in log and "the pipeline finished" in log
+
+
+def test_a_crashed_run_is_restarted(tmp_path):
+    fake = _script(tmp_path, """
+        if attempt == 1:
+            raise RuntimeError('CUDA out of memory (simulated)')
+        print('finished', flush=True)
+    """)
+    home = tmp_path / "data"
+    launch(directory=home, script=fake, stall_minutes=1.0, poll_seconds=0.5)
+    assert _finished(home)
+    log = (home / "train.log").read_text()
+    assert "exited with code 1" in log and "attempt 2" in log and "the pipeline finished" in log
+
+
+def test_a_broken_run_is_not_restarted_forever(tmp_path):
+    """Failing within minutes, three times running, is an error to fix, not a blip to retry."""
+    fake = _script(tmp_path, "raise SystemExit('DATA PROBLEM: simulated')\n")
+    home = tmp_path / "data"
+    launch(directory=home, script=fake, stall_minutes=1.0, poll_seconds=0.5)
+    assert _finished(home)
+    log = (home / "train.log").read_text()
+    assert "3 times in a row" in log and "Not restarting" in log
+    assert (home / "attempts").read_text() == "3"
+
+
+def test_stop_ends_the_supervisor_and_the_run(tmp_path):
+    fake = _script(tmp_path, """
+        try:
+            time.sleep(600)
+        finally:
+            (here / 'checkpointed').write_text('yes')
+    """)
+    home = tmp_path / "data"
+    launch(directory=home, script=fake, stall_minutes=10.0, poll_seconds=0.5)
+    assert _wait(lambda: (home / "train.log").exists() and "attempt 1" in (home / "train.log").read_text())
+    child = json.loads((home / "train.pid").read_text()).get("child")
+    assert stop(directory=home, wait=30)
+    assert status(home) is None
+    assert (home / "checkpointed").exists(), "the run must get to checkpoint on the way out"
+    assert child and not Path(f"/proc/{child}").exists(), "no orphaned run left behind"
+    assert "stopped on request" in (home / "train.log").read_text()
+    assert (home / "attempts").read_text() == "1", "a requested stop is not a crash to restart"

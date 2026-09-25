@@ -246,7 +246,10 @@ def responds_to_input(model, make_batch, grid, trials: int = 3, threshold: float
     inputs = []
     for trial in range(trials):
         torch.manual_seed(1000 + trial)
-        batch = make_batch()
+        try:
+            batch = make_batch()
+        except StopIteration:
+            break                                 # a small held-out set: compare what there is
         inputs.append(float(batch["analysis"].double().sum()))
         outputs = model(analysis=batch["analysis"], analysis_grid=grid,
                         calendar=batch["calendar"], output_grid=grid)
@@ -256,6 +259,9 @@ def responds_to_input(model, make_batch, grid, trials: int = 3, threshold: float
     if was_training:
         model.train()
 
+    if len(inputs) < 2:
+        print("[guard] fewer than two held-out batches: cannot tell whether the model responds to its input")
+        return False, 0.0
     if len(set(inputs)) < 2:
         # The check compares outputs across different atmospheres; given the same one three times it
         # reports "does not respond" for any model, trained or not. That is what happened when the

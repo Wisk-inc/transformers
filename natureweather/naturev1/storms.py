@@ -39,6 +39,7 @@ import numpy as np
 import torch
 
 from .besttrack import Track, rapid_intensification
+from .heartbeat import beat
 from .model import (
     PEAK_WIND_ANCHOR_KT,
     PRESSURE_ANCHOR_HPA,
@@ -439,7 +440,10 @@ def storm_feature_bank(
         members = groups[storm]
         first = int(min(starts[i] for i in members))
         last = int(max(starts[i] for i in members)) + history
-        raw = read_block(store, base.source_variables, slice(first, last), base.levels)
+        from .fallback import with_retry
+
+        raw = with_retry(lambda: read_block(store, base.source_variables, slice(first, last), base.levels),
+                         attempts=5, what=f"ERA5 read for storm {storm}")
         values, observed = split_prepared(normalizer.prepare(raw))
         if normalizer.masked:
             values = np.concatenate([values, observed[..., normalizer.masked].astype(np.float32)], axis=-1)
@@ -464,6 +468,7 @@ def storm_feature_bank(
                     pooled = model.storm_features(analysis, grid, calendar_features(stamps).to(device), centres)
                 features[chosen] = pooled.float().cpu()
             done.add(storm)
+            beat("storm features")
             if progress:
                 rate = position / max(time.time() - started, 1e-9)
                 left = (len(pending) - position) / max(rate, 1e-9)
@@ -539,6 +544,7 @@ def train_storm_heads(
             model.mark_trained(parts, {"storm_center": batch["storm_center"], "storm_state": batch["storm_state"]})
             running += float(loss.detach()) * len(index)
         entry = {"epoch": epoch, "train": running / count}
+        beat(f"storm heads epoch {epoch}")
 
         if val_bank is not None:
             model.eval()

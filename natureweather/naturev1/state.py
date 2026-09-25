@@ -42,6 +42,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
+from .heartbeat import beat
+
 
 #: Fields that never change: geography, not weather. Carried forward exactly, never predicted.
 STATIC_VARIABLES = frozenset({
@@ -517,6 +519,7 @@ def state_rollout_loss(
     rollout_member: int = 0,
     precision: str = "fp32",
     scaler=None,
+    loss_scale: float = 1.0,
 ) -> tuple[torch.Tensor, dict]:
     """
     Train on the whole atmosphere, rolled forward on the model's own forecasts.
@@ -540,6 +543,8 @@ def state_rollout_loss(
         precision: ``"bf16"``, ``"fp16"`` or ``"auto"`` runs the forward passes under autocast -- the
             same precision as stage one. The loss and the trajectory stay in float32.
         scaler: a ``torch.amp.GradScaler`` for fp16, whose small gradients underflow without one.
+        loss_scale: multiplies what is backpropagated, not what is returned -- a micro-batch's share of
+            its batch, so accumulated pieces add up to the batch mean.
 
     Returns:
         ``(loss, parts)``. With ``accumulate`` the loss is already backpropagated and comes back detached.
@@ -605,7 +610,9 @@ def state_rollout_loss(
 
         weighted = step_weights[step] * step_loss
         if accumulate:
-            (scaler.scale(weighted) if scaler is not None else weighted).backward()
+            scaled = weighted * loss_scale
+            (scaler.scale(scaled) if scaler is not None else scaled).backward()
+            beat(f"rollout step {step + 1}/{horizon}")
             total = total + weighted.detach()
         else:
             total = total + weighted
@@ -684,6 +691,7 @@ def train_state_rollout(
     checkpoint_seconds: float = 60.0,
     log_every: int = 25,
     device=None,
+    micro_batch: int | None = None,
 ):
     """
     Full-state rollout training as a proper run: many epochs, a schedule, checkpoints, resume.
@@ -699,6 +707,9 @@ def train_state_rollout(
             steps for the first 10%, ramping to twelve by 60%, twelve for the rest.
         checkpoint_dir: where to save every ``checkpoint_seconds`` and resume from. Its last path
             component names the run on the Hub, so point it at e.g. ``.../rollout``.
+        micro_batch: as in :class:`naturev1.TrainSettings` -- None runs whole batches and halves them on
+            its own if the GPU runs out of memory. A twelve-step, two-member rollout holds two batches'
+            worth of activations at once, which is where a card that fits stage one can run out.
 
     Returns:
         The :class:`naturev1.TrainingState` it finished in.
@@ -706,7 +717,7 @@ def train_state_rollout(
     from .checkpoint import CheckpointManager, TrainingState
     from .guards import TrainingWatchdog
     from .rollout import RolloutSchedule
-    from .train import TrainSettings, build_scheduler, move_batch
+    from .train import TrainSettings, batch_size, build_scheduler, free_after_oom, move_batch, slice_batch
 
     device = torch.device(device or next(model.parameters()).device)
     if schedule is None:
@@ -742,6 +753,7 @@ def train_state_rollout(
             manager.save(model, optimizer, scheduler, None, state, config=model.config.to_dict(), force=force)
 
     watchdog = TrainingWatchdog(patience=200)
+    micro = [micro_batch]
     params = [p for p in model.parameters() if p.requires_grad]
     # fp16 gradients underflow to zero without loss scaling; the scaler is a no-op for bf16 and fp32.
     scaler = torch.amp.GradScaler(device.type, enabled=precision == "fp16" and device.type == "cuda")
@@ -757,9 +769,9 @@ def train_state_rollout(
                 seen += 1
                 batch = move_batch(batch, device)
                 horizon = schedule.horizon(state.step)
-                loss, parts = state_rollout_loss(model, batch, stepper, horizon, schedule, channel_weights,
-                                                 members=members, accumulate=True, precision=precision,
-                                                 scaler=scaler)
+                loss, parts, micro[0] = _rollout_step(model, batch, stepper, horizon, schedule, channel_weights,
+                                                      members, precision, scaler, optimizer, micro[0],
+                                                      batch_size, slice_batch, free_after_oom)
                 scaler.unscale_(optimizer)
                 norm = torch.nn.utils.clip_grad_norm_(params, grad_clip)
                 watchdog.observe(state.step, float(loss), float(norm))
@@ -794,6 +806,35 @@ def train_state_rollout(
         save(force=True)
     print(f"[state] finished at step {state.step:,} after {state.wall_seconds / 60:.1f} min", flush=True)
     return state
+
+
+def _rollout_step(model, batch, stepper, horizon, schedule, channel_weights, members, precision, scaler,
+                  optimizer, micro, batch_size, slice_batch, free_after_oom):
+    """One rollout step over a batch, halving the pieces it is run in until it fits in memory."""
+    size = batch_size(batch)
+    while True:
+        piece_size = min(micro or size, size)
+        try:
+            total, combined = 0.0, {}
+            for start in range(0, size, piece_size):
+                piece = slice_batch(batch, start, start + piece_size)
+                share = batch_size(piece) / size
+                loss, parts = state_rollout_loss(model, piece, stepper, horizon, schedule, channel_weights,
+                                                 members=members, accumulate=True, precision=precision,
+                                                 scaler=scaler, loss_scale=share)
+                total += float(loss) * share
+                for key, value in parts.items():
+                    combined[key] = value if key == "state_horizon" else combined.get(key, 0.0) + value * share
+            return torch.tensor(total), combined, micro
+        except torch.OutOfMemoryError:
+            if piece_size <= 1:
+                raise
+            loss = piece = None
+            optimizer.zero_grad(set_to_none=True)
+            free_after_oom()
+            micro = max(1, piece_size // 2)
+            print(f"[state] out of GPU memory at {piece_size} samples per pass; continuing at {micro} "
+                  f"(same batch of {size}, accumulated)", flush=True)
 
 
 @torch.no_grad()
@@ -845,6 +886,7 @@ def score_state(
         batch = move_batch(batch, device)
         if "state_target" not in batch:
             raise KeyError("score_state needs state_target: build the dataset with state_steps >= steps")
+        beat("scoring the rollout")
         horizon = min(steps, batch["state_target"].shape[1])
         forecast = state_forecast(model, batch, stepper, steps=horizon, members=members,
                                   precision=precision).mean(0)               # (steps, B, P, C)

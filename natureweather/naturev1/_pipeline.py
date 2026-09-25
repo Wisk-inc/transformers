@@ -5,13 +5,19 @@ if __name__ not in ("__main__", "__naturev1_pipeline__"):
     raise ImportError("naturev1._pipeline is the training pipeline itself; start it with naturev1.launch()")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
-#  NatureV1 0.8.3 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
+#  NatureV1 0.8.4 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
 #
 #  Paste and run. It installs what it needs, stages the data, builds the 89M-parameter model, trains it
 #  in stages, scores itself against persistence and climatology, and only publishes if it earned it.
-#  Every stage checkpoints every minute and resumes where it stopped -- re-running the cell after a
-#  crash or a dropped connection continues, it does not restart.
+#
+#  With BACKGROUND = True (the default) the run happens in a supervised process on the machine itself:
+#  it keeps going if the wifi drops or the notebook closes, and it restarts itself from its last
+#  checkpoint if it crashes, runs out of GPU memory, or stalls. Run naturev1.follow() any time to see
+#  it. Data already downloaded is never downloaded again -- change the years and only what is new is.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
+
+BACKGROUND    = True      # supervised background run: survives disconnects, restarts on crash or stall
+STALL_MINUTES = 30        # background: restart a run that shows no progress for this long
 
 RUN_PRETRAIN  = True      # stage one: every channel at every lead, on ERA5 reanalysis
 RUN_ROLLOUT   = True      # stage 1b: the whole atmosphere rolled forward 12 steps, CRPS ensemble
@@ -25,7 +31,9 @@ RUN_WATCHER   = False     # then re-forecast every hour
 STAGE_YEARS   = 5         # training years staged to local disk, ~7.5 GB each at 89 channels
 VAL_YEARS     = 1         # held-out years staged too, so validation and scoring are not network-bound
 EPOCHS        = 8         # passes over the staged years in stage one
-MAX_BATCH     = 16        # ceiling on the autotuned batch: host RAM, not VRAM, is the limit above this
+BATCH         = None      # None: find the largest batch that fits once, then remember it; or a number
+MAX_BATCH     = 16        # ceiling on the batch search: host RAM, not VRAM, is the limit above this
+WORKERS       = 4         # data-loading processes
 ROLLOUT_STEPS = 12        # longest rollout trained: 12 x 6 h = 72 h, GraphCast's curriculum
 ROLLOUT_TRAIN = 4_000     # optimizer steps of rollout training (the log prints the time per step)
 MEMBERS       = 2         # CRPS ensemble members; 1 = deterministic Gaussian training
@@ -35,6 +43,7 @@ STORM         = (24.6, -78.2)          # live forecast: current storm centre (la
 CITY          = (25.77, -80.19)        # live forecast: somewhere you want a local forecast
 HF_REPO       = "Sigmandndnns/NatureV1-500"
 HF_TOKEN      = ""        # a write token, to publish and mirror checkpoints; or set the HF_TOKEN env var
+DATA_DIR      = None      # None: /content on Colab, ~/naturev1_data elsewhere; or any folder with room
 
 # ═══ 0 ═══ install ═════════════════════════════════════════════════════════════════════════════════
 # Standard library only, before numpy or torch are imported: pip may upgrade numpy while satisfying
@@ -53,7 +62,7 @@ os.environ.setdefault("GRPC_VERBOSITY", "ERROR")   # the cloud client logs every
 # has not touched the GPU yet in this kernel -- restart the kernel for it to apply.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-_NEEDED = {"naturev1": ("naturev1[all]>=0.8.3", (0, 8, 3)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
+_NEEDED = {"naturev1": ("naturev1[all]>=0.8.4", (0, 8, 4)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
 
 
 def _version(module):
@@ -98,6 +107,21 @@ if _missing:
 if HF_TOKEN:
     os.environ["HF_TOKEN"] = HF_TOKEN
 
+if BACKGROUND and not os.environ.get("NATUREV1_BACKGROUND_CHILD"):
+    # Hand this same pipeline, with these settings, to a supervised process on this machine, and stop
+    # here: the notebook only starts and watches it. The GPU is never touched from the notebook.
+    import naturev1
+
+    _SETTINGS = {name: globals()[name] for name in (
+        "RUN_PRETRAIN", "RUN_ROLLOUT", "RUN_STORMS", "RUN_SCORE", "RUN_HINDCAST", "RUN_PUBLISH",
+        "RUN_FORECAST", "RUN_WATCHER", "STAGE_YEARS", "VAL_YEARS", "EPOCHS", "BATCH", "MAX_BATCH", "WORKERS",
+        "ROLLOUT_STEPS", "ROLLOUT_TRAIN", "MEMBERS", "STORM_FIRST_SEASON", "HINDCAST", "STORM", "CITY",
+        "HF_REPO", "HF_TOKEN", "DATA_DIR")}
+    naturev1.launch(directory=DATA_DIR, stall_minutes=STALL_MINUTES, **_SETTINGS)
+    naturev1.follow(lines=12, directory=DATA_DIR)
+    raise SystemExit("training runs in the background. naturev1.follow() shows progress (run it any time, "
+                     "from any session); naturev1.stop() ends it; running this cell again is safe.")
+
 # ═══ 1 ═══ imports, paths, hardware ════════════════════════════════════════════════════════════════
 import datetime as dt
 import json
@@ -122,10 +146,11 @@ from naturev1.era5 import _target_index
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 COLAB_DRIVE = "/content/drive/MyDrive"
-DATA_DIR = "/content" if os.path.isdir("/content") else os.path.expanduser("~/naturev1_data")
+DATA_DIR = DATA_DIR or ("/content" if os.path.isdir("/content") else os.path.expanduser("~/naturev1_data"))
 CKPT_DIR = (f"{COLAB_DRIVE}/naturev1_ckpt" if os.path.isdir(COLAB_DRIVE)       # Drive outlives the VM
             else os.path.join(DATA_DIR, "naturev1_ckpt"))
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(CKPT_DIR, exist_ok=True)
 CACHE, VAL_CACHE, STATS = (os.path.join(DATA_DIR, name) for name in ("era5.npy", "era5_val.npy", "stats.json"))
 
 
@@ -143,7 +168,8 @@ ERA5, SURFACE, UPPER = open_weatherbench_levels()
 LEVELS = [int(x) for x in ERA5.level.values]
 SRC, LAT, LON = era5_source_grid(ERA5)
 plan = resolve_all(ERA5, tuple(SURFACE) + tuple(UPPER), LEVELS, STAGE_YEARS + VAL_YEARS, SRC.num_points,
-                   layers=17, batch=MAX_BATCH, precision="bf16", path=DATA_DIR)
+                   layers=17, batch=MAX_BATCH, precision="bf16", path=DATA_DIR,
+                   staged=(CACHE, VAL_CACHE))      # data already on disk counts as room, not as used
 print(plan.summary())
 R = plan.resolved
 CHANNELS = expand_variables(ERA5, R["variables"], R["levels"])
@@ -170,16 +196,19 @@ if R["streaming"]:
     val_ds = ERA5Window(ERA5, indices=SPLITS["val"], augment=False, stats_cache=STATS,
                         state_steps=ROLLOUT_STEPS, **common)
 else:
-    # Always called: it returns at once when the staging is complete, and resumes when it is not.
-    materialise(ERA5, SPLITS["train"][-TRAIN_STEPS:], CACHE, variables=tuple(R["variables"]),
+    # Always called, and never downloads twice: it returns at once when what is on disk already covers
+    # the request, copies from disk what it can when the request grows, and resumes a download that died.
+    TRAIN_SPAN, VAL_SPAN = SPLITS["train"][-TRAIN_STEPS:], SPLITS["val"][:VAL_STEPS]
+    materialise(ERA5, TRAIN_SPAN, CACHE, variables=tuple(R["variables"]),
                 levels=R["levels"], normalizer=stream.normalizer, workers=8)
-    materialise(ERA5, SPLITS["val"][:VAL_STEPS], VAL_CACHE, variables=tuple(R["variables"]),
+    materialise(ERA5, VAL_SPAN, VAL_CACHE, variables=tuple(R["variables"]),
                 levels=R["levels"], normalizer=stream.normalizer, workers=8)
-    train_ds = CachedERA5(CACHE, history=6, lead_steps=OFFSETS, channels=WIDTH, augment=True)
+    train_ds = CachedERA5(CACHE, history=6, lead_steps=OFFSETS, channels=WIDTH, augment=True,
+                          restrict_to=TRAIN_SPAN)
     roll_ds = CachedERA5(CACHE, history=6, lead_steps=OFFSETS, channels=WIDTH, augment=True,
-                         state_steps=ROLLOUT_STEPS)
+                         state_steps=ROLLOUT_STEPS, restrict_to=TRAIN_SPAN)
     val_ds = CachedERA5(VAL_CACHE, history=6, lead_steps=OFFSETS, channels=WIDTH, augment=False,
-                        state_steps=ROLLOUT_STEPS)
+                        state_steps=ROLLOUT_STEPS, restrict_to=VAL_SPAN)
 print(f"\ntrain {len(train_ds):,} windows | validate on {len(val_ds):,} held-out windows")
 
 sample = train_ds[0]["analysis"]
@@ -239,12 +268,27 @@ def make_step(batch_size):
     return step
 
 
-BATCH = min(autotune_batch_size(make_step, start=1, target_fraction=0.85), MAX_BATCH)
-MARK = benchmark_steps(make_step(BATCH), BATCH, warmup=1, iterations=10, gradient_checkpointing=True)
-print(f"batch {BATCH} | {MARK}")
-print(format_plan(training_plan(MARK.samples_per_second, corpus_samples=len(train_ds), epochs=EPOCHS,
-                                watts=600.0, electricity_per_kwh=0.15, cloud_per_hour=2.50)))
-WORKERS = 4
+# The search is done once and remembered: repeating it on every restart costs minutes, pushes the card
+# to the edge of its memory each time, and could pick a different batch -- a different run -- each time.
+BATCH_FILE = os.path.join(CKPT_DIR, "batch.json")
+if BATCH is None and os.path.exists(BATCH_FILE):
+    with open(BATCH_FILE) as handle:
+        REMEMBERED = json.load(handle)
+    BATCH, SPEED = int(REMEMBERED["batch"]), float(REMEMBERED.get("samples_per_second", 0.0))
+    print(f"batch {BATCH}, found on an earlier run (delete {BATCH_FILE} to search again)")
+else:
+    if BATCH is None:
+        BATCH = min(autotune_batch_size(make_step, start=1, target_fraction=0.85), MAX_BATCH)
+    MARK = benchmark_steps(make_step(BATCH), BATCH, warmup=1, iterations=10, gradient_checkpointing=True)
+    SPEED = MARK.samples_per_second
+    with open(BATCH_FILE, "w") as handle:
+        json.dump({"batch": BATCH, "samples_per_second": SPEED}, handle)
+    print(f"batch {BATCH} | {MARK}")
+if SPEED:
+    print(format_plan(training_plan(SPEED, corpus_samples=len(train_ds), epochs=EPOCHS,
+                                    watts=600.0, electricity_per_kwh=0.15, cloud_per_hour=2.50)))
+if DEVICE == "cuda":
+    torch.cuda.empty_cache()                      # hand back what the search held before training starts
 loader = era5_loader(train_ds, batch_size=BATCH, num_workers=WORKERS, analysis_grid=SRC, output_grid=SRC,
                      prefetch_factor=2)
 val_loader = era5_loader(val_ds, batch_size=BATCH, num_workers=WORKERS, shuffle=False, analysis_grid=SRC,
@@ -257,7 +301,7 @@ if RUN_PRETRAIN:
         stage="pretrain", learning_rate=3e-4, warmup_steps=1000,
         precision=R["precision"], max_steps=int(len(train_ds) * EPOCHS / BATCH),
         checkpoint_dir=f"{CKPT_DIR}/stage1", checkpoint_seconds=60, hub_repo=HF_REPO,
-        ema_decay=0.999, log_every=25, val_every=500, val_batches=32), device=DEVICE)
+        ema_decay=0.0, log_every=25, val_every=500, val_batches=32), device=DEVICE)
     trainer.resume()
     trainer.fit(loader, epochs=EPOCHS, val_loader=val_loader)
     if trainer.interrupted:

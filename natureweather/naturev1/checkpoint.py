@@ -121,7 +121,8 @@ class CheckpointManager:
         self._last_save = 0.0
         self._last_push = 0.0
         self._last_snapshot = 0.0
-        self._api = None
+        self._upload = None
+        self._warned_token = False
 
     @property
     def tag(self) -> str:
@@ -198,21 +199,50 @@ class CheckpointManager:
             stale.unlink(missing_ok=True)
 
     def _maybe_push(self, path: Path, state: TrainingState) -> None:
+        """
+        Mirror the checkpoint to the Hub, in the background, at most every ``push_every_seconds``.
+
+        Two things this used to get wrong. A failed push -- no token, no network -- did not reset the
+        timer, so it was retried and reported on every one-minute save for the rest of the run. And a
+        successful one ran on the training thread: a gigabyte upload stopped training for minutes
+        every quarter hour. Now a failure waits a full interval like a success, and the upload runs
+        on its own thread from a copy, so ``latest.pt`` can keep being replaced underneath it.
+        """
         if not self.repo_id or (time.time() - self._last_push) < self.push_every_seconds:
             return
+        self._last_push = time.time()
+        if self._upload is not None and self._upload.is_alive():
+            return                                    # the previous upload is still going; skip this one
         try:
-            from huggingface_hub import HfApi
+            from huggingface_hub import get_token
+        except ImportError:
+            get_token = None
+        if get_token is not None and not (os.environ.get("HF_TOKEN") or get_token()):
+            if not self._warned_token:
+                print("[checkpoint] no Hugging Face token: checkpoints stay local (set HF_TOKEN to mirror "
+                      "them to the Hub)", flush=True)
+                self._warned_token = True
+            return
 
-            if self._api is None:
-                self._api = HfApi()
-                self._api.create_repo(self.repo_id, repo_type="model", exist_ok=True, private=self.private)
-            self._api.upload_file(
-                path_or_fileobj=str(path), path_in_repo=self.hub_path, repo_id=self.repo_id,
-                repo_type="model", commit_message=f"{self.tag} step {state.step}",
-            )
-            self._last_push = time.time()
-        except Exception as error:  # a failed upload must never kill a training run
-            print(f"[checkpoint] Hub push skipped: {type(error).__name__}: {error}", flush=True)
+        snapshot = self.directory / ".push.pt"
+        shutil.copy2(path, snapshot)
+        step, tag, repo, hub_path, private = state.step, self.tag, self.repo_id, self.hub_path, self.private
+
+        def upload() -> None:
+            try:
+                from huggingface_hub import HfApi
+
+                api = HfApi()
+                api.create_repo(repo, repo_type="model", exist_ok=True, private=private)
+                api.upload_file(path_or_fileobj=str(snapshot), path_in_repo=hub_path, repo_id=repo,
+                                repo_type="model", commit_message=f"{tag} step {step}")
+            except Exception as error:  # a failed upload must never kill a training run
+                print(f"[checkpoint] Hub push skipped: {type(error).__name__}: {error}", flush=True)
+
+        import threading
+
+        self._upload = threading.Thread(target=upload, name="hub-push", daemon=True)
+        self._upload.start()
 
     # ----------------------------------------------------------------- loading --
 

@@ -24,6 +24,7 @@ from pathlib import Path
 import torch
 
 from .checkpoint import CheckpointManager, TrainingState
+from .heartbeat import beat
 from .losses import total_loss
 from .model import SURFACE_FIELDS, NatureConfig, NatureV1
 
@@ -54,6 +55,9 @@ class TrainSettings:
         val_every: optimizer steps between validation passes.
         val_batches: batches per validation pass. A few dozen is enough to track the gap and costs far
             less than a full sweep of a held-out decade.
+        micro_batch: split each batch into pieces this size and accumulate their gradients. None runs
+            whole batches, and drops to halves, then quarters, on its own if the GPU runs out of memory
+            -- the same effective batch, so the schedule and the results do not change, only the speed.
     """
 
     learning_rate: float = 3e-4
@@ -74,6 +78,7 @@ class TrainSettings:
     early_stopping_patience: int = 0
     val_every: int = 500
     val_batches: int = 32
+    micro_batch: int | None = None
 
 
 def build_scheduler(optimizer, settings: TrainSettings):
@@ -86,6 +91,26 @@ def build_scheduler(optimizer, settings: TrainSettings):
         return max(0.03, 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0))))
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
+
+
+def slice_batch(batch: dict, start: int, stop: int) -> dict:
+    """Rows ``start:stop`` of every per-sample tensor in a batch; grids and scalars are shared."""
+    size = next(int(v.shape[0]) for v in batch.values() if torch.is_tensor(v) and v.ndim)
+    return {key: (value[start:stop] if torch.is_tensor(value) and value.ndim and value.shape[0] == size
+                  else value) for key, value in batch.items()}
+
+
+def batch_size(batch: dict) -> int:
+    return next(int(v.shape[0]) for v in batch.values() if torch.is_tensor(v) and v.ndim)
+
+
+def free_after_oom() -> None:
+    """Give back what a failed step held, so the retry starts from an empty allocator."""
+    import gc
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def move_batch(batch: dict, device: torch.device, dtype: torch.dtype | None = None) -> dict:
@@ -148,6 +173,7 @@ class Trainer:
             print(f"[train] fine-tuning stage: {trainable:,} of {total:,} parameters trainable "
                   f"({trainable / total:.1%}) -- the backbone is frozen", flush=True)
         self._previous_handlers: dict = {}
+        self.micro_batch = settings.micro_batch
         #: True once a stop signal ended :meth:`fit` early. A pipeline must not carry on to its next
         #: stage from a half-trained model; checking this is how it knows.
         self.interrupted = False
@@ -237,6 +263,7 @@ class Trainer:
             for key, value in parts.items():
                 totals[key] = totals.get(key, 0.0) + value
             seen += 1
+            beat("validation")
 
         if was_training:
             self.model.train()
@@ -260,6 +287,47 @@ class Trainer:
         finally:
             self._restore_signal_handlers()
 
+    def _forward_backward(self, batch: dict) -> dict:
+        """
+        One batch forward and backward, in micro-batches when the whole batch does not fit.
+
+        A batch that runs out of GPU memory is retried in halves, then quarters, and the size that
+        worked is kept for the rest of the run. Each piece's loss is weighted by its share of the batch,
+        so the gradient is the same batch mean -- only the speed changes. Without this, one unlucky
+        allocation near a full card ended a multi-day run.
+        """
+        settings, size = self.settings, batch_size(batch)
+        while True:
+            piece_size = min(self.micro_batch or size, size)
+            try:
+                combined: dict[str, float] = {}
+                for start in range(0, size, piece_size):
+                    piece = slice_batch(batch, start, start + piece_size)
+                    share = batch_size(piece) / size
+                    with torch.autocast(self.device.type, dtype=self.amp_dtype, enabled=self.use_amp):
+                        outputs = self.model(
+                            satellite=piece.get("satellite"), satellite_grid=piece.get("satellite_grid"),
+                            analysis=piece.get("analysis"), analysis_grid=piece.get("analysis_grid"),
+                            calendar=piece["calendar"], output_grid=piece.get("output_grid"),
+                            storm_center=piece.get("storm_center"), storm_state=piece.get("storm_state"),
+                        )
+                        loss, parts = total_loss(outputs, piece, SURFACE_FIELDS)
+                        loss = loss * share / settings.grad_accum
+                    self.scaler.scale(loss).backward() if self.scaler.is_enabled() else loss.backward()
+                    for key, value in parts.items():
+                        combined[key] = combined.get(key, 0.0) + value * share
+                    outputs = loss = None
+                return combined
+            except torch.OutOfMemoryError:
+                if piece_size <= 1:
+                    raise
+                outputs = loss = piece = None
+                self.optimizer.zero_grad(set_to_none=True)
+                free_after_oom()
+                self.micro_batch = max(1, piece_size // 2)
+                print(f"[train] out of GPU memory at {piece_size} samples per pass; continuing at "
+                      f"{self.micro_batch} (same batch of {size}, accumulated)", flush=True)
+
     def _fit(self, loader, epochs: int, val_loader) -> TrainingState:
         settings = self.settings
         self.model.train()
@@ -273,17 +341,7 @@ class Trainer:
                 if self._stop or self.state.step >= settings.max_steps:
                     break
                 batch = move_batch(batch, self.device)
-                with torch.autocast(self.device.type, dtype=self.amp_dtype, enabled=self.use_amp):
-                    outputs = self.model(
-                        satellite=batch.get("satellite"), satellite_grid=batch.get("satellite_grid"),
-                        analysis=batch.get("analysis"), analysis_grid=batch.get("analysis_grid"),
-                        calendar=batch["calendar"], output_grid=batch.get("output_grid"),
-                        storm_center=batch.get("storm_center"), storm_state=batch.get("storm_state"),
-                    )
-                    loss, parts = total_loss(outputs, batch, SURFACE_FIELDS)
-                    loss = loss / settings.grad_accum
-
-                self.scaler.scale(loss).backward() if self.scaler.is_enabled() else loss.backward()
+                parts = self._forward_backward(batch)
                 micro += 1
                 if micro % settings.grad_accum:
                     continue
@@ -344,10 +402,16 @@ class Trainer:
                         flush=True,
                     )
                 self.save()
+                beat(f"train step {self.state.step}")
 
             if self._stop or self.state.step >= settings.max_steps:
                 break
+            # The epoch ran to its end. Recorded, so a re-run of a finished stage does not train its last
+            # epoch again -- it used to, costing about two hours every time the cell was re-run.
+            self.state.epoch = epoch + 1
 
+        if self.state.epoch >= epochs and not self._stop:
+            print(f"[train] all {epochs} epochs done", flush=True)
         # Whatever ended the run -- a signal, the step limit, the data -- the last state is written down.
         self.save(force=True)
         print(f"[train] stopped at step {self.state.step} after {self.state.wall_seconds / 60:.1f} min", flush=True)

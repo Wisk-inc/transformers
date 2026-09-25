@@ -343,9 +343,12 @@ def score_model(
     # Accumulate squared error rather than averaging per batch: a mean of RMSEs is not an RMSE.
     totals: dict[tuple[str, int], dict[str, float]] = {}
 
+    from .heartbeat import beat
+
     for index, batch in enumerate(loader):
         if index >= max_batches:
             break
+        beat("scoring")
         analysis = batch["analysis"].to(device)
         calendar = batch["calendar"].to(device)
         truth = batch["field_target"].to(device)
