@@ -1,13 +1,15 @@
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
-#  NatureV1 0.8.4 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
+#  NatureV1 0.8.5 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
 #
 #  Paste and run. It installs what it needs, stages the data, builds the 89M-parameter model, trains it
 #  in stages, scores itself against persistence and climatology, and only publishes if it earned it.
 #
 #  With BACKGROUND = True (the default) the run happens in a supervised process on the machine itself:
 #  it keeps going if the wifi drops or the notebook closes, and it restarts itself from its last
-#  checkpoint if it crashes, runs out of GPU memory, or stalls. Run naturev1.follow() any time to see
-#  it. Data already downloaded is never downloaded again -- change the years and only what is new is.
+#  checkpoint if it crashes, runs out of GPU memory, or stalls. The cell then ends with a green "training
+#  in the background" note: that is it working, not an error. Run the cell again, or naturev1.follow(),
+#  any time to see the run. Data already downloaded is never downloaded again -- change the years and
+#  only what is new is.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 
 BACKGROUND    = True      # supervised background run: survives disconnects, restarts on crash or stall
@@ -56,7 +58,36 @@ os.environ.setdefault("GRPC_VERBOSITY", "ERROR")   # the cloud client logs every
 # has not touched the GPU yet in this kernel -- restart the kernel for it to apply.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-_NEEDED = {"naturev1": ("naturev1[all]>=0.8.4", (0, 8, 4)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
+
+def _halt(message, kind="danger"):
+    """
+    End the cell here, on purpose. Only kind="danger" is an error. marimo shows the message as a
+    coloured note instead of a traceback, Jupyter and Colab show it without one, and a plain script
+    exits with status 0 for "success" and 1 for anything else -- which is what the supervisor of a
+    background run reads, so a run stopped part-way is resumed and a finished one is not.
+    """
+    marimo = sys.modules.get("marimo")
+    if marimo is not None and getattr(marimo, "running_in_notebook", lambda: False)():
+        try:
+            note = marimo.callout(marimo.plain_text(message), kind=kind)
+        except Exception:
+            note = None
+            print(message)
+        marimo.stop(True, note)
+    ipython = sys.modules.get("IPython")
+    if kind != "danger" and ipython is not None and getattr(ipython, "get_ipython", lambda: None)() is not None:
+        class Halted(Exception):
+            def _render_traceback_(self):
+                return []                         # the message printed above, and no traceback
+        print(message)
+        raise Halted("the cell stopped here on purpose -- the message is above")
+    if kind == "success":
+        print(message)
+        raise SystemExit(0)
+    raise SystemExit(message)
+
+
+_NEEDED = {"naturev1": ("naturev1[all]>=0.8.5", (0, 8, 5)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
 
 
 def _version(module):
@@ -85,7 +116,7 @@ if _missing:
         except (subprocess.CalledProcessError, FileNotFoundError):
             print(f"  {_label} failed, trying the next way")
     else:
-        raise SystemExit("could not install; add these in your package manager, then re-run: " + " ".join(_missing))
+        _halt("could not install; add these in your package manager, then re-run: " + " ".join(_missing))
     importlib.invalidate_caches()
     # A restart is needed only if an old copy is already in memory, or pip moved numpy/torch under us.
     _stale = [m for m in _NEEDED if m in sys.modules]
@@ -96,7 +127,8 @@ if _missing:
         except importlib.metadata.PackageNotFoundError:
             pass
     if _stale:
-        raise SystemExit(f"\n>> installed. {', '.join(_stale)} was already loaded: RESTART THE KERNEL, then run this cell again.")
+        _halt(f"installed. {', '.join(_stale)} was already loaded in this kernel: RESTART THE KERNEL, then run "
+              "this cell again. (A background run that is already training is not affected.)", kind="warn")
 
 if HF_TOKEN:
     os.environ["HF_TOKEN"] = HF_TOKEN
@@ -104,17 +136,22 @@ if HF_TOKEN:
 if BACKGROUND and not os.environ.get("NATUREV1_BACKGROUND_CHILD"):
     # Hand this same pipeline, with these settings, to a supervised process on this machine, and stop
     # here: the notebook only starts and watches it. The GPU is never touched from the notebook.
-    import naturev1
+    # Imported under a private name: marimo lets a name be defined by only one cell, and this way any
+    # other cell can still `import naturev1` to call naturev1.follow() or naturev1.stop().
+    import naturev1 as _naturev1
 
     _SETTINGS = {name: globals()[name] for name in (
         "RUN_PRETRAIN", "RUN_ROLLOUT", "RUN_STORMS", "RUN_SCORE", "RUN_HINDCAST", "RUN_PUBLISH",
         "RUN_FORECAST", "RUN_WATCHER", "STAGE_YEARS", "VAL_YEARS", "EPOCHS", "BATCH", "MAX_BATCH", "WORKERS",
         "ROLLOUT_STEPS", "ROLLOUT_TRAIN", "MEMBERS", "STORM_FIRST_SEASON", "HINDCAST", "STORM", "CITY",
         "HF_REPO", "HF_TOKEN", "DATA_DIR")}
-    naturev1.launch(directory=DATA_DIR, stall_minutes=STALL_MINUTES, **_SETTINGS)
-    naturev1.follow(lines=12, directory=DATA_DIR)
-    raise SystemExit("training runs in the background. naturev1.follow() shows progress (run it any time, "
-                     "from any session); naturev1.stop() ends it; running this cell again is safe.")
+    _naturev1.launch(directory=DATA_DIR, stall_minutes=STALL_MINUTES, **_SETTINGS)
+    _naturev1.follow(lines=25, directory=DATA_DIR, wait=90)   # a fresh run: wait for its first lines
+    _halt("NatureV1 is training in the background, and the cell stops here on purpose -- not an error.\n"
+          "To see progress: run this cell again (it will not start a second run), or in any cell\n"
+          "    import naturev1; naturev1.follow()\n"
+          "To end the run: naturev1.stop(). Closing the notebook or losing the wifi does not stop it.",
+          kind="success")
 
 # ═══ 1 ═══ imports, paths, hardware ════════════════════════════════════════════════════════════════
 import datetime as dt
@@ -208,7 +245,7 @@ print(f"\ntrain {len(train_ds):,} windows | validate on {len(val_ds):,} held-out
 sample = train_ds[0]["analysis"]
 for problem in (check_grid_alignment(SRC, sample[-1, :, train_ds.variables.index("2m_temperature")])
                 + check_normalization(sample, "analysis")):
-    raise SystemExit(f"DATA PROBLEM: {problem}")
+    _halt(f"DATA PROBLEM: {problem}")
 print("data ok: samples land where the grid says, no spike channels")
 
 # ═══ 3 ═══ what each channel IS — decides what a rollout does with it ══════════════════════════════
@@ -300,7 +337,7 @@ if RUN_PRETRAIN:
     trainer.fit(loader, epochs=EPOCHS, val_loader=val_loader)
     if trainer.interrupted:
         # Stopped part-way: checkpointed, and the next stage must not start from a half-trained model.
-        raise SystemExit("stage one stopped and checkpointed -- run again to resume it where it left off")
+        _halt("stage one stopped and checkpointed -- run again to resume it where it left off", kind="warn")
     print("held-out falling = learning; held-out rising while training falls = memorising.")
 
 # ═══ 7 ═══ stage 1b — the whole atmosphere, rolled forward on its own forecasts ════════════════════
@@ -338,8 +375,8 @@ def paired(which):
 
 if RUN_STORMS:
     if not (RUN_PRETRAIN or RUN_ROLLOUT) and restore("rollout", "stage1") is None:
-        raise SystemExit("no pretrained backbone found. Freezing an untrained one would fine-tune the storm "
-                         "heads on noise -- set RUN_PRETRAIN = True.")
+        _halt("no pretrained backbone found. Freezing an untrained one would fine-tune the storm "
+              "heads on noise -- set RUN_PRETRAIN = True.")
     (tr_starts, tr_targets, tr_report), (va_starts, va_targets, va_report) = paired("train"), paired("validation")
     print(f"\n{format_pairing(tr_report)}")
     print(f"validation: {va_report['paired']:,} samples from {va_report['storms']} unseen storms "

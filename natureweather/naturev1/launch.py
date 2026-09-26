@@ -87,10 +87,20 @@ def _alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    cmdline = Path(f"/proc/{pid}/cmdline")
-    if cmdline.exists():
+    proc = Path(f"/proc/{pid}")
+    if proc.exists():
+        try:
+            state = (proc / "stat").read_text().rpartition(")")[2].split()[0]
+            text = (proc / "cmdline").read_bytes()
+        except (OSError, IndexError):
+            return False                    # gone between the two reads
+        if state in ("Z", "X"):
+            return False                    # exited, and only waiting for its parent to reap it
+        if not text:
+            # Empty for a moment while a new process is still starting up. Reading that as "not
+            # running" made follow() report a run it had just launched as stopped.
+            return True
         # A recycled pid belonging to some other program is not our run.
-        text = cmdline.read_bytes()
         return RUNNER.encode() in text or SUPERVISOR.encode() in text or b"naturev1" in text
     return True
 
@@ -303,32 +313,58 @@ def supervise(runner: str, directory: str, stall_minutes: float = 30.0, max_rest
             return
 
 
-def follow(lines: int = 40, directory: str | os.PathLike | None = None) -> str:
+def _tail(log: Path, size: int = 400_000) -> str:
+    with open(log, "rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        end = handle.tell()
+        handle.seek(max(end - size, 0))
+        return handle.read().decode("utf-8", errors="replace")
+
+
+def _only_banner(tail: str) -> bool:
+    """True while the newest run has written nothing yet: its launch banner is all there is."""
+    start = tail.rfind("[launch] ")
+    return start >= 0 and tail[start:].count("\n") <= 2
+
+
+def follow(lines: int = 40, directory: str | os.PathLike | None = None, wait: float = 0.0) -> None:
     """
-    Print (and return) the last lines of the run's log, with whether it is still going.
+    Print the last lines of the run's log, with whether it is still going.
+
+    It prints and returns nothing, so as the last line of a notebook cell the log is shown once -- not a
+    second time as the escaped string a returned value would be displayed as.
 
     Progress bars write ``\\r`` to redraw a line in place; only the latest state of each such line is
     shown, so a staging progress bar is one line here and not two thousand.
+
+    Args:
+        wait: for a run launched a moment ago, wait up to this many seconds for its first lines, so a
+            run that fails at once shows its error here rather than on the next look. A run that has
+            already written something is shown at once.
     """
     home = data_directory(directory)
     log = home / LOG
     if not log.exists():
-        text = f"no log at {log} -- nothing has been launched from this directory"
-        print(text)
-        return text
-    with open(log, "rb") as handle:
-        handle.seek(0, os.SEEK_END)
-        size = handle.tell()
-        handle.seek(max(size - 400_000, 0))
-        tail = handle.read().decode("utf-8", errors="replace")
+        print(f"no log at {log} -- nothing has been launched from this directory")
+        return
+    if wait > 0 and _only_banner(_tail(log, 20_000)) and status(home):
+        print(f"[follow] waiting up to {wait:.0f} s for the run's first lines ...")
+        deadline = time.time() + wait
+        while time.time() < deadline and status(home) and _only_banner(_tail(log, 20_000)):
+            time.sleep(1.0)
+        # It has started talking: let that first burst land, until the log has been still for 3 s.
+        size, still = log.stat().st_size, 0
+        while time.time() < deadline and still < 3 and status(home):
+            time.sleep(1.0)
+            grown = log.stat().st_size
+            still, size = (still + 1 if grown == size else 0), grown
+    tail = _tail(log)
     rows = [row.split("\r")[-1] for row in tail.split("\n")]
     shown = "\n".join(rows[-lines:])
     running = status(home)
     state = (f"[follow] RUNNING, pid {running['pid']}, started {running['started']}" if running
              else "[follow] NOT RUNNING -- finished, stopped, or crashed; the lines above say which")
-    text = f"{shown}\n{state}"
-    print(text)
-    return text
+    print(f"{shown}\n{state}")
 
 
 def stop(directory: str | os.PathLike | None = None, wait: float = 60.0) -> bool:

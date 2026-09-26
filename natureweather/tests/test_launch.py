@@ -73,7 +73,7 @@ def test_settings_are_overridden_in_place():
         _set_setting(FAKE, "NOT_A_SETTING", 1)
 
 
-def test_run_survives_its_launcher_and_stops_cleanly(tmp_path):
+def test_run_survives_its_launcher_and_stops_cleanly(tmp_path, capsys):
     fake = tmp_path / "fake_pipeline.py"
     fake.write_text(FAKE)
     home = tmp_path / "data"
@@ -85,7 +85,8 @@ def test_run_survives_its_launcher_and_stops_cleanly(tmp_path):
 
     assert _wait(lambda: status(home) is not None), "the run should be alive after its launcher exited"
     assert _wait(lambda: "step 5" in (home / "train.log").read_text())
-    shown = follow(directory=home)
+    assert follow(directory=home) is None, "printed, not returned: a notebook would show it twice"
+    shown = capsys.readouterr().out
     assert "settings True 7" in shown, "the overrides reached the running pipeline"
     assert "staging 2/3" in shown and "staging 0/3" not in shown, "progress bars collapse to one line"
     assert "RUNNING" in shown
@@ -96,7 +97,8 @@ def test_run_survives_its_launcher_and_stops_cleanly(tmp_path):
     assert stop(directory=home, wait=20)
     assert status(home) is None
     assert (home / "checkpointed").exists(), "stopping must let the run's finally-blocks checkpoint"
-    assert "NOT RUNNING" in follow(directory=home)
+    follow(directory=home)
+    assert "NOT RUNNING" in capsys.readouterr().out
 
 
 def test_token_goes_through_the_environment_not_the_file(tmp_path):
