@@ -44,9 +44,16 @@ from .model import (
     PEAK_WIND_ANCHOR_KT,
     PRESSURE_ANCHOR_HPA,
     RI_THRESHOLDS_KT,
+    STORM_ENVIRONMENT_FEATURES,
     SURFACE_FIELDS,
+    TRACK_MEMBERS,
     WIND_RADII_THRESHOLDS_KT,
 )
+from .steering import displacement_km, extrapolation_track, steering_track, storm_environment
+
+
+#: Feature banks written by an earlier version lack the far pool and the physics; they are rebuilt.
+BANK_VERSION = 2
 
 
 #: Knots to metres per second. :func:`naturev1.forecast.decode_intensity` reads the intensity head in
@@ -127,8 +134,9 @@ class StormTargets:
                 intensity[lead, 1] = pressure
                 intensity_mask[lead, 1] = 1.0
 
-            # Landfall is cumulative: "will it make landfall by +48h", not "exactly at +48h".
-            landfall[lead] = float(track.landfall[start : end + 1].any())
+            # Landfall is cumulative: "will it make landfall by +48h", not "exactly at +48h". The window
+            # opens *after* the issue point: a storm crossing the coast right now is not a forecast.
+            landfall[lead] = float(track.landfall[start + 1 : end + 1].any())
             landfall_mask[lead] = 1.0
 
             if np.isfinite(track.rmw_nmi[end]):
@@ -162,6 +170,8 @@ class StormTargets:
             ),
             "ri_mask": torch.full((len(RI_THRESHOLDS_KT),), float(eligible)),
             "ri_delta_target": torch.tensor(change if eligible else nan, dtype=torch.float32),
+            # The season, so a consensus can be fitted on some seasons and judged on others.
+            "season": torch.tensor(track.year, dtype=torch.int64),
         }
 
 
@@ -404,7 +414,9 @@ def storm_feature_bank(
         cache: file to keep the bank in. Resumes from a partial one; rebuilt if the backbone changed.
 
     Returns:
-        ``{"features": (N, hidden), "targets": {...}, "fingerprint": str}``.
+        ``{"features": (N, hidden), "features_far": (N, hidden), "targets": {...}, "fingerprint": str}``.
+        ``targets`` also carries, per sample, the storm's physical environment (``storm_environment``)
+        and the steering-flow track (``track_prior``), both read from the same analysis frame.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -416,14 +428,21 @@ def storm_feature_bank(
     device = next(model.parameters()).device
     fingerprint = _backbone_fingerprint(model)
     count, hidden = len(starts), model.config.hidden_size
+    leads = model.config.lead_times_hours
     features = torch.zeros(count, hidden)
+    features_far = torch.zeros(count, hidden)
+    environment = torch.zeros(count, len(STORM_ENVIRONMENT_FEATURES))
+    prior = torch.zeros(count, len(leads), 2)
     done: set[str] = set()
     partial = Path(f"{cache}.partial") if cache else None
+
     def readable(path):
-        # A cache cut off by a kill would crash every restart here; it is rebuilt instead.
+        # A cache cut off by a kill would crash every restart here; it is rebuilt instead. So is one
+        # from before the bank carried the far pool and the physics -- those are what the heads train on.
         try:
             stored = torch.load(path, map_location="cpu", weights_only=False)
-            usable = stored.get("fingerprint") == fingerprint and stored["features"].shape[0] == count
+            usable = (stored.get("fingerprint") == fingerprint and stored["features"].shape[0] == count
+                      and stored.get("version") == BANK_VERSION)
             return stored if usable else None
         except Exception as error:
             print(f"[storms] {Path(path).name} is damaged ({type(error).__name__}); rebuilding it", flush=True)
@@ -438,7 +457,8 @@ def storm_feature_bank(
     if partial is not None and partial.exists():
         stored = readable(partial)
         if stored is not None:
-            features, done = stored["features"], set(stored["done"])
+            features, features_far, done = stored["features"], stored["features_far"], set(stored["done"])
+            environment, prior = stored["environment"], stored["prior"]
 
     groups: dict[str, list[int]] = {}
     for index, target in enumerate(targets):
@@ -476,8 +496,15 @@ def storm_feature_bank(
                                       dtype=torch.float64)
                 centres = torch.stack([targets[i].build()["storm_center"] for i in chosen]).to(device)
                 with _autocast(device, precision):
-                    pooled = model.storm_features(analysis, grid, calendar_features(stamps).to(device), centres)
-                features[chosen] = pooled.float().cpu()
+                    near, wide = model.storm_features(analysis, grid, calendar_features(stamps).to(device),
+                                                      centres, far=True)
+                features[chosen] = near.float().cpu()
+                features_far[chosen] = wide.float().cpu()
+                # The physics, from the same frame the backbone saw: the storm's environment now, and
+                # where the steering flow as it stands would carry it.
+                now = analysis[:, -1].float()
+                environment[chosen] = storm_environment(now, base.variables, normalizer, grid, centres).cpu()
+                prior[chosen] = steering_track(now, base.variables, normalizer, grid, centres, leads).cpu()
             done.add(storm)
             beat("storm features")
             if progress:
@@ -486,13 +513,17 @@ def storm_feature_bank(
                 print(f"\r[storms] features {len(done):,}/{len(groups):,} storms "
                       f"({left / 60:.0f} min left)", end="", flush=True)
             if partial is not None and time.time() - last_save > 60:
-                atomic_torch_save({"features": features, "done": sorted(done), "fingerprint": fingerprint},
-                                  partial)
+                atomic_torch_save({"features": features, "features_far": features_far, "environment": environment,
+                                   "prior": prior, "done": sorted(done), "fingerprint": fingerprint,
+                                   "version": BANK_VERSION}, partial)
                 last_save = time.time()
     if progress and pending:
         print(flush=True)
 
-    bank = {"features": features, "targets": _stack_targets(targets), "fingerprint": fingerprint}
+    stacked = _stack_targets(targets)
+    stacked["storm_environment"], stacked["track_prior"] = environment, prior
+    bank = {"features": features, "features_far": features_far, "targets": stacked,
+            "fingerprint": fingerprint, "version": BANK_VERSION}
     if cache:
         atomic_torch_save(bank, cache)
         if partial is not None:
@@ -504,7 +535,9 @@ def _bank_loss(model, bank, index, device):
     from .losses import total_loss
 
     batch = {key: value[index].to(device) for key, value in bank["targets"].items()}
-    outputs = model.storm_heads(bank["features"][index].to(device), batch["storm_center"], batch["storm_state"])
+    batch["pooled_far"] = bank["features_far"][index].to(device)
+    outputs = model.storm_heads(bank["features"][index].to(device), batch["storm_center"], batch["storm_state"],
+                                batch["storm_environment"], batch["track_prior"], batch["pooled_far"])
     loss, parts = total_loss(outputs, batch, SURFACE_FIELDS)
     return loss, parts, batch
 
@@ -552,7 +585,8 @@ def train_storm_heads(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(heads, 1.0)
             optimizer.step()
-            model.mark_trained(parts, {"storm_center": batch["storm_center"], "storm_state": batch["storm_state"]})
+            model.mark_trained(parts, {key: batch[key] for key in ("storm_center", "storm_state", "storm_environment",
+                                                                  "pooled_far", "track_prior")})
             running += float(loss.detach()) * len(index)
         entry = {"epoch": epoch, "train": running / count}
         beat(f"storm heads epoch {epoch}")
@@ -585,6 +619,13 @@ def train_storm_heads(
         steps = model.head_steps.clone()
         model.load_state_dict(best_state)
         model.head_steps.copy_(steps)
+    if val_bank is not None:
+        # The consensus weights are fitted on storms the heads never trained on; the scorecard then
+        # judges them season by season on storms the *weights* were not fitted on either.
+        weights = fit_track_consensus(*_consensus_inputs(model, val_bank, model.config.lead_times_hours))
+        model.track_consensus.copy_(weights.to(model.track_consensus.device))
+        print("[storms] track consensus weights fitted on held-out storms: "
+              + describe_consensus(model.track_consensus, model.config.lead_times_hours), flush=True)
     if checkpoint_dir:
         manager = CheckpointManager(checkpoint_dir, repo_id=hub_repo)
         manager.save(model, None, state=TrainingState(step=len(history), epoch=len(history),
@@ -600,35 +641,150 @@ def _great_circle_km(lat1, lon1, lat2, lon2):
     return 2 * 6371.0 * torch.asin(inner.clamp(0, 1).sqrt())
 
 
-@torch.no_grad()
-def storm_scorecard(model, bank: dict, lead_times_hours) -> str:
-    """
-    Track and intensity errors on held-out storms, against the baselines a forecaster would use.
+# --------------------------------------------------------------------------------------------------
+# A multi-model consensus, within one model
+# --------------------------------------------------------------------------------------------------
 
-    Track: great-circle error of the most likely scenario, against a storm that stays put and against
-    straight-line extrapolation of its last twelve hours of motion -- the second is a genuinely hard
-    baseline at 12-24 h. Intensity: mean absolute error in knots, against persistence.
-    """
+@torch.no_grad()
+def _head_outputs(model, bank: dict, chunk: int = 4096) -> dict[str, torch.Tensor]:
+    """Every storm output for every sample in a bank, on the CPU."""
     device = next(model.parameters()).device
     model.eval()
     outputs, size = [], bank["features"].shape[0]
-    for start in range(0, size, 4096):
-        index = torch.arange(start, min(start + 4096, size))
+    for start in range(0, size, chunk):
+        index = torch.arange(start, min(start + chunk, size))
         batch = {key: value[index].to(device) for key, value in bank["targets"].items()}
-        outputs.append({k: v.float().cpu() for k, v in model.storm_heads(
-            bank["features"][index].to(device), batch["storm_center"], batch["storm_state"]).items()})
-    out = {key: torch.cat([o[key] for o in outputs]) for key in outputs[0]}
+        prior = batch["track_prior"] if model.uses_track_prior() else None
+        out = model.storm_heads(bank["features"][index].to(device), batch["storm_center"], batch["storm_state"],
+                                batch["storm_environment"], prior, bank["features_far"][index].to(device))
+        outputs.append({k: v.float().cpu() for k, v in out.items()})
+    return {key: torch.cat([o[key] for o in outputs]) for key in outputs[0]}
+
+
+def track_members(outputs: dict, targets: dict, lead_times_hours) -> torch.Tensor:
+    """
+    The consensus members for every sample: ``(N, L, len(TRACK_MEMBERS), 2)`` displacements in degrees.
+
+    The learned head's most likely scenario and its probability-weighted mean, the steering-flow track
+    (from the bank, so it is there whether or not the head was trained on it), and extrapolation.
+    """
+    size = outputs["displacement"].shape[0]
+    probabilities = outputs["mode_logits"].softmax(-1)
+    top = outputs["displacement"][torch.arange(size), probabilities.argmax(-1)]
+    mean = (outputs["displacement"] * probabilities.view(size, -1, 1, 1)).sum(1)
+    steering = targets["track_prior"].float()
+    extrapolation = extrapolation_track(targets["storm_state"], lead_times_hours)
+    return torch.stack([top, mean, steering, extrapolation], 2)
+
+
+def _consensus_inputs(model, bank: dict, leads):
+    outputs = _head_outputs(model, bank)
     targets = bank["targets"]
+    return (track_members(outputs, targets, leads), targets["track_target"].float(),
+            targets["track_valid"] > 0, targets["storm_center"][:, 0].float())
 
-    centre = targets["storm_center"]
-    top = out["mode_logits"].argmax(-1)
-    predicted = out["displacement"][torch.arange(size), top]                          # (N, L, 2)
-    truth, valid = targets["track_target"], targets["track_valid"] > 0
-    motion = targets["storm_state"][:, 2:4]                                             # degrees / 12 h
+
+def _project_to_simplex(weights: torch.Tensor) -> torch.Tensor:
+    """Nearest point on the probability simplex (Duchi et al. 2008)."""
+    ordered, _ = torch.sort(weights, descending=True)
+    cumulative = ordered.cumsum(0) - 1.0
+    ranks = torch.arange(1, weights.numel() + 1, dtype=weights.dtype, device=weights.device)
+    support = (ordered - cumulative / ranks > 0).nonzero().max()
+    threshold = cumulative[support] / (support + 1).to(weights.dtype)
+    return (weights - threshold).clamp_min(0.0)
+
+
+def fit_track_consensus(members: torch.Tensor, truth: torch.Tensor, valid: torch.Tensor,
+                        latitude: torch.Tensor, iterations: int = 500) -> torch.Tensor:
+    """
+    Per-lead weights over the members that minimise the mean squared track error, in kilometres.
+
+    Weights are non-negative and sum to one, which is what makes the result a blend of forecasts rather
+    than an arbitrary regression that could extrapolate wildly from two members that happen to be
+    correlated on this sample. Solved by projected gradient descent: a few hundred steps on a problem
+    with four unknowns per lead.
+
+    Args:
+        members: ``(N, L, M, 2)`` degrees. truth: ``(N, L, 2)`` degrees. valid: ``(N, L)`` bool.
+        latitude: ``(N,)`` the origin latitude, which sets how long a degree of longitude is.
+
+    Returns:
+        ``(L, M)`` weights. A lead with fewer verifying samples than members gets equal weights.
+    """
+    count, leads, size, _ = members.shape
+    members_km = displacement_km(members.double(), latitude.double().view(count, 1, 1))
+    truth_km = displacement_km(truth.double(), latitude.double().view(count, 1))
+    weights = torch.full((leads, size), 1.0 / size, dtype=torch.float64)
+    for lead in range(leads):
+        ok = valid[:, lead]
+        if int(ok.sum()) < size:
+            continue
+        design = members_km[ok, lead].permute(0, 2, 1).reshape(-1, size)          # (2n, M)
+        target = truth_km[ok, lead].reshape(-1)                                     # (2n,)
+        gram = design.T @ design / design.shape[0]
+        moment = design.T @ target / design.shape[0]
+        step = 1.0 / float(torch.linalg.eigvalsh(gram).max().clamp_min(1e-9))
+        w = weights[lead].clone()
+        for _ in range(iterations):
+            w = _project_to_simplex(w - step * (gram @ w - moment))
+        weights[lead] = w
+    return weights.float()
+
+
+def describe_consensus(weights: torch.Tensor, lead_times_hours) -> str:
+    rows = []
+    for lead, hours in enumerate(lead_times_hours):
+        parts = ", ".join(f"{name} {100 * float(w):.0f}%" for name, w in zip(TRACK_MEMBERS, weights[lead]))
+        rows.append(f"+{hours}h: {parts}")
+    return "; ".join(rows)
+
+
+def consensus_track(members: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    """Blend ``(N, L, M, 2)`` members with ``(L, M)`` weights into ``(N, L, 2)``."""
+    return (members * weights.to(members.dtype).view(1, *weights.shape, 1)).sum(2)
+
+
+def _cross_validated_consensus(members, truth, valid, latitude, seasons) -> torch.Tensor:
+    """
+    Each season's consensus from weights fitted on the *other* seasons -- so the consensus is scored on
+    storms its weights never saw. With a single season there is nothing to hold out, and the weights
+    are fitted on all of it; the scorecard says so.
+    """
+    blended = torch.zeros_like(truth)
+    distinct = sorted(set(seasons.tolist()))
+    if len(distinct) < 2:
+        return consensus_track(members, fit_track_consensus(members, truth, valid, latitude))
+    for season in distinct:
+        held = seasons == season
+        weights = fit_track_consensus(members[~held], truth[~held], valid[~held], latitude[~held])
+        blended[held] = consensus_track(members[held], weights)
+    return blended
+
+
+@torch.no_grad()
+def storm_scorecard(model, bank: dict, lead_times_hours) -> str:
+    """
+    Track and intensity errors on held-out storms, member by member, against the forecaster's baselines.
+
+    Track: great-circle error in km of the learned head's most likely scenario, of the steering-flow
+    track (no training at all -- the atmosphere's own deep-layer wind), of the consensus (weights
+    fitted on other seasons), of a storm that stays put, and of straight extrapolation of the last twelve
+    hours -- the genuinely hard baseline at 12-24 h. Intensity: mean absolute error in knots, against
+    persistence.
+    """
+    out = _head_outputs(model, bank)
+    targets = bank["targets"]
+    size = out["displacement"].shape[0]
+    centre = targets["storm_center"].float()
+    truth, valid = targets["track_target"].float(), targets["track_valid"] > 0
+    members = track_members(out, targets, lead_times_hours)
+    seasons = targets.get("season", torch.zeros(size, dtype=torch.int64))
+    blended = _cross_validated_consensus(members, truth, valid, centre[:, 0], seasons)
     wind_now = targets["current_wind_kt"]
+    distinct = len(set(seasons.tolist()))
 
-    lines = [f"{'lead':>6} {'n':>6} {'track km':>9} {'stay-put':>9} {'extrap.':>9} "
-             f"{'wind MAE kt':>12} {'persist':>8}"]
+    lines = [f"{'lead':>6} {'n':>6} {'model km':>9} {'steering':>9} {'consensus':>9} {'stay-put':>9} "
+             f"{'extrap.':>9} {'wind MAE kt':>12} {'persist':>8}"]
     for lead, hours in enumerate(lead_times_hours):
         ok = valid[:, lead]
         if not ok.any():
@@ -639,18 +795,28 @@ def storm_scorecard(model, bank: dict, lead_times_hours) -> str:
         def error(d):
             return float(_great_circle_km(actual[0], actual[1], lat0 + d[:, 0], lon0 + d[:, 1]).mean())
 
-        model_err = error(predicted[ok, lead])
-        still = error(torch.zeros_like(predicted[ok, lead]))
-        extrapolated = error(motion[ok] * hours / 12.0)
+        scenario = error(members[ok, lead, 0])
+        steer = error(members[ok, lead, 2])
+        consensus = error(blended[ok, lead])
+        still = error(torch.zeros_like(truth[ok, lead]))
+        extrapolated = error(members[ok, lead, 3])
         observed = targets["intensity_mask"][:, lead, 0] > 0
         both = ok & observed & torch.isfinite(wind_now)
         wind_true = targets["intensity_target"][both, lead, 0] / KT_TO_MS
         wind_pred = out["intensity_mean"][both, lead, 0] / KT_TO_MS
         mae = float((wind_pred - wind_true).abs().mean()) if both.any() else float("nan")
         persist = float((wind_now[both] - wind_true).abs().mean()) if both.any() else float("nan")
-        lines.append(f"{hours:>5}h {int(ok.sum()):>6} {model_err:>9.0f} {still:>9.0f} {extrapolated:>9.0f} "
-                     f"{mae:>12.1f} {persist:>8.1f}")
+        lines.append(f"{hours:>5}h {int(ok.sum()):>6} {scenario:>9.0f} {steer:>9.0f} {consensus:>9.0f} "
+                     f"{still:>9.0f} {extrapolated:>9.0f} {mae:>12.1f} {persist:>8.1f}")
     lines.append("")
-    lines.append("Beating 'extrap.' on track and 'persist' on wind is the bar. Losing to them means the heads")
-    lines.append("have not learned anything the storm's own recent history did not already say.")
+    lines.append("'steering' is physics alone: the deep-layer wind around the storm, no training. 'consensus' blends")
+    lines.append("model, steering and extrapolation with weights fitted on "
+                 + ("the other held-out seasons" if distinct > 1
+                    else "these same storms (one season: nothing to hold out)") + ".")
+    lines.append("Beating 'extrap.' on track and 'persist' on wind is the bar; beating 'steering' is what the")
+    lines.append("learned part is for. Losing to them means the heads have not learned anything the storm's own")
+    lines.append("recent history, or the flow around it, did not already say.")
+    if float(model.track_consensus.abs().sum()) > 0:
+        lines.append("consensus weights in the checkpoint: "
+                     + describe_consensus(model.track_consensus, lead_times_hours))
     return "\n".join(lines)

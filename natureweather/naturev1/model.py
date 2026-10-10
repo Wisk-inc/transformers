@@ -91,10 +91,25 @@ TRACKED_HEADS = (
     "field", "weather_type", "track", "landfall", "landfall_timing", "intensity", "ri", "ri_delta",
     "ri_onset", "eyewall_peak", "eyewall_rmw", "wind_radii", "enso", "state",
     "analysis_encoder", "satellite_encoder", "environment_encoder", "storm_position", "storm_state",
+    "storm_environment", "storm_far", "track_prior",
 )
 #: Parameters added after 0.7. A checkpoint written before them loads with these freshly initialised --
 #: all of them start as exact no-ops, so the loaded model behaves exactly as it did when it was saved.
-OPTIONAL_STATE = ("head_steps", "storm_position.", "storm_state_embed.", "state_head.", "noise_proj.")
+OPTIONAL_STATE = ("head_steps", "storm_position.", "storm_state_embed.", "state_head.", "noise_proj.",
+                  "storm_environment_embed.", "storm_far_pool.", "track_consensus")
+
+#: The storm's physical environment, computed from the state by :func:`naturev1.storm_environment`:
+#: the SHIPS predictors. Deep-layer steering and 200-850 hPa shear over the 200-800 km ring around the
+#: centre (tens of m/s), mid-level humidity over the inner 500 km (5 g/kg units), the ocean's distance
+#: from 26.5 C (3 K units), and whether upper-level winds were available at all.
+STORM_ENVIRONMENT_FEATURES = ("steering_u", "steering_v", "shear_u", "shear_v", "shear_speed",
+                              "mid_level_humidity", "ocean_temperature", "observed")
+
+#: The members of the track consensus, in the order of the ``track_consensus`` weights: the learned
+#: head's most likely scenario, its probability-weighted mean, the steering-flow track, and straight
+#: extrapolation of the last twelve hours. What the Hurricane Center calls a consensus is a weighted
+#: blend of several models, and it beats every one of its members; this is that, within one model.
+TRACK_MEMBERS = ("scenario", "mixture_mean", "steering", "extrapolation")
 
 #: What the storm heads are told about the storm itself, beyond the atmosphere around it -- the
 #: predictors every operational intensity scheme (SHIPS, LGEM) starts from. A 1.5-degree reanalysis
@@ -424,6 +439,17 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         self.storm_position = nn.Linear(3, hidden, bias=False)
         # The storm's own state -- current intensity and recent motion. See STORM_STATE_FEATURES.
         self.storm_state_embed = nn.Linear(len(STORM_STATE_FEATURES), hidden, bias=False)
+        # The storm's environment, computed from the state: steering, shear, moisture, ocean. See
+        # STORM_ENVIRONMENT_FEATURES. The heads could in principle learn these from the pooled features;
+        # given explicitly, 22,000 labels go on what the physics does not already say.
+        self.storm_environment_embed = nn.Linear(len(STORM_ENVIRONMENT_FEATURES), hidden, bias=False)
+        # A second, wider pool around the storm -- twice storm_pool_radius_km -- so the heads see the
+        # core and the environment as two things: the ridge that steers a storm sits a thousand
+        # kilometres from the eye, and a 500 km pool barely touches it.
+        self.storm_far_pool = nn.Linear(hidden, hidden, bias=False)
+        # Per-lead weights over TRACK_MEMBERS, fitted on held-out storms after the heads are trained.
+        # All zero until fitted, which the forecast reads as "no consensus available".
+        self.register_buffer("track_consensus", torch.zeros(leads, len(TRACK_MEMBERS)))
         # Training steps each output has actually received -- saved with the weights, so a forecast
         # built from a checkpoint knows which of its heads were ever trained.
         self.register_buffer("head_steps", torch.zeros(len(TRACKED_HEADS), dtype=torch.int64))
@@ -467,6 +493,8 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
             # nothing -- so a checkpoint from before these existed behaves exactly as it did.
             self.storm_position.weight.zero_()
             self.storm_state_embed.weight.zero_()
+            self.storm_environment_embed.weight.zero_()
+            self.storm_far_pool.weight.zero_()
 
     def _anchor_uncertainty(self) -> None:
         """
@@ -588,6 +616,8 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         member_noise: torch.Tensor | None = None,
         storm_center: torch.Tensor | None = None,
         storm_state: torch.Tensor | None = None,
+        storm_environment: torch.Tensor | None = None,
+        track_prior: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Args:
@@ -606,6 +636,11 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
                 Rows of NaN fall back to the global pool.
             storm_state: ``(B, len(STORM_STATE_FEATURES))`` the storm's current intensity and recent
                 motion, from :func:`naturev1.storm_state_vector`. Optional.
+            storm_environment: ``(B, len(STORM_ENVIRONMENT_FEATURES))`` steering, shear, moisture and
+                ocean around the storm, from :func:`naturev1.storm_environment`. Optional.
+            track_prior: ``(B, leads, 2)`` a physics track in degrees, from
+                :func:`naturev1.steering_track`; the track head then predicts the residual from it.
+                Pass it only if the head was trained with one -- see :meth:`uses_track_prior`.
 
         Returns:
             A dict of forecasts. Gridded entries are ``(B, P, leads, ...)``; storm-scale entries are
@@ -638,10 +673,13 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         # reads the whole planet; the storm heads read around the storm when told where it is.
         area = self.latent_grid.weights.to(current.dtype).view(1, -1, 1)
         global_summary = self.summary_pool(self.summary_norm((current * area).sum(1) / area.sum()))
-        if storm_center is None and storm_state is None:
+        if storm_center is None and storm_state is None and storm_environment is None and track_prior is None:
             storm = self._storm_outputs(global_summary)
         else:
-            storm = self.storm_heads(self.storm_pool(current, storm_center), storm_center, storm_state)
+            far = None if storm_center is None else self.storm_pool(
+                current, storm_center, 2.0 * self.config.storm_pool_radius_km)
+            storm = self.storm_heads(self.storm_pool(current, storm_center), storm_center, storm_state,
+                                     storm_environment, track_prior, far)
         enso = self.enso_head(global_summary)
 
         state = {}
@@ -667,9 +705,10 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
     # trained). `forward` goes through exactly the same two functions, so the fast path and the full
     # model cannot disagree.
 
-    def storm_pool(self, current: torch.Tensor, storm_center: torch.Tensor | None) -> torch.Tensor:
+    def storm_pool(self, current: torch.Tensor, storm_center: torch.Tensor | None,
+                   radius_km: float | None = None) -> torch.Tensor:
         """
-        Pool the mesh around each sample's storm, with a Gaussian of ``storm_pool_radius_km``.
+        Pool the mesh around each sample's storm, with a Gaussian of ``radius_km`` (``storm_pool_radius_km``).
 
         A mean over the whole planet -- which is what the storm heads read before this -- is the same
         number for every storm active at that hour. In a busy Atlantic September three or four storms
@@ -690,15 +729,23 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
             present = torch.isfinite(centre).all(-1)
             position = latent.geometry.embed(torch.deg2rad(torch.nan_to_num(centre)))       # (B, 3) km
             distance = torch.cdist(position, latent.points.to(torch.float64))               # chordal km
-            local = torch.exp(-0.5 * (distance / self.config.storm_pool_radius_km) ** 2)
+            local = torch.exp(-0.5 * (distance / (radius_km or self.config.storm_pool_radius_km)) ** 2)
             weights = torch.where(present.view(-1, 1), weights * local, weights)
         weights = (weights / weights.sum(-1, keepdim=True).clamp_min(1e-30)).to(current.dtype)
         return (current * weights.unsqueeze(-1)).sum(1)
 
     def storm_heads(self, pooled: torch.Tensor, storm_center: torch.Tensor | None = None,
-                    storm_state: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
-        """Every storm output, from pooled features plus where the storm is and how strong it is."""
+                    storm_state: torch.Tensor | None = None, storm_environment: torch.Tensor | None = None,
+                    track_prior: torch.Tensor | None = None, pooled_far: torch.Tensor | None = None,
+                    ) -> dict[str, torch.Tensor]:
+        """
+        Every storm output, from pooled features plus where the storm is, how strong it is, what the
+        atmosphere around it is doing (``storm_environment``), the wider pool (``pooled_far``), and --
+        when a ``track_prior`` is given -- as a residual on that physics track, which is returned too.
+        """
         dtype = pooled.dtype
+        if pooled_far is not None:
+            pooled = pooled + self.storm_far_pool(pooled_far.to(pooled.device, dtype))
         if storm_center is not None:
             centre = storm_center.to(pooled.device, torch.float64)
             present = torch.isfinite(centre).all(-1, keepdim=True)
@@ -707,7 +754,19 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
             pooled = pooled + self.storm_position(unit.to(dtype)) * present.to(dtype)
         if storm_state is not None:
             pooled = pooled + self.storm_state_embed(torch.nan_to_num(storm_state.to(pooled.device, dtype)))
-        return self._storm_outputs(self.summary_pool(self.summary_norm(pooled)))
+        if storm_environment is not None:
+            pooled = pooled + self.storm_environment_embed(
+                torch.nan_to_num(storm_environment.to(pooled.device, dtype)))
+        outputs = self._storm_outputs(self.summary_pool(self.summary_norm(pooled)))
+        if track_prior is not None:
+            prior = torch.nan_to_num(track_prior.to(outputs["displacement"].device, outputs["displacement"].dtype))
+            outputs["displacement"] = outputs["displacement"] + prior.unsqueeze(1)    # every scenario
+            outputs["track_prior"] = prior
+        return outputs
+
+    def uses_track_prior(self) -> bool:
+        """Whether the track head was trained as a residual on a steering track -- and so needs one."""
+        return int(self.head_steps[TRACKED_HEADS.index("track_prior")]) > 0
 
     def _storm_outputs(self, summary: torch.Tensor) -> dict[str, torch.Tensor]:
         batch, leads = summary.shape[0], self.config.num_leads
@@ -728,18 +787,22 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
 
     @torch.no_grad()
     def storm_features(self, analysis: torch.Tensor, analysis_grid: FieldGrid, calendar: torch.Tensor,
-                       storm_center: torch.Tensor, neighbours: int = 24) -> torch.Tensor:
+                       storm_center: torch.Tensor, neighbours: int = 24, far: bool = False):
         """
         The frozen half of the storm path: backbone once, pooled around each storm. ``(B, hidden)``.
 
         With the backbone frozen for stage two, this is a pure function of the reanalysis and the
         storm's position, so it is computed once per sample and cached -- see
         :func:`naturev1.storm_feature_bank`. Training the heads then costs milliseconds per epoch
-        instead of an 89-channel ERA5 read per sample.
+        instead of an 89-channel ERA5 read per sample. With ``far=True`` the wider pool comes back as
+        a second tensor.
         """
         latent = self.encode(None, None, analysis, analysis_grid, calendar, neighbours=neighbours)
-        latent = self.norm(self._run_blocks(latent, self.latent_grid))
-        return self.storm_pool(latent[:, -1], storm_center)
+        current = self.norm(self._run_blocks(latent, self.latent_grid))[:, -1]
+        near = self.storm_pool(current, storm_center)
+        if not far:
+            return near
+        return near, self.storm_pool(current, storm_center, 2.0 * self.config.storm_pool_radius_km)
 
     # ------------------------------------------------------------------- what has been trained --
 
@@ -764,14 +827,20 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         if batch is not None:
             for key, name in (("analysis", "analysis_encoder"), ("satellite", "satellite_encoder"),
                               ("environment", "environment_encoder"), ("storm_center", "storm_position"),
-                              ("storm_state", "storm_state")):
+                              ("storm_state", "storm_state"), ("storm_environment", "storm_environment"),
+                              ("pooled_far", "storm_far"), ("track_prior", "track_prior")):
                 if batch.get(key) is not None:
                     touched.append(name)
             modules.update({"analysis_encoder": self.analysis_encoder,
                             "satellite_encoder": self.satellite_encoder,
                             "environment_encoder": self.environment_encoder,
                             "storm_position": self.storm_position,
-                            "storm_state": self.storm_state_embed})
+                            "storm_state": self.storm_state_embed,
+                            "storm_environment": self.storm_environment_embed,
+                            "storm_far": self.storm_far_pool,
+                            # The prior has no parameters of its own: it is "trained" when the track
+                            # head learns on top of it, which is what the record needs to say.
+                            "track_prior": self.track_head})
         with torch.no_grad():
             for name in set(touched):
                 if any(p.requires_grad for p in modules[name].parameters()):
@@ -813,7 +882,7 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         """
         for module in (self.track_head, self.eyewall_head, self.ri_head, self.landfall_head,
                        self.intensity_head, self.summary_pool, self.summary_norm, self.storm_position,
-                       self.storm_state_embed):
+                       self.storm_state_embed, self.storm_environment_embed, self.storm_far_pool):
             yield from module.parameters()
 
     def freeze_backbone(self, frozen: bool = True) -> tuple[int, int]:

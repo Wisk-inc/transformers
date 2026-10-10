@@ -5,7 +5,7 @@ if __name__ not in ("__main__", "__naturev1_pipeline__"):
     raise ImportError("naturev1._pipeline is the training pipeline itself; start it with naturev1.launch()")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
-#  NatureV1 0.8.6 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
+#  NatureV1 0.9.0 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
 #
 #  Paste and run. It installs what it needs, stages the data, builds the 89M-parameter model, trains it
 #  in stages, scores itself against persistence and climatology, and only publishes if it earned it.
@@ -20,6 +20,12 @@ if __name__ not in ("__main__", "__naturev1_pipeline__"):
 #  If it stops for any reason -- a crash, a reboot, naturev1.stop(), the supervisor giving up -- just run
 #  this cell again: every stage continues from its last checkpoint (saved every minute, a snapshot every
 #  30 minutes, and a second copy in BACKUP_DIR). naturev1.progress() shows where it will continue from.
+#
+#  0.9: the hurricane heads read the storm's physical environment -- deep-layer steering, 200-850 hPa
+#  shear, mid-level moisture, ocean temperature -- computed from the model's own atmosphere, plus a
+#  wider 1000 km pool. The track head predicts the residual from a physics-only steering track, and the
+#  forecast is a multi-model consensus of learned track, steering track and extrapolation, weighted per
+#  lead on held-out seasons. The scorecard shows every member, so you can see which one earns its place.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 
 BACKGROUND    = True      # supervised background run: survives disconnects, restarts on crash or stall
@@ -99,7 +105,7 @@ def _halt(message, kind="danger"):
     raise SystemExit(message)
 
 
-_NEEDED = {"naturev1": ("naturev1[all]>=0.8.6", (0, 8, 6)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
+_NEEDED = {"naturev1": ("naturev1[all]>=0.9.0", (0, 9, 0)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
 
 
 def _version(module):
@@ -181,14 +187,15 @@ from naturev1 import (HEADLINE_STATE_FIELDS, CachedERA5, CheckpointManager, ERA5
                       RolloutSchedule, StateStepper, Trainer, TrainSettings, autotune_batch_size,
                       benchmark_steps, build_climatology, build_forecast, calendar_features, catalogue,
                       channel_loss_weights, check_forecast, check_grid_alignment, check_normalization,
-                      check_weights, corpus_scale, device_report, era5_loader, era5_source_grid, era5_splits,
-                      expand_variables, fetch_latest, format_pairing, format_plan, format_preflight,
-                      lead_offsets, masked_gaussian_nll, materialise, normalize_channels,
-                      open_weatherbench_levels, pair_tracks_with_reanalysis, parse_hurdat2, preflight,
-                      push_to_hub, rapid_intensification, resolve_all, responds_to_input, scene_from_netcdf,
-                      score_model, score_state, scoring_fields, split_by_storm, spread_skill_ratio,
-                      state_forecast, storm_feature_bank, storm_scorecard, storm_state_vector,
-                      train_state_rollout, train_storm_heads, training_plan, upper_air_report, watch)
+                      check_weights, corpus_scale, describe_environment, device_report, era5_loader,
+                      era5_source_grid, era5_splits, expand_variables, extrapolation_track, fetch_latest,
+                      format_pairing, format_plan, format_preflight, lead_offsets, masked_gaussian_nll,
+                      materialise, normalize_channels, open_weatherbench_levels, pair_tracks_with_reanalysis,
+                      parse_hurdat2, preflight, push_to_hub, rapid_intensification, resolve_all,
+                      responds_to_input, scene_from_netcdf, score_model, score_state, scoring_fields,
+                      split_by_storm, spread_skill_ratio, state_forecast, steering_track, storm_environment,
+                      storm_feature_bank, storm_scorecard, storm_state_vector, train_state_rollout,
+                      train_storm_heads, training_plan, upper_air_report, watch)
 from naturev1.besttrack import download
 from naturev1.era5 import _target_index
 from naturev1.safeio import atomic_write_text, read_json
@@ -468,34 +475,68 @@ if RUN_HINDCAST:
         target = targets[choice].build()
         window = ERA5Window(ERA5, indices=starts[choice:choice + 1], augment=False, stats_cache=STATS, **common)[0]
         issued = dt.datetime.fromtimestamp(float(window["valid_time"]), tz=dt.timezone.utc)
+        centre = target["storm_center"].tolist()
+        here = target["storm_center"][None].to(DEVICE)
+        # The storm's environment and the physics-only steering track, from the analysis "now".
+        now = window["analysis"][-1][None].to(DEVICE)
+        environment = storm_environment(now, train_ds.variables, train_ds.normalizer, SRC, here)
+        steer = steering_track(now, train_ds.variables, train_ds.normalizer, SRC, here, CFG.lead_times_hours)
+        print(describe_environment(environment[0]))
         with torch.no_grad(), torch.autocast(DEVICE, dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
             out = model.eval()(analysis=window["analysis"][None].to(DEVICE), analysis_grid=SRC,
                                calendar=window["calendar"][None].to(DEVICE), output_grid=SRC,
-                               storm_center=target["storm_center"][None].to(DEVICE),
-                               storm_state=target["storm_state"][None].to(DEVICE))
+                               storm_center=here, storm_state=target["storm_state"][None].to(DEVICE),
+                               storm_environment=environment,
+                               track_prior=steer if model.uses_track_prior() else None)
         out = {k: v.float().cpu() for k, v in out.items()}
-        centre = target["storm_center"].tolist()
+        out.setdefault("track_prior", steer.float().cpu())
+        # A second physics member: the storm carried by the atmosphere the model *forecasts*, step by
+        # step, rather than by today's flow held steady. Only once the state head has been trained.
+        rolled = None
+        if model.trained_heads()["state"] > 0:
+            with torch.no_grad():
+                future = state_forecast(model, {"analysis": window["analysis"][None].to(DEVICE),
+                                                "calendar": window["calendar"][None].to(DEVICE),
+                                                "valid_time": window["valid_time"].view(1)},
+                                        stepper, steps=ROLLOUT_STEPS, precision=R["precision"])[0]
+            rolled = steering_track(torch.cat([now[None], future.to(DEVICE)]), train_ds.variables,
+                                    train_ds.normalizer, SRC, here, CFG.lead_times_hours).float().cpu()
         fc = build_forecast(out, CFG.lead_times_hours, issued, storm_center=centre,
-                            normalizer=train_ds.normalizer, trained=model.trained_heads(), inputs=("analysis",))
+                            normalizer=train_ds.normalizer, trained=model.trained_heads(), inputs=("analysis",),
+                            consensus={"weights": model.track_consensus.cpu(), "storm_state": target["storm_state"]})
         print(f"issued {issued:%Y-%m-%d %H:%M}Z at {centre[0]:.1f}N {-centre[1]:.1f}W, "
               f"{float(target['current_wind_kt']):.0f} kt now")
+
+        def km_off(d_lat, d_lon, lead):
+            lat = centre[0] + float(target["track_target"][lead, 0])
+            lon = centre[1] + float(target["track_target"][lead, 1])
+            return 111.2 * np.hypot(centre[0] + float(d_lat) - lat,
+                                    (centre[1] + float(d_lon) - lon) * np.cos(np.radians(lat)))
+
+        members = {"steering": steer[0].cpu(), "extrap.": extrapolation_track(target["storm_state"][None],
+                                                                              CFG.lead_times_hours)[0]}
+        if rolled is not None:
+            members["rollout-steer"] = rolled[0]
         if isinstance(fc["track_scenarios"], list):
             top = fc["track_scenarios"][0]
-            print(f"most likely scenario ({top['probability']:.0%}) vs what happened:")
-            for lead, point in enumerate(top["track"]):
-                if target["track_valid"][lead] > 0:
-                    lat = centre[0] + float(target["track_target"][lead, 0])
-                    lon = centre[1] + float(target["track_target"][lead, 1])
-                    error = 111.2 * np.hypot(point["latitude"] - lat, (point["longitude"] - lon) * np.cos(np.radians(lat)))
-                    wind = ""
-                    if isinstance(fc["intensity"], list):
-                        wind = f"{fc['intensity'][lead]['max_wind_ms'] * 1.94384:5.0f} kt forecast"
-                        if target["intensity_mask"][lead, 0] > 0:
-                            wind += f" / {float(target['intensity_target'][lead, 0]) * 1.94384:3.0f} kt actual"
-                    print(f"  +{point['lead_hours']:3d}h  {point['latitude']:5.1f},{point['longitude']:6.1f}  "
-                          f"actual {lat:5.1f},{lon:6.1f}  error {error:5.0f} km   {wind}")
-        else:
-            print("track head untrained -- run RUN_STORMS first")
+            members = {f"model ({top['probability']:.0%})": torch.tensor(
+                [[p["latitude"] - centre[0], p["longitude"] - centre[1]] for p in top["track"]]), **members}
+        if "track_consensus" in fc:
+            members["consensus"] = torch.tensor([[p["latitude"] - centre[0], p["longitude"] - centre[1]]
+                                                 for p in fc["track_consensus"]["track"]])
+        print("track error vs what happened, km, by member -- the physics members need no training:")
+        print("  " + f"{'lead':>6}" + "".join(f"{name:>16}" for name in members) + f"{'wind fcst/actual':>20}")
+        for lead, hours in enumerate(CFG.lead_times_hours):
+            if target["track_valid"][lead] > 0:
+                row = "".join(f"{km_off(*member[lead], lead):>13.0f} km" for member in members.values())
+                wind = ""
+                if isinstance(fc["intensity"], list):
+                    wind = f"{fc['intensity'][lead]['max_wind_ms'] * 1.94384:5.0f}"
+                    if target["intensity_mask"][lead, 0] > 0:
+                        wind += f" / {float(target['intensity_target'][lead, 0]) * 1.94384:3.0f} kt"
+                print(f"  +{hours:4d}h {row}{wind:>20}")
+        if not isinstance(fc["track_scenarios"], list):
+            print("track head untrained -- run RUN_STORMS first; the physics members above still stand")
         problems = check_forecast(fc)
         print("forecast checks: " + ("pass" if not problems else "; ".join(problems)))
 

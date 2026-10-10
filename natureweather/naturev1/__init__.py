@@ -63,8 +63,10 @@ from .live import fetch_latest, latest_scene_keys, watch
 from .losses import area_weights, focal_bce, masked_gaussian_nll, total_loss, track_mixture_nll
 from .model import (
                    RI_THRESHOLDS_KT,
+                   STORM_ENVIRONMENT_FEATURES,
                    STORM_STATE_FEATURES,
                    SURFACE_FIELDS,
+                   TRACK_MEMBERS,
                    TRACKED_HEADS,
                    WEATHER_TYPES,
                    WIND_RADII_THRESHOLDS_KT,
@@ -105,15 +107,27 @@ from .state import (
                    toa_flux,
                    train_state_rollout,
 )
+from .steering import (
+                   BETA_DRIFT_MS,
+                   advect,
+                   describe_environment,
+                   extrapolation_track,
+                   steering_track,
+                   storm_environment,
+)
 from .storms import (
                    StormTargets,
                    StormWindow,
+                   consensus_track,
+                   describe_consensus,
+                   fit_track_consensus,
                    format_pairing,
                    lead_track_points,
                    pair_tracks_with_reanalysis,
                    storm_feature_bank,
                    storm_scorecard,
                    storm_state_vector,
+                   track_members,
                    train_storm_heads,
 )
 from .train import Trainer, TrainSettings, apply_ema, load_for_inference, next_state_targets
@@ -146,7 +160,7 @@ from .wb2 import (
 )
 
 
-__version__ = "0.8.6"
+__version__ = "0.9.0"
 __author__ = "Nathan"
 __all__ = [
     "CORPORA", "RI_THRESHOLDS_KT", "WIND_RADII_THRESHOLDS_KT", "EyewallHead", "RapidIntensificationHead",
@@ -165,6 +179,9 @@ __all__ = [
     "launch", "follow", "progress", "status", "stop",
     "area_weights", "TRACKED_HEADS", "STORM_STATE_FEATURES", "storm_feature_bank", "storm_scorecard",
     "storm_state_vector", "train_storm_heads",
+    "STORM_ENVIRONMENT_FEATURES", "TRACK_MEMBERS", "BETA_DRIFT_MS", "advect", "describe_environment",
+    "extrapolation_track", "steering_track", "storm_environment", "consensus_track", "describe_consensus",
+    "fit_track_consensus", "track_members",
     "preflight", "format_preflight", "PreflightError", "TrainingWatchdog", "check_forecast",
     "check_grid_alignment", "check_weights", "check_normalization", "check_device_agreement",
     "check_environment", "responds_to_input", "PHYSICAL", "Bounds",

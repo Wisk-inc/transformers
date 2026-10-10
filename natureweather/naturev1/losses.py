@@ -70,7 +70,13 @@ def track_mixture_nll(
         log_prob = log_prob * valid.unsqueeze(1)
     # Sum over lead times inside each mode: a scenario is a whole trajectory, judged as one.
     per_mode = log_prob.sum(-1)
-    return -(torch.logsumexp(F.log_softmax(mode_logits, -1) + per_mode, dim=-1)).mean()
+    nll = -torch.logsumexp(F.log_softmax(mode_logits, -1) + per_mode, dim=-1)
+    if valid is not None:
+        # A sample with nothing to verify at any lead contributes exactly zero; averaging it in would
+        # scale the gradient down by however many such samples the batch happened to hold.
+        has = valid.any(-1).to(nll.dtype)
+        return (nll * has).sum() / has.sum().clamp_min(1.0)
+    return nll.mean()
 
 
 def landfall_loss(logit: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None = None,

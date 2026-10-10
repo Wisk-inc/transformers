@@ -97,6 +97,56 @@ def decode_track(
     return scenarios
 
 
+def decode_consensus(
+    outputs: dict,
+    origin_lat: float,
+    origin_lon: float,
+    lead_times_hours: tuple[int, ...],
+    issued: dt.datetime,
+    weights: torch.Tensor,
+    storm_state: torch.Tensor,
+    batch_index: int = 0,
+) -> dict:
+    """
+    The multi-model track: every member's position at every lead, and their weighted blend.
+
+    The members are those of :data:`naturev1.TRACK_MEMBERS` -- the learned head's most likely scenario
+    and its mixture mean, the steering-flow track that came in as ``track_prior``, and extrapolation of
+    the last twelve hours -- blended with per-lead weights fitted on held-out storms. The blend is the
+    headline track; the members are kept beside it so that a forecaster can see when they disagree,
+    which is itself information.
+    """
+    from .model import TRACK_MEMBERS
+    from .steering import extrapolation_track
+
+    probabilities = outputs["mode_logits"][batch_index].softmax(-1)
+    displacement = outputs["displacement"][batch_index]
+    members = torch.stack([
+        displacement[int(probabilities.argmax())],
+        (displacement * probabilities.view(-1, 1, 1)).sum(0),
+        outputs["track_prior"][batch_index],
+        extrapolation_track(storm_state.view(1, -1), lead_times_hours)[0],
+    ], 1).float()                                                                  # (L, M, 2)
+    blended = (members * weights.to(members.dtype).unsqueeze(-1)).sum(1)          # (L, 2)
+
+    def position(d_lat, d_lon):
+        return {"latitude": round(origin_lat + float(d_lat), 3),
+                "longitude": round((origin_lon + float(d_lon) + 180.0) % 360.0 - 180.0, 3)}
+
+    points = []
+    for lead, hours in enumerate(lead_times_hours):
+        row = {"lead_hours": hours, "valid_time": (issued + dt.timedelta(hours=hours)).isoformat(),
+               **position(*blended[lead]),
+               "members": {name: position(*members[lead, m]) for m, name in enumerate(TRACK_MEMBERS)}}
+        points.append(row)
+    return {
+        "track": points,
+        "weights": {name: [round(float(w), 3) for w in weights[:, m]] for m, name in enumerate(TRACK_MEMBERS)},
+        "note": "a weighted blend of the learned track, the steering-flow track and extrapolation; weights "
+                "per lead were fitted on held-out seasons",
+    }
+
+
 def decode_landfall(
     outputs: dict, lead_times_hours: tuple[int, ...], issued: dt.datetime, batch_index: int = 0,
     trained: dict | None = None,
@@ -357,6 +407,7 @@ def build_forecast(
     normalizer=None,
     trained: dict | None = None,
     inputs: tuple[str, ...] = (),
+    consensus: dict | None = None,
 ) -> dict:
     """
     Assemble the whole forecast bundle: track scenarios, landfall, intensity, local weather, ENSO.
@@ -377,6 +428,9 @@ def build_forecast(
         inputs: which inputs the forecast was run from, e.g. ``("satellite",)``. If any of their
             encoders is untrained the whole bundle is marked untrustworthy -- an untrained input path
             turns every downstream number into noise, however trained the heads are.
+        consensus: ``{"weights": model.track_consensus, "storm_state": (F,) tensor}`` to add the
+            multi-model ``track_consensus`` section. Left out when the weights were never fitted, or
+            when the outputs carry no steering track.
     """
     bundle = {
         "issued": issued.isoformat(),
@@ -405,6 +459,12 @@ def build_forecast(
         bundle["storm_center"] = {"latitude": storm_center[0], "longitude": storm_center[1]}
         bundle["track_scenarios"] = (_UNAVAILABLE if _untrained("track", trained) else decode_track(
             outputs, storm_center[0], storm_center[1], lead_times_hours, issued, batch_index))
+        weights = None if consensus is None else consensus.get("weights")
+        if (weights is not None and float(weights.abs().sum()) > 0 and "track_prior" in outputs
+                and not _untrained("track", trained)):
+            bundle["track_consensus"] = decode_consensus(
+                outputs, storm_center[0], storm_center[1], lead_times_hours, issued, weights,
+                consensus["storm_state"], batch_index)
         bundle["landfall"] = (_UNAVAILABLE if _untrained("landfall", trained) else decode_landfall(
             outputs, lead_times_hours, issued, batch_index, trained))
         bundle["intensity"] = (_UNAVAILABLE if _untrained("intensity", trained) else decode_intensity(

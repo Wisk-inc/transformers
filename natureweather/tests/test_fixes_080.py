@@ -486,7 +486,7 @@ def test_feature_bank_trains_the_heads_and_is_reused(tmp_path):
     assert trained["enso"] == 0
     assert all(not p.requires_grad for p in model.blocks.parameters()), "backbone stays frozen"
     table = storm_scorecard(model, bank, (6, 12))
-    assert "track km" in table and "6h" in table
+    assert "model km" in table and "6h" in table
 
 
 def test_every_advertised_name_exists():
