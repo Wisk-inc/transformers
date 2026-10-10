@@ -1,15 +1,16 @@
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
-#  NatureV1 0.9.0 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
+#  NatureV1 0.9.1 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
 #
 #  Paste and run. It installs what it needs, stages the data, builds the 89M-parameter model, trains it
 #  in stages, scores itself against persistence and climatology, and only publishes if it earned it.
 #
 #  With BACKGROUND = True (the default) the run happens in a supervised process on the machine itself:
 #  it keeps going if the wifi drops or the notebook closes, and it restarts itself from its last
-#  checkpoint if it crashes, runs out of GPU memory, or stalls. The cell then ends with a green "training
-#  in the background" note: that is it working, not an error. Run the cell again, or naturev1.follow(),
-#  any time to see the run. Data already downloaded is never downloaded again -- change the years and
-#  only what is new is.
+#  checkpoint if it crashes, runs out of GPU memory, or stalls. The cell shows the run live for
+#  WATCH_SECONDS and then ends with a green "training in the background" note: that is it working, not an
+#  error, and not the run stopping -- the run never depends on this cell. Run the cell again, or
+#  naturev1.follow(), any time to watch it again. Data already downloaded is never downloaded again --
+#  change the years and only what is new is.
 #
 #  If it stops for any reason -- a crash, a reboot, naturev1.stop(), the supervisor giving up -- just run
 #  this cell again: every stage continues from its last checkpoint (saved every minute, a snapshot every
@@ -23,7 +24,8 @@
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 
 BACKGROUND    = True      # supervised background run: survives disconnects, restarts on crash or stall
-STALL_MINUTES = 30        # background: restart a run that shows no progress for this long
+STALL_MINUTES = 30        # background: restart a run that shows no progress for this long (12 while downloading)
+WATCH_SECONDS = 120       # how long this cell shows the live log before it ends; the run goes on regardless
 
 RUN_PRETRAIN  = True      # stage one: every channel at every lead, on ERA5 reanalysis
 RUN_ROLLOUT   = True      # stage 1b: the whole atmosphere rolled forward 12 steps, CRPS ensemble
@@ -99,7 +101,7 @@ def _halt(message, kind="danger"):
     raise SystemExit(message)
 
 
-_NEEDED = {"naturev1": ("naturev1[all]>=0.9.0", (0, 9, 0)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
+_NEEDED = {"naturev1": ("naturev1[all]>=0.9.1", (0, 9, 1)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
 
 
 def _version(module):
@@ -160,13 +162,19 @@ if BACKGROUND and not os.environ.get("NATUREV1_BACKGROUND_CHILD"):
         "RUN_FORECAST", "RUN_WATCHER", "STAGE_YEARS", "VAL_YEARS", "EPOCHS", "BATCH", "MAX_BATCH", "WORKERS",
         "ROLLOUT_STEPS", "ROLLOUT_TRAIN", "MEMBERS", "STORM_FIRST_SEASON", "HINDCAST", "STORM", "CITY",
         "HF_REPO", "HF_TOKEN", "DATA_DIR", "BACKUP_DIR")}
+    _was_running = _naturev1.status(DATA_DIR) is not None
     _naturev1.launch(directory=DATA_DIR, stall_minutes=STALL_MINUTES, **_SETTINGS)
-    _naturev1.follow(lines=25, directory=DATA_DIR, wait=90)   # a fresh run: wait for its first lines
-    _halt("NatureV1 is training in the background, and the cell stops here on purpose -- not an error.\n"
-          "To see progress: run this cell again (it will not start a second run), or in any cell\n"
-          "    import naturev1; naturev1.follow()\n"
-          "To end the run: naturev1.stop(). Closing the notebook or losing the wifi does not stop it.\n"
-          "If it ever stops, run this cell again: it continues from the last checkpoint.\n"
+    if _was_running:
+        _naturev1.progress(DATA_DIR)                 # what the run that is already going has done so far
+    # A fresh run: wait for its first lines. Then show the log live for a while, so the cell ends with
+    # the run visibly moving rather than with a snapshot that looks frozen.
+    _naturev1.follow(lines=25, directory=DATA_DIR, wait=90, watch=WATCH_SECONDS)
+    _halt("NatureV1 is running in the background. This cell has stopped showing it, on purpose -- the run "
+          "has NOT stopped, and nothing in this notebook can stop it except naturev1.stop().\n"
+          "To watch it again: run this cell again (it will not start a second run), or in any cell\n"
+          "    import naturev1; naturev1.follow(watch=120)\n"
+          "Closing the notebook or losing the wifi does not stop it. If it ever does stop, run this cell "
+          "again: it continues from the last checkpoint.\n"
           "naturev1.progress() shows each stage's checkpoint, its age, and its backup.",
           kind="success")
 

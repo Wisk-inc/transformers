@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import types
 
 import numpy as np
@@ -261,3 +262,27 @@ def test_a_hub_mirror_without_a_token_waits_and_says_so_once(tmp_path, monkeypat
     printed = capsys.readouterr().out
     assert printed.count("no Hugging Face token") == 1
     assert manager._upload is None, "nothing is uploaded, and nothing blocks training"
+
+
+def test_a_read_that_never_returns_is_restarted_on_a_fresh_connection(tmp_path, monkeypatch):
+    """A hung cloud read raises nothing, so retries never fire; the staging must not wait for ever."""
+    import threading
+
+    store = _store(16)
+    original = era5_module.read_block
+    hung = threading.Event()
+    calls = {"count": 0}
+
+    def flaky(dataset, variables, selector, levels=None):
+        calls["count"] += 1
+        if int(np.asarray(selector)[0]) == 4 and not hung.is_set():
+            hung.set()
+            threading.Event().wait(30)          # hangs well past the stuck limit, then returns anyway
+        return original(dataset, variables, selector, levels)
+
+    monkeypatch.setattr(era5_module, "read_block", flaky)
+    began = time.time()
+    path = _stage(store, np.arange(16), tmp_path / "era5.npy", stuck_seconds=3.0)
+    assert time.time() - began < 25, "the stuck read was abandoned, not waited for"
+    assert _staged_steps(path) == list(range(16)), "every step landed, the hung chunk via its retry"
+    assert not (tmp_path / "era5.progress.json").exists()

@@ -141,3 +141,35 @@ def _wait_for_zombie(pid, seconds=20.0):
             return True
         time.sleep(0.05)
     return False
+
+
+def test_follow_watch_shows_lines_that_arrive_while_watching(tmp_path, capsys):
+    fake = tmp_path / "fake_pipeline.py"
+    fake.write_text(textwrap.dedent('''
+        import time
+        print("started", flush=True)
+        time.sleep(4)
+        print("later line", flush=True)
+        for i in range(30):
+            print(f"\\rbar {i}", end="", flush=True)
+            time.sleep(0.3)
+        time.sleep(60)
+    '''))
+    home = tmp_path / "data"
+    launch(directory=home, script=fake, supervise=False)
+    try:
+        follow(directory=home, wait=30, watch=14)
+        shown = capsys.readouterr().out
+        assert "started" in shown and "later line" in shown, "a line printed after the snapshot is shown"
+        assert "bar " in shown, "the progress bar's latest state is shown"
+        assert "still running" in shown and "watching live" in shown
+    finally:
+        stop(directory=home, wait=20)
+
+
+def test_a_download_stall_is_called_sooner_than_a_training_stall():
+    from naturev1.launch import STAGING_STALL_MINUTES, _stall_limit
+
+    assert _stall_limit("staging", 30.0) == STAGING_STALL_MINUTES
+    assert _stall_limit("step 1200", 30.0) == 30.0
+    assert _stall_limit("staging", 5.0) == 5.0, "never longer than what was asked for"

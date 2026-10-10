@@ -56,6 +56,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -771,6 +773,7 @@ def materialise(
     workers: int = 8,
     progress: bool = True,
     resume: bool = True,
+    stuck_seconds: float = 600.0,
 ) -> Path:
     """
     Stage a slice of the record onto local disk as a memory-mapped array. Parallel, and resumable.
@@ -797,7 +800,6 @@ def materialise(
         The path to the ``.npy`` memmap. A sidecar ``.json`` records shape, channels, timestamps and
         the statistics the values were normalized with.
     """
-    from concurrent.futures import ThreadPoolExecutor
     from threading import Lock
 
     path = Path(path)
@@ -810,6 +812,7 @@ def materialise(
     shape = (len(ordered), dataset.sizes["latitude"], dataset.sizes["longitude"], len(names))
     gigabytes = float(np.prod(shape)) * np.dtype(dtype).itemsize / 1e9
     marker = path.with_suffix(".progress.json")
+    stuck_seconds = float(stuck_seconds)
 
     # What is already on disk is never thrown away. Three cases, in order:
     #  * a finished staging that covers every step asked for -- exactly, or more -- is used as it is;
@@ -893,12 +896,14 @@ def materialise(
 
     lock = Lock()
     completed = [len(done) * chunk]
+    began = time.time()
+    bytes_per_step = float(np.prod(shape[1:])) * np.dtype(dtype).itemsize
 
     def fetch(offset: int) -> None:
         take = ordered[offset : offset + chunk]
         if reuse is not None and all(int(step) in reuse[1] for step in take):
             rows = [reuse[1][int(step)] for step in take]
-            store[offset : offset + len(take)] = reuse[0][rows]
+            values = reuse[0][rows]
             reused[0] += len(take)
         else:
             # Cloud reads drop; one dropped connection used to end the whole staging.
@@ -906,23 +911,28 @@ def materialise(
 
             block = with_retry(lambda: read_block(dataset, source, take, levels), attempts=5,
                                what=f"ERA5 read of steps {int(take[0])}-{int(take[-1])}")
-            store[offset : offset + len(take)] = normalizer.prepare(block).astype(dtype)
+            values = normalizer.prepare(block).astype(dtype)
         with lock:
+            if offset in done:
+                return                                # a read given up on as stuck, finishing late
+            store[offset : offset + len(take)] = values
             done.add(offset)
             completed[0] += len(take)
             beat("staging")
             if progress:
                 share = 100 * completed[0] / len(ordered)
-                print(f"\r[era5]   {completed[0]:,}/{len(ordered):,}  ({share:.1f}%)", end="", flush=True)
+                fetched = completed[0] - len(done_at_start) * chunk
+                rate = fetched * bytes_per_step / max(time.time() - began, 1e-9)
+                left = (len(ordered) - completed[0]) * bytes_per_step / max(rate, 1e-9)
+                print(f"\r[era5]   {completed[0]:,}/{len(ordered):,}  ({share:.1f}%)  "
+                      f"{rate / 1e6:.1f} MB/s, about {left / 60:.0f} min left", end="", flush=True)
             # Checkpoint the marker as we go, so an interruption loses one chunk and not the run.
             atomic_write_text(marker, json.dumps({"shape": list(shape), "variables": names,
                                                   "steps": fingerprint, "done": sorted(done)}))
 
+    done_at_start = set(done)
     if offsets:
-        with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
-            for error in [f.exception() for f in [pool.submit(fetch, o) for o in offsets]]:
-                if error is not None:
-                    raise error
+        _fetch_all(fetch, offsets, workers, stuck_seconds, progress)
     store.flush()
     if progress:
         print()
@@ -942,6 +952,42 @@ def materialise(
             print(f"[era5] {reused[0]:,} steps came from the earlier staging, "
                   f"{len(ordered) - reused[0]:,} from the network")
     return path
+
+
+def _fetch_all(fetch, offsets, workers: int, stuck_seconds: float, progress: bool) -> None:
+    """
+    Run every fetch on a thread pool, and do not let one hung connection hang the staging.
+
+    A cloud read can stop answering without failing: no error, no bytes, for ever. The retry around
+    each read never fires, because nothing was raised; the other threads finish their chunks and the
+    whole run then waits on the one that will not come back -- for the supervisor's stall timer to
+    expire and restart the process. Here, when no chunk at all has completed for ``stuck_seconds``,
+    the chunks still outstanding are handed to fresh threads. The old ones are left to time out on
+    their own; if one does finish, it finds its chunk done and writes nothing.
+    """
+    from concurrent.futures import FIRST_COMPLETED, wait
+
+    pending = list(offsets)
+    pool = ThreadPoolExecutor(max_workers=max(workers, 1))
+    futures = {pool.submit(fetch, o): o for o in pending}
+    try:
+        while futures:
+            finished, _ = wait(list(futures), timeout=stuck_seconds, return_when=FIRST_COMPLETED)
+            if not finished:
+                stuck = sorted(futures.values())
+                if progress:
+                    print(f"\n[era5] {len(stuck)} read(s) have returned nothing for {stuck_seconds / 60:.0f} min; "
+                          "starting them again on fresh connections", flush=True)
+                pool.shutdown(wait=False)                 # hung threads are not waited for
+                pool = ThreadPoolExecutor(max_workers=max(workers, 1))
+                futures = {pool.submit(fetch, o): o for o in stuck}
+                continue
+            for future in finished:
+                del futures[future]
+                if future.exception() is not None:
+                    raise future.exception()
+    finally:
+        pool.shutdown(wait=False)
 
 
 def _indices_fingerprint(indices: np.ndarray) -> str:

@@ -93,7 +93,9 @@ def _alive(pid: int) -> bool:
             state = (proc / "stat").read_text().rpartition(")")[2].split()[0]
             text = (proc / "cmdline").read_bytes()
         except (OSError, IndexError):
-            return False                    # gone between the two reads
+            # A read that fails or comes back empty while the process is still being set up, or just
+            # as it leaves. The signal above reached it, so it is alive; a dead one is caught next time.
+            return True
         if state in ("Z", "X"):
             return False                    # exited, and only waiting for its parent to reap it
         if not text:
@@ -198,6 +200,18 @@ def launch(directory: str | os.PathLike | None = None, script: str | os.PathLike
     return process.pid
 
 
+#: While the run is downloading, a chunk lands every few seconds; nothing for this long is a hung
+#: connection, not a slow step, and waiting the full training stall limit would waste half an hour.
+STAGING_STALL_MINUTES = 12.0
+
+
+def _stall_limit(note: str, stall_minutes: float) -> float:
+    """How long the heartbeat may be silent before the run is called stalled, given what it was doing."""
+    if note.startswith("staging"):
+        return min(stall_minutes, STAGING_STALL_MINUTES)
+    return stall_minutes
+
+
 def supervise(runner: str, directory: str, stall_minutes: float = 30.0, max_restarts: int = 20,
               poll_seconds: float = 30.0, quick_failure_seconds: float = 600.0,
               max_quick_failures: int = 3) -> None:
@@ -278,7 +292,7 @@ def supervise(runner: str, directory: str, stall_minutes: float = 30.0, max_rest
                 last = heartbeat.read_text().strip().partition(" ")[2]
             except OSError:
                 age, last = 0.0, ""
-            if age > stall_minutes * 60 and child[0].poll() is None:
+            if age > _stall_limit(last, stall_minutes) * 60 and child[0].poll() is None:
                 stalled = True
                 say(f"no progress for {age / 60:.0f} min (last: {last or 'nothing'}) -- stopping the run "
                     "to restart it from its last checkpoint")
@@ -381,7 +395,8 @@ def progress(directory: str | os.PathLike | None = None) -> None:
             print(f"  {name:26} {(home / name).stat().st_size / 1e9:.1f} GB, {done}")
 
 
-def follow(lines: int = 40, directory: str | os.PathLike | None = None, wait: float = 0.0) -> None:
+def follow(lines: int = 40, directory: str | os.PathLike | None = None, wait: float = 0.0,
+           watch: float = 0.0) -> None:
     """
     Print the last lines of the run's log, with whether it is still going.
 
@@ -395,6 +410,9 @@ def follow(lines: int = 40, directory: str | os.PathLike | None = None, wait: fl
         wait: for a run launched a moment ago, wait up to this many seconds for its first lines, so a
             run that fails at once shows its error here rather than on the next look. A run that has
             already written something is shown at once.
+        watch: after the snapshot, keep showing the log live for this many seconds -- new lines as
+            they arrive, a progress bar's latest state every ten seconds -- then stop, with a line
+            saying the run goes on. A snapshot alone looks frozen; this shows it moving.
     """
     home = data_directory(directory)
     log = home / LOG
@@ -419,6 +437,36 @@ def follow(lines: int = 40, directory: str | os.PathLike | None = None, wait: fl
     state = (f"[follow] RUNNING, pid {running['pid']}, started {running['started']}" if running
              else "[follow] NOT RUNNING -- finished, stopped, or crashed; the lines above say which")
     print(f"{shown}\n{state}")
+    if watch > 0 and running:
+        _watch(log, home, watch)
+
+
+def _watch(log: Path, home: Path, seconds: float) -> None:
+    """Tail the log live for a while: whole lines as they land, the progress bar at most every 10 s."""
+    print(f"[follow] watching live for {seconds:.0f} s (the run does not depend on this cell) ...", flush=True)
+    position = log.stat().st_size
+    partial, last_bar, deadline = "", 0.0, time.time() + seconds
+    while time.time() < deadline:
+        time.sleep(2.0)
+        size = log.stat().st_size
+        if size < position:
+            position = 0                                                    # the log was truncated
+        if size > position:
+            with open(log, "rb") as handle:
+                handle.seek(position)
+                partial += handle.read(size - position).decode("utf-8", errors="replace")
+            position = size
+            *whole, partial = partial.split("\n")
+            for row in whole:
+                print(row.split("\r")[-1], flush=True)
+        bar = partial.split("\r")[-1]
+        if bar.strip() and time.time() - last_bar >= 10.0:
+            print(bar, flush=True)
+            last_bar = time.time()
+        if not status(home):
+            print("[follow] the run has ended; the lines above say how", flush=True)
+            return
+    print("[follow] still running; run this cell or naturev1.follow() again any time", flush=True)
 
 
 def stop(directory: str | os.PathLike | None = None, wait: float = 60.0) -> bool:
