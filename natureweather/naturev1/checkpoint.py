@@ -237,6 +237,25 @@ class CheckpointManager:
         for stale in numbered[: max(0, len(numbered) - keep)]:
             stale.unlink(missing_ok=True)
 
+    def push_now(self, state: TrainingState, timeout: float = 120.0) -> bool:
+        """
+        Push the latest checkpoint to the Hub right now and wait for it -- for the end of a session.
+
+        A hosted notebook that is being shut down sends SIGTERM and gives a process a little time. The
+        regular push is on a timer and runs on a thread that would die with the process; this one
+        ignores the timer and blocks, so the last checkpoint reaches the Hub. Returns whether it did.
+        """
+        if not self.repo_id or not (self.directory / self.LATEST).exists():
+            return False
+        if self._upload is not None and self._upload.is_alive():
+            self._upload.join(timeout)
+        self._last_push = 0.0
+        self._maybe_push(self.directory / self.LATEST, state)
+        if self._upload is None:
+            return False
+        self._upload.join(timeout)
+        return not self._upload.is_alive()
+
     def _maybe_push(self, path: Path, state: TrainingState) -> None:
         """
         Mirror the checkpoint to the Hub, in the background, at most every ``push_every_seconds``.

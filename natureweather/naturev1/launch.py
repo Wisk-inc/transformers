@@ -395,8 +395,15 @@ def progress(directory: str | os.PathLike | None = None) -> None:
             print(f"  {name:26} {(home / name).stat().st_size / 1e9:.1f} GB, {done}")
 
 
+#: In a live watch, how often a line is printed when the run itself has printed nothing -- proof of
+#: life, with what the run is doing, so a quiet stretch never looks like a dead one.
+ALIVE_EVERY = 60.0
+#: And how often the fuller status (every stage, the session clock, the GPU) is printed.
+STATUS_EVERY = 600.0
+
+
 def follow(lines: int = 40, directory: str | os.PathLike | None = None, wait: float = 0.0,
-           watch: float = 0.0) -> None:
+           watch: float | None = 0.0) -> None:
     """
     Print the last lines of the run's log, with whether it is still going.
 
@@ -412,7 +419,9 @@ def follow(lines: int = 40, directory: str | os.PathLike | None = None, wait: fl
             already written something is shown at once.
         watch: after the snapshot, keep showing the log live for this many seconds -- new lines as
             they arrive, a progress bar's latest state every ten seconds -- then stop, with a line
-            saying the run goes on. A snapshot alone looks frozen; this shows it moving.
+            saying the run goes on. ``None`` watches until the run ends, printing a proof-of-life
+            line every minute when the run is quiet: the cell stays visibly active, which also keeps a
+            hosted notebook from deciding it is idle. Stopping the cell stops only the watching.
     """
     home = data_directory(directory)
     log = home / LOG
@@ -437,35 +446,112 @@ def follow(lines: int = 40, directory: str | os.PathLike | None = None, wait: fl
     state = (f"[follow] RUNNING, pid {running['pid']}, started {running['started']}" if running
              else "[follow] NOT RUNNING -- finished, stopped, or crashed; the lines above say which")
     print(f"{shown}\n{state}")
-    if watch > 0 and running:
+    if running and (watch is None or watch > 0):
         _watch(log, home, watch)
 
 
-def _watch(log: Path, home: Path, seconds: float) -> None:
-    """Tail the log live for a while: whole lines as they land, the progress bar at most every 10 s."""
-    print(f"[follow] watching live for {seconds:.0f} s (the run does not depend on this cell) ...", flush=True)
+def _gpu_line() -> str:
+    """Utilisation and memory of the first GPU, from nvidia-smi; empty when there is none."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total",
+                              "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=5)
+        used, total = None, None
+        for row in out.stdout.strip().splitlines()[:1]:
+            util, used, total = (part.strip() for part in row.split(","))
+            return f"GPU {util}% busy, {float(used) / 1024:.0f}/{float(total) / 1024:.0f} GB"
+    except Exception:
+        return ""                                   # no GPU, or no nvidia-smi: nothing to report
+    return ""
+
+
+def _session_line() -> str:
+    """How long this machine's session has been up -- what a hosted notebook's timer counts."""
+    from .mirror import session_started
+
+    began = session_started()
+    if began is None:
+        return ""
+    hours = (time.time() - began) / 3600
+    return f"session up {hours:.1f} h"
+
+
+def _stage_lines(home: Path) -> list[str]:
+    from .safeio import read_json
+
+    roots = [home / "naturev1_ckpt", Path("/content/drive/MyDrive/naturev1_ckpt")]
+    root = next((r for r in roots if r.is_dir()), roots[0])
+    rows = []
+    for tag, label in STAGES:
+        state = read_json(root / tag / "state.json", default=None)
+        if state and "step" in state:
+            age = (time.time() - (root / tag / "state.json").stat().st_mtime) / 60
+            rows.append(f"{label}: step {state['step']:,} (saved {age:.0f} min ago)")
+    return rows
+
+
+def _heartbeat_line(home: Path) -> str:
+    try:
+        text = (home / HEARTBEAT).read_text().strip()
+        age = time.time() - (home / HEARTBEAT).stat().st_mtime
+        return f"doing: {text.partition(' ')[2] or 'starting'} ({age:.0f} s ago)"
+    except OSError:
+        return ""
+
+
+def _watch(log: Path, home: Path, seconds: float | None) -> None:
+    """
+    Tail the log live: whole lines as they land, a progress bar at most every 10 s, and when the run
+    has printed nothing for a minute, one line saying it is alive and what it is doing.
+    """
+    if seconds is None:
+        print("[follow] watching until the run finishes. This cell stays active (so the notebook is never "
+              "idle); stopping the cell stops only the watching, never the run.", flush=True)
+    else:
+        print(f"[follow] watching live for {seconds:.0f} s (the run does not depend on this cell) ...", flush=True)
     position = log.stat().st_size
-    partial, last_bar, deadline = "", 0.0, time.time() + seconds
-    while time.time() < deadline:
-        time.sleep(2.0)
-        size = log.stat().st_size
-        if size < position:
-            position = 0                                                    # the log was truncated
-        if size > position:
-            with open(log, "rb") as handle:
-                handle.seek(position)
-                partial += handle.read(size - position).decode("utf-8", errors="replace")
-            position = size
-            *whole, partial = partial.split("\n")
-            for row in whole:
-                print(row.split("\r")[-1], flush=True)
-        bar = partial.split("\r")[-1]
-        if bar.strip() and time.time() - last_bar >= 10.0:
-            print(bar, flush=True)
-            last_bar = time.time()
-        if not status(home):
-            print("[follow] the run has ended; the lines above say how", flush=True)
-            return
+    partial, last_bar = "", 0.0
+    now = time.time()
+    deadline = None if seconds is None else now + seconds
+    last_output, last_status, pushes = now, now, 0
+    try:
+        while deadline is None or time.time() < deadline:
+            time.sleep(2.0)
+            size = log.stat().st_size
+            if size < position:
+                position = 0                                                # the log was truncated
+            if size > position:
+                with open(log, "rb") as handle:
+                    handle.seek(position)
+                    partial += handle.read(size - position).decode("utf-8", errors="replace")
+                position = size
+                *whole, partial = partial.split("\n")
+                for row in whole:
+                    shown = row.split("\r")[-1]
+                    if shown.strip():
+                        print(shown, flush=True)
+                        last_output = time.time()
+                        pushes += "pushed" in shown and "[checkpoint]" in shown
+            bar = partial.split("\r")[-1]
+            if bar.strip() and time.time() - last_bar >= 10.0:
+                print(bar, flush=True)
+                last_bar = last_output = time.time()
+            if not status(home):
+                print("[follow] the run has ended; the lines above say how", flush=True)
+                return
+            quiet = time.time() - last_output
+            if quiet >= ALIVE_EVERY:
+                parts = [p for p in (_heartbeat_line(home), *_stage_lines(home), _gpu_line(), _session_line()) if p]
+                print(f"[alive] {time.strftime('%H:%M:%S')}  " + " | ".join(parts), flush=True)
+                last_output = time.time()
+            if time.time() - last_status >= STATUS_EVERY:
+                print(f"[status] {time.strftime('%H:%M:%S')}  Hub pushes seen this watch: {pushes}; "
+                      f"log {log.stat().st_size / 1e6:.1f} MB; naturev1.stop() ends the run, nothing else does",
+                      flush=True)
+                last_status = time.time()
+    except KeyboardInterrupt:
+        print("[follow] stopped watching; the run continues (naturev1.stop() is the only thing that ends it)",
+              flush=True)
+        return
     print("[follow] still running; run this cell or naturev1.follow() again any time", flush=True)
 
 

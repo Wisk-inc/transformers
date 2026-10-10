@@ -335,6 +335,8 @@ class Trainer:
         micro = 0
         self.optimizer.zero_grad(set_to_none=True)
 
+        last_log = [time.time(), self.state.step]      # for the pace and ETA on each log line
+
         for epoch in range(self.state.epoch, epochs):
             self.state.epoch = epoch
             for batch in loader:
@@ -396,9 +398,14 @@ class Trainer:
                 if self.state.step % settings.log_every == 0:
                     self.state.history.append({"step": self.state.step, **parts})
                     detail = "  ".join(f"{k}={v:.4f}" for k, v in parts.items() if k != "total")
+                    now = time.time()
+                    pace = (now - last_log[0]) / max(self.state.step - last_log[1], 1)
+                    last_log[:] = [now, self.state.step]
+                    left = pace * max(settings.max_steps - self.state.step, 0) / 3600
                     print(
-                        f"[train] step {self.state.step:>7}  loss {parts['total']:.4f}  "
-                        f"lr {self.scheduler.get_last_lr()[0]:.2e}  |grad| {float(grad_norm):.2f}  {detail}",
+                        f"[train] step {self.state.step:>7,}/{settings.max_steps:,}  epoch {epoch + 1}/{epochs}  "
+                        f"loss {parts['total']:.4f}  lr {self.scheduler.get_last_lr()[0]:.2e}  "
+                        f"|grad| {float(grad_norm):.2f}  {pace:.1f} s/step  ~{left:.1f} h left  {detail}",
                         flush=True,
                     )
                 self.save()
@@ -414,6 +421,12 @@ class Trainer:
             print(f"[train] all {epochs} epochs done", flush=True)
         # Whatever ended the run -- a signal, the step limit, the data -- the last state is written down.
         self.save(force=True)
+        if self.interrupted and settings.hub_repo:
+            # A stop signal on a hosted notebook is the session ending, and its disk with it. The
+            # checkpoint just written is worth nothing there unless it reaches the Hub before the
+            # process is gone, so this push does not wait for the timer and does not return early.
+            if self.checkpoints.push_now(self.state):
+                print("[train] last checkpoint pushed to the Hub; a new session resumes from it", flush=True)
         print(f"[train] stopped at step {self.state.step} after {self.state.wall_seconds / 60:.1f} min", flush=True)
         return self.state
 

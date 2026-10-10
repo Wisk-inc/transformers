@@ -760,6 +760,7 @@ def train_state_rollout(
     model.train()
     started = time.time() - state.wall_seconds
     last_log = [time.time(), state.step]
+    interrupted = False
     try:
         while state.step < max_steps:
             seen = 0
@@ -802,8 +803,15 @@ def train_state_rollout(
                 raise ValueError("the loader produced no batches: the dataset is smaller than one batch "
                                  "(drop_last=True). Use a smaller batch or stage more data.")
             state.epoch += 1
+    except BaseException:
+        interrupted = True
+        raise
     finally:
         save(force=True)
+        if interrupted and manager is not None and hub_repo:
+            # The session may be ending: get the checkpoint just written onto the Hub before it is gone.
+            if manager.push_now(state):
+                print("[state] last checkpoint pushed to the Hub; a new session resumes from it", flush=True)
     print(f"[state] finished at step {state.step:,} after {state.wall_seconds / 60:.1f} min", flush=True)
     return state
 

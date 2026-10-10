@@ -5,29 +5,30 @@ if __name__ not in ("__main__", "__naturev1_pipeline__"):
     raise ImportError("naturev1._pipeline is the training pipeline itself; start it with naturev1.launch()")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
-#  NatureV1 0.9.2 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
+#  NatureV1 0.10.0 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
 #
 #  Paste and run. It installs what it needs, stages the data, builds the 89M-parameter model, trains it
 #  in stages, scores itself against persistence and climatology, and only publishes if it earned it.
 #
 #  With BACKGROUND = True (the default) the run happens in a supervised process on the machine itself:
 #  it keeps going if the wifi drops or the notebook closes, and it restarts itself from its last
-#  checkpoint if it crashes, runs out of GPU memory, or stalls. The cell shows the run live for
-#  WATCH_SECONDS and then ends with a green "training in the background" note: that is it working, not an
-#  error, and not the run stopping -- the run never depends on this cell. Run the cell again, or
-#  naturev1.follow(), any time to watch it again. Data already downloaded is never downloaded again --
-#  change the years and only what is new is.
+#  checkpoint if it crashes, runs out of GPU memory, or stalls. The cell then stays running as a live
+#  window on it -- every log line as it happens, a proof-of-life line every minute when the run is
+#  quiet, a status line every ten minutes -- until the run finishes (WATCH_SECONDS = None). Stopping the
+#  cell stops only the window; the run never depends on it. Run the cell again any time to reopen it.
 #
 #  If it stops for any reason -- a crash, a reboot, naturev1.stop(), the supervisor giving up -- just run
 #  this cell again: every stage continues from its last checkpoint (saved every minute, a snapshot every
 #  30 minutes, and a second copy in BACKUP_DIR). naturev1.progress() shows where it will continue from.
 #
 #  ON A HOSTED NOTEBOOK (molab, Colab): the run survives the notebook, but not the machine. molab ends a
-#  session after 12 hours, or after 90 idle minutes, and wipes its disk -- data, checkpoints and backups
-#  with it. What survives is the Hub mirror: with HF_TOKEN set, every stage pushes its checkpoint to
-#  HF_REPO every 10 minutes, and a new session pulls it back and continues from there. So on molab:
-#  set HF_TOKEN, keep a tab open, and when the session ends, open a new one and run this cell again.
-#  It re-downloads the data (the only cost) and resumes training at most 10 minutes behind.
+#  session after 12 hours, or after 90 idle minutes, and wipes its disk. So, with HF_TOKEN set, everything
+#  expensive is mirrored to HF_REPO as soon as it exists: the staged ERA5 (once, in the background), the
+#  checkpoints (every 10 minutes, and once more when the session is told to stop), the storm feature
+#  banks, the remembered batch size. A new session pulls them back in minutes instead of rebuilding them:
+#  the download does not start over, training resumes where the last session stopped. On molab: set
+#  HF_TOKEN, keep this tab open (the cell staying active is what keeps the notebook from being idle), and
+#  when the 12 hours are up, open a new session and run this cell again.
 #
 #  0.9: the hurricane heads read the storm's physical environment -- deep-layer steering, 200-850 hPa
 #  shear, mid-level moisture, ocean temperature -- computed from the model's own atmosphere, plus a
@@ -38,7 +39,8 @@ if __name__ not in ("__main__", "__naturev1_pipeline__"):
 
 BACKGROUND    = True      # supervised background run: survives disconnects, restarts on crash or stall
 STALL_MINUTES = 30        # background: restart a run that shows no progress for this long (12 while downloading)
-WATCH_SECONDS = 120       # how long this cell shows the live log before it ends; the run goes on regardless
+WATCH_SECONDS = None      # None: this cell stays running as a live window until the run finishes; or seconds
+MIRROR        = True      # mirror staged data, checkpoints and banks to HF_REPO (needs HF_TOKEN); see above
 
 RUN_PRETRAIN  = True      # stage one: every channel at every lead, on ERA5 reanalysis
 RUN_ROLLOUT   = True      # stage 1b: the whole atmosphere rolled forward 12 steps, CRPS ensemble
@@ -114,7 +116,7 @@ def _halt(message, kind="danger"):
     raise SystemExit(message)
 
 
-_NEEDED = {"naturev1": ("naturev1[all]>=0.9.2", (0, 9, 2)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
+_NEEDED = {"naturev1": ("naturev1[all]>=0.10.0", (0, 10, 0)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
 
 
 def _version(module):
@@ -174,7 +176,7 @@ if BACKGROUND and not os.environ.get("NATUREV1_BACKGROUND_CHILD"):
         "RUN_PRETRAIN", "RUN_ROLLOUT", "RUN_STORMS", "RUN_SCORE", "RUN_HINDCAST", "RUN_PUBLISH",
         "RUN_FORECAST", "RUN_WATCHER", "STAGE_YEARS", "VAL_YEARS", "EPOCHS", "BATCH", "MAX_BATCH", "WORKERS",
         "ROLLOUT_STEPS", "ROLLOUT_TRAIN", "MEMBERS", "STORM_FIRST_SEASON", "HINDCAST", "STORM", "CITY",
-        "HF_REPO", "HF_TOKEN", "DATA_DIR", "BACKUP_DIR")}
+        "HF_REPO", "HF_TOKEN", "DATA_DIR", "BACKUP_DIR", "MIRROR")}
     _was_running = _naturev1.status(DATA_DIR) is not None
     _naturev1.launch(directory=DATA_DIR, stall_minutes=STALL_MINUTES, **_SETTINGS)
     if _was_running:
@@ -182,14 +184,18 @@ if BACKGROUND and not os.environ.get("NATUREV1_BACKGROUND_CHILD"):
     # A fresh run: wait for its first lines. Then show the log live for a while, so the cell ends with
     # the run visibly moving rather than with a snapshot that looks frozen.
     _naturev1.follow(lines=25, directory=DATA_DIR, wait=90, watch=WATCH_SECONDS)
-    _halt("NatureV1 is running in the background. This cell has stopped showing it, on purpose -- the run "
-          "has NOT stopped, and nothing in this notebook can stop it except naturev1.stop().\n"
-          "To watch it again: run this cell again (it will not start a second run), or in any cell\n"
-          "    import naturev1; naturev1.follow(watch=120)\n"
-          "Closing the notebook or losing the wifi does not stop it. If it ever does stop, run this cell "
-          "again: it continues from the last checkpoint.\n"
-          "On molab the SESSION ends after 12 h or 90 idle min and its disk is wiped: keep a tab open, and "
-          "when it ends, open a new session and run this cell again -- it resumes from the Hub copy.\n"
+    if _naturev1.status(DATA_DIR) is None:
+        _naturev1.progress(DATA_DIR)
+        _halt("The run has ended -- the last lines above say whether it finished or stopped. If it finished, "
+              "the scorecards and the hindcast are above. If it stopped, run this cell again: it continues "
+              "from the last checkpoint, pulling data, checkpoints and banks back from the Hub mirror if this "
+              "machine's disk was wiped.", kind="success")
+    _halt("NatureV1 is running in the background; this cell was its window and has closed -- the run has "
+          "NOT stopped. Nothing in this notebook can stop it except naturev1.stop().\n"
+          "To reopen the window: run this cell again (it will not start a second run), or in any cell\n"
+          "    import naturev1; naturev1.follow(watch=None)\n"
+          "If the run ever does stop, run this cell again: it continues from the last checkpoint, pulling "
+          "data, checkpoints and banks back from the Hub mirror if this machine's disk was wiped.\n"
           "naturev1.progress() shows each stage's checkpoint, its age, and its backup.",
           kind="success")
 
@@ -200,8 +206,8 @@ import json
 import numpy as np
 import torch
 from ihelix import FieldGrid, Geometry, fibonacci_sphere
-from naturev1 import (HEADLINE_STATE_FIELDS, CachedERA5, CheckpointManager, ERA5Window, NatureConfig, NatureV1,
-                      RolloutSchedule, StateStepper, Trainer, TrainSettings, autotune_batch_size,
+from naturev1 import (HEADLINE_STATE_FIELDS, CachedERA5, CheckpointManager, ERA5Window, HubMirror, NatureConfig,
+                      NatureV1, RolloutSchedule, StateStepper, Trainer, TrainSettings, autotune_batch_size,
                       benchmark_steps, build_climatology, build_forecast, calendar_features, catalogue,
                       channel_loss_weights, check_forecast, check_grid_alignment, check_normalization,
                       check_weights, corpus_scale, describe_environment, device_report, era5_loader,
@@ -225,6 +231,9 @@ CKPT_DIR = (f"{COLAB_DRIVE}/naturev1_ckpt" if os.path.isdir(COLAB_DRIVE)       #
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(CKPT_DIR, exist_ok=True)
 CACHE, VAL_CACHE, STATS = (os.path.join(DATA_DIR, name) for name in ("era5.npy", "era5_val.npy", "stats.json"))
+# Everything expensive goes to the Hub as soon as it exists and comes back at the start of a new session,
+# so a wiped disk costs minutes, not hours. Off without a repo or token; see the header.
+mirror = HubMirror(HF_REPO if MIRROR else None, token=HF_TOKEN or None)
 
 
 def banner(text):
@@ -233,7 +242,7 @@ def banner(text):
 
 banner("HARDWARE")
 print(device_report())
-print(f"data {DATA_DIR} | checkpoints {CKPT_DIR}")
+print(f"data {DATA_DIR} | checkpoints {CKPT_DIR}\n{mirror.describe()}")
 
 # ═══ 2 ═══ data: 13 pressure levels + surface + static, resolved against this machine ══════════════
 banner("DATA — ERA5 (WeatherBench 2), surface and 13 pressure levels")
@@ -258,7 +267,9 @@ for name, index in SPLITS.items():
     print(f"  {name:5} {str(ERA5.time.values[index[0]])[:10]} -> {str(ERA5.time.values[index[-1]])[:10]}")
 print("split by TIME: weather is autocorrelated for days, so a random split leaks the answer.")
 
+mirror.pull(STATS, "staging/stats.json")             # the normalisation statistics, from an earlier session
 stream = ERA5Window(ERA5, indices=SPLITS["train"], stats_cache=STATS, **common)
+mirror.push(STATS, "staging/stats.json")
 print(f"\n{stream.normalizer.report()}")
 print(f"\n{corpus_scale(ERA5, tuple(R['variables']))}\n\n{catalogue()}")
 
@@ -272,10 +283,16 @@ else:
     # Always called, and never downloads twice: it returns at once when what is on disk already covers
     # the request, copies from disk what it can when the request grows, and resumes a download that died.
     TRAIN_SPAN, VAL_SPAN = SPLITS["train"][-TRAIN_STEPS:], SPLITS["val"][:VAL_STEPS]
+    # A staging an earlier session already made comes back from the Hub in minutes; it is pushed there,
+    # in the background, the first time it is complete. Then materialise() reuses, grows or resumes it.
+    mirror.pull_staging(CACHE, "staging/era5", CHANNELS, TRAIN_SPAN)
+    mirror.pull_staging(VAL_CACHE, "staging/era5_val", CHANNELS, VAL_SPAN)
     materialise(ERA5, TRAIN_SPAN, CACHE, variables=tuple(R["variables"]),
                 levels=R["levels"], normalizer=stream.normalizer, workers=8)
     materialise(ERA5, VAL_SPAN, VAL_CACHE, variables=tuple(R["variables"]),
                 levels=R["levels"], normalizer=stream.normalizer, workers=8)
+    mirror.push_staging(CACHE, "staging/era5")
+    mirror.push_staging(VAL_CACHE, "staging/era5_val")
     train_ds = CachedERA5(CACHE, history=6, lead_steps=OFFSETS, channels=WIDTH, augment=True,
                           restrict_to=TRAIN_SPAN)
     roll_ds = CachedERA5(CACHE, history=6, lead_steps=OFFSETS, channels=WIDTH, augment=True,
@@ -344,6 +361,7 @@ def make_step(batch_size):
 # The search is done once and remembered: repeating it on every restart costs minutes, pushes the card
 # to the edge of its memory each time, and could pick a different batch -- a different run -- each time.
 BATCH_FILE = os.path.join(CKPT_DIR, "batch.json")
+mirror.pull(BATCH_FILE, "staging/batch.json")
 REMEMBERED = read_json(BATCH_FILE, default={}) if BATCH is None else {}   # a damaged file is searched again
 if REMEMBERED.get("batch"):
     BATCH, SPEED = int(REMEMBERED["batch"]), float(REMEMBERED.get("samples_per_second", 0.0))
@@ -354,6 +372,7 @@ else:
     MARK = benchmark_steps(make_step(BATCH), BATCH, warmup=1, iterations=10, gradient_checkpointing=True)
     SPEED = MARK.samples_per_second
     atomic_write_text(BATCH_FILE, json.dumps({"batch": BATCH, "samples_per_second": SPEED}))
+    mirror.push(BATCH_FILE, "staging/batch.json")
     print(f"batch {BATCH} | {MARK}")
 if SPEED:
     print(format_plan(training_plan(SPEED, corpus_samples=len(train_ds), epochs=EPOCHS,
@@ -423,10 +442,14 @@ if RUN_STORMS:
           f"(seasons 2017/2019/2021)")
     print("\nreading each storm's reanalysis once and running the frozen backbone over it "
           "(cached; resumes if interrupted):")
+    for _name in ("storm_bank_train", "storm_bank_val"):
+        mirror.pull(f"{CKPT_DIR}/{_name}.pt", f"checkpoints/{_name}.pt")   # rebuilt anyway if the backbone changed
     bank_train = storm_feature_bank(model, ERA5, stream, tr_starts, tr_targets, SRC,
                                     cache=f"{CKPT_DIR}/storm_bank_train.pt", precision=R["precision"])
     bank_val = storm_feature_bank(model, ERA5, stream, va_starts, va_targets, SRC,
                                   cache=f"{CKPT_DIR}/storm_bank_val.pt", precision=R["precision"])
+    for _name in ("storm_bank_train", "storm_bank_val"):
+        mirror.push(f"{CKPT_DIR}/{_name}.pt", f"checkpoints/{_name}.pt")
     history = train_storm_heads(model, bank_train, bank_val, epochs=300,
                                 patience=25, checkpoint_dir=f"{CKPT_DIR}/stage2", hub_repo=HF_REPO)
     best = min(history, key=lambda h: h["val"])
