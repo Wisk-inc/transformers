@@ -65,6 +65,7 @@ import torch
 from .corpora import latlon_to_coords, open_weatherbench
 from .heartbeat import beat
 from .model import SURFACE_FIELDS, calendar_features
+from .safeio import atomic_write_text, read_json
 
 
 #: Which ERA5 variable supervises which of the model's surface fields. Anything the model predicts but
@@ -366,11 +367,10 @@ class Normalizer:
         # keyed on the variable would be one number describing thirteen very different distributions
         # (50 hPa is 210 K, 1000 hPa is 285 K).
         variables = expand_variables(dataset, variables, levels)
-        if cache is not None and Path(cache).exists():
-            stored = json.loads(Path(cache).read_text())
-            if stored.get("variables") == variables:
-                return cls(variables, np.array(stored["mean"], np.float32),
-                           np.array(stored["std"], np.float32), np.array(stored["missing"], np.float32))
+        stored = read_json(cache, default={}) if cache is not None else {}
+        if stored.get("variables") == variables and {"mean", "std", "missing"} <= set(stored):
+            return cls(variables, np.array(stored["mean"], np.float32),
+                       np.array(stored["std"], np.float32), np.array(stored["missing"], np.float32))
 
         steps = dataset.sizes["time"]
         source = _base_variables(variables)
@@ -385,8 +385,7 @@ class Normalizer:
 
         normalizer = cls(variables, mean, std, missing)
         if cache is not None:
-            Path(cache).parent.mkdir(parents=True, exist_ok=True)
-            Path(cache).write_text(json.dumps(normalizer.to_dict(), indent=2))
+            atomic_write_text(cache, json.dumps(normalizer.to_dict(), indent=2))
         return normalizer
 
     def to_dict(self) -> dict:
@@ -916,8 +915,8 @@ def materialise(
                 share = 100 * completed[0] / len(ordered)
                 print(f"\r[era5]   {completed[0]:,}/{len(ordered):,}  ({share:.1f}%)", end="", flush=True)
             # Checkpoint the marker as we go, so an interruption loses one chunk and not the run.
-            marker.write_text(json.dumps({"shape": list(shape), "variables": names, "steps": fingerprint,
-                                          "done": sorted(done)}))
+            atomic_write_text(marker, json.dumps({"shape": list(shape), "variables": names,
+                                                  "steps": fingerprint, "done": sorted(done)}))
 
     if offsets:
         with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
@@ -929,7 +928,7 @@ def materialise(
         print()
 
     stamps = dataset.time.values[ordered].astype("datetime64[s]").astype(np.int64)
-    path.with_suffix(".json").write_text(json.dumps(
+    atomic_write_text(path.with_suffix(".json"), json.dumps(
         {"variables": names, "levels": list(levels) if levels else None,
          "shape": list(shape), "dtype": np.dtype(dtype).name, "normalized": True,
          "statistics": normalizer.to_dict(), "indices": ordered.tolist(), "time": stamps.tolist()},

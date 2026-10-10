@@ -152,6 +152,7 @@ def launch(directory: str | os.PathLike | None = None, script: str | os.PathLike
         return int(running["pid"])
     if running:
         stop(home)
+    progress(home)                        # what this run continues from
 
     environment = dict(os.environ, PYTHONUNBUFFERED="1", NATUREV1_BACKGROUND_CHILD="1")
     token = settings.pop("HF_TOKEN", None) or settings.pop("hf_token", None)
@@ -209,7 +210,8 @@ def supervise(runner: str, directory: str, stall_minutes: float = 30.0, max_rest
     deadlocked DataLoader worker, a GPU driver that has stopped answering. It is stopped and started
     again, and resumes from its last checkpoint -- at most a minute behind.
 
-    A run that crashes is restarted too, after a pause that grows with each restart. But a run that
+    A run that crashes is restarted too, after a pause that grows with each restart; ``max_restarts``
+    counts restarts in a row, and an hour of healthy running starts the count again. But a run that
     fails within ``quick_failure_seconds`` of starting, ``max_quick_failures`` times in a row, is not
     unlucky: it is broken, and restarting it forever would only hide the error. Then the supervisor
     stops and says so, and the error is in the log above.
@@ -292,6 +294,10 @@ def supervise(runner: str, directory: str, stall_minutes: float = 30.0, max_rest
 
         ran = time.time() - started
         quick = quick + 1 if ran < quick_failure_seconds else 0
+        if ran >= 3600:
+            # An hour of good progress since the last trouble: a fresh allowance. Counting every
+            # restart since launch would end a week-long run over a few unrelated blips days apart.
+            restarts = 0
         restarts += 1
         reason = "stalled" if stalled else f"exited with code {code}"
         if quick >= max_quick_failures:
@@ -325,6 +331,54 @@ def _only_banner(tail: str) -> bool:
     """True while the newest run has written nothing yet: its launch banner is all there is."""
     start = tail.rfind("[launch] ")
     return start >= 0 and tail[start:].count("\n") <= 2
+
+
+STAGES = (("stage1", "stage one, pretraining"), ("rollout", "stage 1b, rollout"),
+          ("stage2", "stage two, storm heads"))
+
+
+def backup_directory() -> Path:
+    """Where the second copy of every checkpoint goes: ``NATUREV1_BACKUP_DIR``, else ``~/naturev1_backup``."""
+    return Path(os.environ.get("NATUREV1_BACKUP_DIR") or Path.home() / "naturev1_backup")
+
+
+def progress(directory: str | os.PathLike | None = None) -> None:
+    """
+    Print where a run would continue from: each stage's newest checkpoint, its age, and its copies.
+
+    Nothing is changed. Running the cell again, or :func:`launch`, continues from exactly these.
+    """
+    home = data_directory(directory)
+    roots = [home / "naturev1_ckpt", Path("/content/drive/MyDrive/naturev1_ckpt")]
+    root = next((r for r in roots if r.is_dir()), roots[0])
+    backup = backup_directory()
+    from .safeio import read_json
+
+    print(f"[progress] checkpoints in {root}; backups in {backup}")
+    for tag, label in STAGES:
+        latest = root / tag / "latest.pt"
+        copy = backup / tag / "latest.pt"
+        snapshots = sorted((root / tag).glob("step_*.pt")) if (root / tag).is_dir() else []
+        if not latest.exists() and not copy.exists():
+            print(f"  {label:26} not started")
+            continue
+        state = (read_json(root / tag / "state.json", default=None)
+                 or read_json(backup / tag / "state.json", default=None) or {})
+        newest = max((p for p in (latest, copy) if p.exists()), key=lambda p: p.stat().st_mtime)
+        age = (time.time() - newest.stat().st_mtime) / 60
+        when = f"{age:.0f} min ago" if age < 120 else f"{age / 60:.1f} h ago"
+        step = f"step {state['step']:,}, epoch {state.get('epoch', 0)}" if "step" in state else "saved"
+        print(f"  {label:26} {step}, {when}; {len(snapshots)} snapshot(s)"
+              f"{', backup copy' if copy.exists() else ', NO backup copy yet'}")
+    bank = [p.name for p in (root.glob("storm_bank_*.pt") if root.is_dir() else [])]
+    if bank:
+        print(f"  storm feature banks        {', '.join(sorted(bank))}")
+    for name in ("era5.npy", "era5_val.npy"):
+        if (home / name).exists():
+            staged = read_json(home / name.replace(".npy", ".json"), default={}) or {}
+            done = "complete" if staged.get("indices") and not (home / name.replace(".npy", ".progress.json")).exists() \
+                else "partly downloaded -- resumes where it stopped"
+            print(f"  {name:26} {(home / name).stat().st_size / 1e9:.1f} GB, {done}")
 
 
 def follow(lines: int = 40, directory: str | os.PathLike | None = None, wait: float = 0.0) -> None:

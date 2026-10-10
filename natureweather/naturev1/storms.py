@@ -410,6 +410,7 @@ def storm_feature_bank(
 
     from .era5 import read_block, split_prepared
     from .model import calendar_features
+    from .safeio import atomic_torch_save
     from .state import _autocast
 
     device = next(model.parameters()).device
@@ -418,15 +419,25 @@ def storm_feature_bank(
     features = torch.zeros(count, hidden)
     done: set[str] = set()
     partial = Path(f"{cache}.partial") if cache else None
+    def readable(path):
+        # A cache cut off by a kill would crash every restart here; it is rebuilt instead.
+        try:
+            stored = torch.load(path, map_location="cpu", weights_only=False)
+            usable = stored.get("fingerprint") == fingerprint and stored["features"].shape[0] == count
+            return stored if usable else None
+        except Exception as error:
+            print(f"[storms] {Path(path).name} is damaged ({type(error).__name__}); rebuilding it", flush=True)
+            return None
+
     if cache and Path(cache).exists():
-        stored = torch.load(cache, map_location="cpu", weights_only=False)
-        if stored.get("fingerprint") == fingerprint and stored["features"].shape[0] == count:
+        stored = readable(cache)
+        if stored is not None:
             if progress:
                 print(f"[storms] feature bank reused: {cache} ({count:,} samples)", flush=True)
             return stored
     if partial is not None and partial.exists():
-        stored = torch.load(partial, map_location="cpu", weights_only=False)
-        if stored.get("fingerprint") == fingerprint and stored["features"].shape[0] == count:
+        stored = readable(partial)
+        if stored is not None:
             features, done = stored["features"], set(stored["done"])
 
     groups: dict[str, list[int]] = {}
@@ -475,15 +486,15 @@ def storm_feature_bank(
                 print(f"\r[storms] features {len(done):,}/{len(groups):,} storms "
                       f"({left / 60:.0f} min left)", end="", flush=True)
             if partial is not None and time.time() - last_save > 60:
-                torch.save({"features": features, "done": sorted(done), "fingerprint": fingerprint}, partial)
+                atomic_torch_save({"features": features, "done": sorted(done), "fingerprint": fingerprint},
+                                  partial)
                 last_save = time.time()
     if progress and pending:
         print(flush=True)
 
     bank = {"features": features, "targets": _stack_targets(targets), "fingerprint": fingerprint}
     if cache:
-        Path(cache).parent.mkdir(parents=True, exist_ok=True)
-        torch.save(bank, cache)
+        atomic_torch_save(bank, cache)
         if partial is not None:
             partial.unlink(missing_ok=True)
     return bank

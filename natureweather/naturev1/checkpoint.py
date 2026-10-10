@@ -26,6 +26,8 @@ from pathlib import Path
 
 import torch
 
+from .safeio import atomic_copy, atomic_torch_save, atomic_write_text, remove_stale_temporaries
+
 
 @dataclass
 class TrainingState:
@@ -96,6 +98,10 @@ class CheckpointManager:
             optimizer state a checkpoint of the full model is about a gigabyte; copying it on every
             one-minute save wrote two gigabytes a minute to Google Drive and left the GPU waiting on
             the disk. ``latest.pt`` is still rewritten every ``every_seconds``.
+        backup_dir: a second folder that gets its own copy of the checkpoint, as often as the numbered
+            snapshots, in ``<backup_dir>/<tag>/latest.pt`` -- so deleting or damaging the run's folder
+            does not lose the run. Defaults to the ``NATUREV1_BACKUP_DIR`` environment variable, which
+            the cell sets; empty turns it off. Loading falls back to it when nothing local is usable.
     """
 
     LATEST = "latest.pt"
@@ -109,6 +115,7 @@ class CheckpointManager:
         push_every_seconds: float = 900.0,
         private: bool = False,
         snapshot_every_seconds: float = 1800.0,
+        backup_dir: str | Path | None = None,
     ) -> None:
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -123,6 +130,15 @@ class CheckpointManager:
         self._last_snapshot = 0.0
         self._upload = None
         self._warned_token = False
+        self._warned_disk = 0.0
+        backup_dir = os.environ.get("NATUREV1_BACKUP_DIR") if backup_dir is None else backup_dir
+        self.backup = Path(backup_dir) / self.tag / self.LATEST if backup_dir else None
+        # A save killed part-way leaves a gigabyte-sized temporary behind; restarted runs piled them up.
+        freed = remove_stale_temporaries(self.directory)
+        if self.backup is not None and self.backup.parent.exists():
+            freed += remove_stale_temporaries(self.backup.parent)
+        if freed:
+            print(f"[checkpoint] removed {freed / 1e9:.2f} GB of half-written saves from killed runs", flush=True)
 
     @property
     def tag(self) -> str:
@@ -179,23 +195,46 @@ class CheckpointManager:
         }
 
         target = self.directory / self.LATEST
-        temporary = self.directory / f".{self.LATEST}.{os.getpid()}.tmp"
-        torch.save(payload, temporary)
-        os.replace(temporary, target)  # atomic; readers see either the old file or the new one
-
-        if force or (time.time() - self._last_snapshot) >= self.snapshot_every_seconds:
-            shutil.copy2(target, self.directory / f"step_{state.step:09d}.pt")
-            self._prune()
-            self._last_snapshot = time.time()
+        record = json.dumps(state.to_dict(), indent=2, default=str) + "\n"
+        try:
+            atomic_torch_save(payload, target)  # atomic; readers see either the old file or the new one
+            if force or (time.time() - self._last_snapshot) >= self.snapshot_every_seconds:
+                self._prune(make_room=True)
+                atomic_copy(target, self.directory / f"step_{state.step:09d}.pt")
+                self._prune()
+                self._last_snapshot = time.time()
+                self._back_up(target, record)
+            atomic_write_text(self.directory / "state.json", record)
+        except OSError as error:
+            # A full disk used to crash the run here, and every restart crashed again at its first
+            # save. The previous checkpoint is intact (the write is atomic), so keep training and say so.
+            self._last_save = time.time()
+            if time.time() - self._warned_disk > 600:
+                print(f"[checkpoint] !! could not save ({type(error).__name__}: {error}). Training goes on "
+                      f"and the last good checkpoint is kept; free some disk space in {self.directory}.",
+                      flush=True)
+                self._warned_disk = time.time()
+            return None
         self._last_save = time.time()
-
-        (self.directory / "state.json").write_text(json.dumps(state.to_dict(), indent=2, default=str) + "\n")
         self._maybe_push(target, state)
         return target
 
-    def _prune(self) -> None:
+    def _back_up(self, target: Path, record: str) -> None:
+        if self.backup is None:
+            return
+        try:
+            atomic_copy(target, self.backup)
+            atomic_write_text(self.backup.parent / "state.json", record)
+        except OSError as error:
+            print(f"[checkpoint] backup to {self.backup.parent} skipped ({type(error).__name__}: {error})",
+                  flush=True)
+
+    def _prune(self, make_room: bool = False) -> None:
+        """Keep the newest ``keep`` snapshots -- one fewer just before writing another, so a full disk
+        is not needed to hold ``keep + 1`` of them at once."""
         numbered = sorted(self.directory.glob("step_*.pt"))
-        for stale in numbered[: max(0, len(numbered) - self.keep)]:
+        keep = max(self.keep - 1, 1) if make_room else self.keep
+        for stale in numbered[: max(0, len(numbered) - keep)]:
             stale.unlink(missing_ok=True)
 
     def _maybe_push(self, path: Path, state: TrainingState) -> None:
@@ -225,7 +264,11 @@ class CheckpointManager:
             return
 
         snapshot = self.directory / ".push.pt"
-        shutil.copy2(path, snapshot)
+        try:
+            shutil.copy2(path, snapshot)
+        except OSError as error:
+            print(f"[checkpoint] Hub push skipped: {type(error).__name__}: {error}", flush=True)
+            return
         step, tag, repo, hub_path, private = state.step, self.tag, self.repo_id, self.hub_path, self.private
 
         def upload() -> None:
@@ -287,7 +330,8 @@ class CheckpointManager:
             _restore_rng(payload.get("rng", {}))
             state = TrainingState(**payload["state"])
             self._last_save = time.time()
-            print(f"[checkpoint] resumed {path.name} at step {state.step} (epoch {state.epoch})", flush=True)
+            where = f"the backup in {path.parent}" if path == self.backup else path.name
+            print(f"[checkpoint] resumed {where} at step {state.step} (epoch {state.epoch})", flush=True)
             return state
         return None
 
@@ -304,7 +348,8 @@ class CheckpointManager:
     def _candidates(self) -> list[Path]:
         latest = self.directory / self.LATEST
         numbered = sorted(self.directory.glob("step_*.pt"), reverse=True)
-        return ([latest] if latest.exists() else []) + numbered
+        backup = [self.backup] if self.backup is not None and self.backup.exists() else []
+        return ([latest] if latest.exists() else []) + numbered + backup
 
     def fetch_from_hub(self) -> bool:
         """
@@ -315,6 +360,8 @@ class CheckpointManager:
         """
         if not self.repo_id or (self.directory / self.LATEST).exists():
             return False
+        if self.backup is not None and self.backup.exists():
+            return False                              # a backup on this machine comes before a download
         from huggingface_hub import hf_hub_download
 
         sources = [self.hub_path] + ([self.LATEST] if self.tag == "stage1" else [])

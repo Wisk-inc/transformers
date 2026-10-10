@@ -5,7 +5,7 @@ if __name__ not in ("__main__", "__naturev1_pipeline__"):
     raise ImportError("naturev1._pipeline is the training pipeline itself; start it with naturev1.launch()")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
-#  NatureV1 0.8.5 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
+#  NatureV1 0.8.6 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
 #
 #  Paste and run. It installs what it needs, stages the data, builds the 89M-parameter model, trains it
 #  in stages, scores itself against persistence and climatology, and only publishes if it earned it.
@@ -16,6 +16,10 @@ if __name__ not in ("__main__", "__naturev1_pipeline__"):
 #  in the background" note: that is it working, not an error. Run the cell again, or naturev1.follow(),
 #  any time to see the run. Data already downloaded is never downloaded again -- change the years and
 #  only what is new is.
+#
+#  If it stops for any reason -- a crash, a reboot, naturev1.stop(), the supervisor giving up -- just run
+#  this cell again: every stage continues from its last checkpoint (saved every minute, a snapshot every
+#  30 minutes, and a second copy in BACKUP_DIR). naturev1.progress() shows where it will continue from.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 
 BACKGROUND    = True      # supervised background run: survives disconnects, restarts on crash or stall
@@ -46,6 +50,8 @@ CITY          = (25.77, -80.19)        # live forecast: somewhere you want a loc
 HF_REPO       = "Sigmandndnns/NatureV1-500"
 HF_TOKEN      = ""        # a write token, to publish and mirror checkpoints; or set the HF_TOKEN env var
 DATA_DIR      = None      # None: /content on Colab, ~/naturev1_data elsewhere; or any folder with room
+BACKUP_DIR    = None      # second copy of every checkpoint. None: ~/naturev1_backup; best on another disk;
+                          # "" turns it off
 
 # ═══ 0 ═══ install ═════════════════════════════════════════════════════════════════════════════════
 # Standard library only, before numpy or torch are imported: pip may upgrade numpy while satisfying
@@ -93,7 +99,7 @@ def _halt(message, kind="danger"):
     raise SystemExit(message)
 
 
-_NEEDED = {"naturev1": ("naturev1[all]>=0.8.5", (0, 8, 5)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
+_NEEDED = {"naturev1": ("naturev1[all]>=0.8.6", (0, 8, 6)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
 
 
 def _version(module):
@@ -138,6 +144,9 @@ if _missing:
 
 if HF_TOKEN:
     os.environ["HF_TOKEN"] = HF_TOKEN
+# Every checkpoint is also copied here, so losing or damaging the data folder does not lose the run.
+os.environ["NATUREV1_BACKUP_DIR"] = (os.path.expanduser("~/naturev1_backup") if BACKUP_DIR is None
+                                     else os.path.expanduser(BACKUP_DIR))
 
 if BACKGROUND and not os.environ.get("NATUREV1_BACKGROUND_CHILD"):
     # Hand this same pipeline, with these settings, to a supervised process on this machine, and stop
@@ -150,13 +159,15 @@ if BACKGROUND and not os.environ.get("NATUREV1_BACKGROUND_CHILD"):
         "RUN_PRETRAIN", "RUN_ROLLOUT", "RUN_STORMS", "RUN_SCORE", "RUN_HINDCAST", "RUN_PUBLISH",
         "RUN_FORECAST", "RUN_WATCHER", "STAGE_YEARS", "VAL_YEARS", "EPOCHS", "BATCH", "MAX_BATCH", "WORKERS",
         "ROLLOUT_STEPS", "ROLLOUT_TRAIN", "MEMBERS", "STORM_FIRST_SEASON", "HINDCAST", "STORM", "CITY",
-        "HF_REPO", "HF_TOKEN", "DATA_DIR")}
+        "HF_REPO", "HF_TOKEN", "DATA_DIR", "BACKUP_DIR")}
     _naturev1.launch(directory=DATA_DIR, stall_minutes=STALL_MINUTES, **_SETTINGS)
     _naturev1.follow(lines=25, directory=DATA_DIR, wait=90)   # a fresh run: wait for its first lines
     _halt("NatureV1 is training in the background, and the cell stops here on purpose -- not an error.\n"
           "To see progress: run this cell again (it will not start a second run), or in any cell\n"
           "    import naturev1; naturev1.follow()\n"
-          "To end the run: naturev1.stop(). Closing the notebook or losing the wifi does not stop it.",
+          "To end the run: naturev1.stop(). Closing the notebook or losing the wifi does not stop it.\n"
+          "If it ever stops, run this cell again: it continues from the last checkpoint.\n"
+          "naturev1.progress() shows each stage's checkpoint, its age, and its backup.",
           kind="success")
 
 # ═══ 1 ═══ imports, paths, hardware ════════════════════════════════════════════════════════════════
@@ -180,6 +191,7 @@ from naturev1 import (HEADLINE_STATE_FIELDS, CachedERA5, CheckpointManager, ERA5
                       train_state_rollout, train_storm_heads, training_plan, upper_air_report, watch)
 from naturev1.besttrack import download
 from naturev1.era5 import _target_index
+from naturev1.safeio import atomic_write_text, read_json
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 COLAB_DRIVE = "/content/drive/MyDrive"
@@ -308,9 +320,8 @@ def make_step(batch_size):
 # The search is done once and remembered: repeating it on every restart costs minutes, pushes the card
 # to the edge of its memory each time, and could pick a different batch -- a different run -- each time.
 BATCH_FILE = os.path.join(CKPT_DIR, "batch.json")
-if BATCH is None and os.path.exists(BATCH_FILE):
-    with open(BATCH_FILE) as handle:
-        REMEMBERED = json.load(handle)
+REMEMBERED = read_json(BATCH_FILE, default={}) if BATCH is None else {}   # a damaged file is searched again
+if REMEMBERED.get("batch"):
     BATCH, SPEED = int(REMEMBERED["batch"]), float(REMEMBERED.get("samples_per_second", 0.0))
     print(f"batch {BATCH}, found on an earlier run (delete {BATCH_FILE} to search again)")
 else:
@@ -318,8 +329,7 @@ else:
         BATCH = min(autotune_batch_size(make_step, start=1, target_fraction=0.85), MAX_BATCH)
     MARK = benchmark_steps(make_step(BATCH), BATCH, warmup=1, iterations=10, gradient_checkpointing=True)
     SPEED = MARK.samples_per_second
-    with open(BATCH_FILE, "w") as handle:
-        json.dump({"batch": BATCH, "samples_per_second": SPEED}, handle)
+    atomic_write_text(BATCH_FILE, json.dumps({"batch": BATCH, "samples_per_second": SPEED}))
     print(f"batch {BATCH} | {MARK}")
 if SPEED:
     print(format_plan(training_plan(SPEED, corpus_samples=len(train_ds), epochs=EPOCHS,
