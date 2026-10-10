@@ -272,13 +272,24 @@ class CheckpointManager:
         step, tag, repo, hub_path, private = state.step, self.tag, self.repo_id, self.hub_path, self.private
 
         def upload() -> None:
+            began = time.time()
             try:
                 from huggingface_hub import HfApi
 
+                try:
+                    # The upload library draws two progress bars straight into the training log, a few
+                    # hundred lines per push. One line saying it happened is what the log needs.
+                    from huggingface_hub.utils import disable_progress_bars
+
+                    disable_progress_bars()
+                except ImportError:
+                    pass
                 api = HfApi()
                 api.create_repo(repo, repo_type="model", exist_ok=True, private=private)
                 api.upload_file(path_or_fileobj=str(snapshot), path_in_repo=hub_path, repo_id=repo,
                                 repo_type="model", commit_message=f"{tag} step {step}")
+                print(f"[checkpoint] pushed {tag} step {step:,} to {repo} "
+                      f"({snapshot.stat().st_size / 1e9:.2f} GB in {time.time() - began:.0f} s)", flush=True)
             except Exception as error:  # a failed upload must never kill a training run
                 print(f"[checkpoint] Hub push skipped: {type(error).__name__}: {error}", flush=True)
 

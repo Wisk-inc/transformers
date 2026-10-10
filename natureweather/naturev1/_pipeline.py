@@ -5,7 +5,7 @@ if __name__ not in ("__main__", "__naturev1_pipeline__"):
     raise ImportError("naturev1._pipeline is the training pipeline itself; start it with naturev1.launch()")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
-#  NatureV1 0.9.1 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
+#  NatureV1 0.9.2 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
 #
 #  Paste and run. It installs what it needs, stages the data, builds the 89M-parameter model, trains it
 #  in stages, scores itself against persistence and climatology, and only publishes if it earned it.
@@ -21,6 +21,13 @@ if __name__ not in ("__main__", "__naturev1_pipeline__"):
 #  If it stops for any reason -- a crash, a reboot, naturev1.stop(), the supervisor giving up -- just run
 #  this cell again: every stage continues from its last checkpoint (saved every minute, a snapshot every
 #  30 minutes, and a second copy in BACKUP_DIR). naturev1.progress() shows where it will continue from.
+#
+#  ON A HOSTED NOTEBOOK (molab, Colab): the run survives the notebook, but not the machine. molab ends a
+#  session after 12 hours, or after 90 idle minutes, and wipes its disk -- data, checkpoints and backups
+#  with it. What survives is the Hub mirror: with HF_TOKEN set, every stage pushes its checkpoint to
+#  HF_REPO every 10 minutes, and a new session pulls it back and continues from there. So on molab:
+#  set HF_TOKEN, keep a tab open, and when the session ends, open a new one and run this cell again.
+#  It re-downloads the data (the only cost) and resumes training at most 10 minutes behind.
 #
 #  0.9: the hurricane heads read the storm's physical environment -- deep-layer steering, 200-850 hPa
 #  shear, mid-level moisture, ocean temperature -- computed from the model's own atmosphere, plus a
@@ -107,7 +114,7 @@ def _halt(message, kind="danger"):
     raise SystemExit(message)
 
 
-_NEEDED = {"naturev1": ("naturev1[all]>=0.9.1", (0, 9, 1)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
+_NEEDED = {"naturev1": ("naturev1[all]>=0.9.2", (0, 9, 2)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
 
 
 def _version(module):
@@ -181,6 +188,8 @@ if BACKGROUND and not os.environ.get("NATUREV1_BACKGROUND_CHILD"):
           "    import naturev1; naturev1.follow(watch=120)\n"
           "Closing the notebook or losing the wifi does not stop it. If it ever does stop, run this cell "
           "again: it continues from the last checkpoint.\n"
+          "On molab the SESSION ends after 12 h or 90 idle min and its disk is wiped: keep a tab open, and "
+          "when it ends, open a new session and run this cell again -- it resumes from the Hub copy.\n"
           "naturev1.progress() shows each stage's checkpoint, its age, and its backup.",
           kind="success")
 
@@ -362,8 +371,8 @@ if RUN_PRETRAIN:
     trainer = Trainer(model, TrainSettings(
         stage="pretrain", learning_rate=3e-4, warmup_steps=1000,
         precision=R["precision"], max_steps=int(len(train_ds) * EPOCHS / BATCH),
-        checkpoint_dir=f"{CKPT_DIR}/stage1", checkpoint_seconds=60, hub_repo=HF_REPO,
-        ema_decay=0.0, log_every=25, val_every=500, val_batches=32), device=DEVICE)
+        checkpoint_dir=f"{CKPT_DIR}/stage1", checkpoint_seconds=60, hub_repo=HF_REPO, hub_push_seconds=600,
+        ema_decay=0.0, log_every=5, val_every=500, val_batches=32), device=DEVICE)
     trainer.resume()
     trainer.fit(loader, epochs=EPOCHS, val_loader=val_loader)
     if trainer.interrupted:

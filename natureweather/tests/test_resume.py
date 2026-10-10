@@ -135,3 +135,29 @@ def test_progress_says_where_each_stage_continues_from(tmp_path, monkeypatch, ca
     shown = capsys.readouterr().out
     assert "stage one, pretraining" in shown and "step 1,234, epoch 2" in shown and "backup copy" in shown
     assert "stage 1b, rollout" in shown and "not started" in shown
+
+
+def test_a_hub_push_is_one_line_in_the_log_not_a_progress_bar(tmp_path, monkeypatch, capsys):
+    """The upload library's progress bars used to fill the training log; one line says what happened."""
+    import huggingface_hub
+
+    calls = {}
+
+    class FakeApi:
+        def create_repo(self, repo, **kwargs):
+            calls["repo"] = repo
+
+        def upload_file(self, path_or_fileobj, path_in_repo, repo_id, **kwargs):
+            calls["path"] = path_in_repo
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(huggingface_hub, "get_token", lambda: "hf_fake")
+    manager = CheckpointManager(tmp_path / "stage1", repo_id="someone/model", push_every_seconds=0.0,
+                                backup_dir=str(tmp_path / "backup"))
+    manager.save(_net(), None, state=TrainingState(step=42), force=True)
+    assert manager._upload is not None
+    manager._upload.join(timeout=30)
+    shown = capsys.readouterr().out
+    assert "pushed stage1 step 42 to someone/model" in shown and "GB in" in shown
+    assert calls["path"] == "checkpoints/stage1/latest.pt"
+    assert "Processing Files" not in shown and "%|" not in shown
