@@ -163,7 +163,7 @@ def test_the_watch_runs_until_the_run_ends_and_proves_life(tmp_path, monkeypatch
         stop(directory=home, wait=10)
 
 
-def test_the_trainer_log_line_carries_pace_and_eta():
+def test_the_trainer_log_line_carries_pace_and_eta(tmp_path):
     from naturev1 import NatureConfig, NatureV1, Trainer, TrainSettings
 
     from ihelix import fibonacci_sphere
@@ -185,8 +185,8 @@ def test_the_trainer_log_line_carries_pace_and_eta():
 
     out = io.StringIO()
     with redirect_stdout(out):
-        Trainer(model, TrainSettings(max_steps=4, precision="fp32", warmup_steps=1, log_every=2),
-                device="cpu").fit(batches(), epochs=1)
+        Trainer(model, TrainSettings(max_steps=4, precision="fp32", warmup_steps=1, log_every=2,
+                                     checkpoint_dir=str(tmp_path)), device="cpu").fit(batches(), epochs=1)
     text = out.getvalue()
     assert "s/step" in text and "h left" in text and "epoch 1/1" in text and "/4" in text
 
