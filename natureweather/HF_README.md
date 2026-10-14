@@ -106,7 +106,7 @@ keeps the geometry:
 ### 2.2 The model: NatureV1
 | | |
 |---|---|
-| Parameters | 89.18 M (17 iHELIX blocks 84.7 M, encoders 2.4 M, storm heads ~1 M, state head 88 k) |
+| Parameters | 89.45 M: 17 iHELIX blocks 84.67 M, input encoders 2.42 M, decoder 0.79 M, storm heads 1.23 M, time embedding 0.13 M, other output heads (field, weather type, noise, ENSO) 0.11 M, state head 0.09 M, norms + mesh seed ~3 k |
 | Hidden size / heads | 512 / 8 heads (4 key-value heads), head dim 64, MLP 2048 |
 | Latent mesh | 4,096 points, 48 neighbours, cluster 64 |
 | Head radii | 120 km to 1,600 km |
@@ -145,7 +145,7 @@ uncertainties open at climatological spread rather than at a confident guess.
    from about 2×10¹¹ supervised values.
 2. **Stage 1b — full-state rollout.** The residual state head is trained to roll the whole atmosphere forward,
    curriculum to 12 steps (72 h), 2-member CRPS ensemble.
-3. **Stage two — hurricane heads on HURDAT2.** The backbone is **frozen**; only ~1 M parameters ever see a
+3. **Stage two — hurricane heads on HURDAT2.** The backbone is **frozen**; only ~1.2 M parameters ever see a
    best-track label. The frozen backbone runs once per storm into a cached feature bank; the heads then train in
    seconds per epoch with early stopping on seasons never trained on. Afterwards the consensus weights are fitted
    on the held-out seasons.
