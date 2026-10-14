@@ -201,9 +201,11 @@ paths and the honesty rules.
 
 One result stands independently of training, because it uses no trained parameters: on Hurricane Dorian, issued
 2019‑08‑30 18Z from the 1.5° analysis, the **physics-only steering track** had errors of 177 km at 24 h, 382 km at
-48 h, 546 km at 72 h and 531 km at 120 h, beating straight extrapolation from 48 h onward (397, 651, 1012 km). For
-scale, the official NHC forecast averages roughly 70 km at 24 h and 160 km at 72 h. The steering member is the
-floor the learned model starts from, not the ceiling it is aiming at.
+48 h, 546 km at 72 h and 531 km at 120 h. Straight extrapolation scored 161, 397, 651 and 1012 km: it wins at
+24 h, and steering wins from 48 h onward. For scale only, NHC's official Atlantic track error averaged 35.7 n mi
+(66 km) at 24 h and 90.5 n mi (168 km) at 72 h over 2018–2022. That is an average over many storms from an operational
+centre, set against one storm from a 1.5° analysis, so it is not a like-for-like comparison. The steering member is
+the floor the learned model starts from, not the ceiling it is aiming at.
 
 When the run finishes, this section will carry the scorecards verbatim.
 
