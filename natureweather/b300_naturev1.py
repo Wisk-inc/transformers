@@ -27,7 +27,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 
 # %% [0] settings ──────────────────────────────────────────────────────────────────────────────────────
-HF_REPO        = "Sigmandndnns/NatureV1-500"
+HF_REPO        = "CorxLabs/NatureV1-500"
 HF_TOKEN       = ""            # paste a WRITE token here for this session, then clear it afterwards
 DATA           = "/data/naturev1"   # the NVMe array: >= 2 TB free (staged shards + ERA5 + working space)
 FIRST_YEAR     = 1980          # GridSat-B1 begins 1980

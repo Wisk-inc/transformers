@@ -13,7 +13,7 @@ def _publish_naturev1(hf_token: str) -> None:
     from dataclasses import asdict
     from pathlib import Path
 
-    REPO = "Sigmandndnns/NatureV1-500"
+    REPO = "CorxLabs/NatureV1-500"
     DATA = Path("/home/marimo/naturev1_data")
     CKPT = DATA / "naturev1_ckpt"
     SOURCE = ("https://raw.githubusercontent.com/Wisk-inc/transformers/"

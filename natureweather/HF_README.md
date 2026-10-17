@@ -599,7 +599,7 @@ Load the released model (weights, config and the normalisation statistics it was
 ```python
 from naturev1.hub import from_pretrained
 
-model, config, normalizer = from_pretrained("Sigmandndnns/NatureV1-500")
+model, config, normalizer = from_pretrained("CorxLabs/NatureV1-500")
 print(model.trained_heads())      # steps each output has received; 0 = never trained, never shown
 ```
 

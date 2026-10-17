@@ -173,7 +173,7 @@ pretrain = TrainSettings(
     max_steps=int(len(train_ds) * 8 / BATCH),
     grad_accum=1, precision="bf16",      # bf16 on Blackwell: no loss scaling needed
     checkpoint_dir=f"{CKPT}/stage1", checkpoint_seconds=60,
-    hub_repo="Sigmandndnns/NatureV1-500", hub_push_seconds=900,
+    hub_repo="CorxLabs/NatureV1-500", hub_push_seconds=900,
     ema_decay=0.999, log_every=25,
     val_every=500, val_batches=32,       # held-out check every 500 steps
 )
@@ -248,7 +248,7 @@ finetune = TrainSettings(
     learning_rate=1e-4, warmup_steps=200, max_steps=20_000,
     precision="bf16",
     checkpoint_dir=f"{CKPT}/stage2", checkpoint_seconds=60,
-    hub_repo="Sigmandndnns/NatureV1-500", hub_push_seconds=900,
+    hub_repo="CorxLabs/NatureV1-500", hub_push_seconds=900,
     ema_decay=0.999, log_every=25,
     val_every=200, val_batches=32,
     early_stopping_patience=10,          # 10 held-out passes without improvement -> stop

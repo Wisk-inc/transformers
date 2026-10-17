@@ -26,7 +26,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 
 # %% [0] settings ──────────────────────────────────────────────────────────────────────────────────────
-HF_REPO          = "Sigmandndnns/NatureV1-500"
+HF_REPO          = "CorxLabs/NatureV1-500"
 HF_TOKEN         = ""          # paste a WRITE token for this session only, then clear this line
 DATA             = "/data/naturev1"
 DEV_SEASONS      = (2016, 2017, 2019)            # tuning seasons (constants were fitted on these)
