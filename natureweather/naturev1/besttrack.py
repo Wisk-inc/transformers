@@ -53,6 +53,11 @@ class Track:
     rmw_nmi: np.ndarray         # (T,) radius of maximum wind -- the eyewall's radius
     wind_radii_nmi: np.ndarray  # (T, 3, 4) thresholds 34/50/64 kt by NE/SE/SW/NW quadrant
     record: np.ndarray          # (T,) record identifier; "L" marks a landfall
+    # Filled by the global IBTrACS reader (naturev1.ibtracs); HURDAT2 tracks leave them unset.
+    basin: str = ""                                  # NA, EP, WP, NI, SI, SP, SA
+    interpolated: np.ndarray | None = None           # (T,) True where IBTrACS interpolated the fix
+    wind_source: np.ndarray | None = None            # (T,) 0 US 1-min, 1 WMO 10-min converted, 2 WMO 1-min
+    distance_to_land_km: np.ndarray | None = None    # (T,)
 
     def __len__(self) -> int:
         return self.time.shape[0]

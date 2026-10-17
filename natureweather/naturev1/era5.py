@@ -940,6 +940,8 @@ def materialise(
     stamps = dataset.time.values[ordered].astype("datetime64[s]").astype(np.int64)
     atomic_write_text(path.with_suffix(".json"), json.dumps(
         {"variables": names, "levels": list(levels) if levels else None,
+         "latitude": np.asarray(dataset["latitude"].values, np.float64).tolist(),
+         "longitude": np.asarray(dataset["longitude"].values, np.float64).tolist(),
          "shape": list(shape), "dtype": np.dtype(dtype).name, "normalized": True,
          "statistics": normalizer.to_dict(), "indices": ordered.tolist(), "time": stamps.tolist()},
         indent=2))

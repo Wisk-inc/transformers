@@ -152,6 +152,7 @@ def decode_consensus(
     weights: torch.Tensor,
     storm_state: torch.Tensor,
     batch_index: int = 0,
+    rollout: dict | None = None,
 ) -> dict:
     """
     The multi-model track: every member's position at every lead, and their weighted blend.
@@ -165,31 +166,44 @@ def decode_consensus(
     from .model import TRACK_MEMBERS
     from .steering import extrapolation_track
 
+    from .storms import consensus_track
+
     probabilities = outputs["mode_logits"][batch_index].softmax(-1)
     displacement = outputs["displacement"][batch_index]
+    missing = torch.full_like(outputs["track_prior"][batch_index], float("nan"))
+    rollout = rollout or {}
     members = torch.stack([
         displacement[int(probabilities.argmax())],
         (displacement * probabilities.view(-1, 1, 1)).sum(0),
         outputs["track_prior"][batch_index],
         extrapolation_track(storm_state.view(1, -1), lead_times_hours)[0],
+        torch.as_tensor(rollout.get("rollout_steering", missing), dtype=missing.dtype).reshape(missing.shape),
+        torch.as_tensor(rollout.get("rollout_vortex", missing), dtype=missing.dtype).reshape(missing.shape),
     ], 1).float()                                                                  # (L, M, 2)
-    blended = (members * weights.to(members.dtype).unsqueeze(-1)).sum(1)          # (L, 2)
+    width = members.shape[1]
+    weights = weights.float()
+    if weights.shape[-1] < width:                                                  # fitted before 0.12
+        weights = torch.cat([weights, weights.new_zeros(weights.shape[0], width - weights.shape[-1])], -1)
+    blended = consensus_track(members.unsqueeze(0), weights)[0]                     # (L, 2)
 
     def position(d_lat, d_lon):
+        if not (math.isfinite(float(d_lat)) and math.isfinite(float(d_lon))):
+            return None
         return {"latitude": round(origin_lat + float(d_lat), 3),
                 "longitude": round((origin_lon + float(d_lon) + 180.0) % 360.0 - 180.0, 3)}
 
     points = []
     for lead, hours in enumerate(lead_times_hours):
         row = {"lead_hours": hours, "valid_time": (issued + dt.timedelta(hours=hours)).isoformat(),
-               **position(*blended[lead]),
+               **(position(*blended[lead]) or {"latitude": None, "longitude": None}),
                "members": {name: position(*members[lead, m]) for m, name in enumerate(TRACK_MEMBERS)}}
         points.append(row)
     return {
         "track": points,
         "weights": {name: [round(float(w), 3) for w in weights[:, m]] for m, name in enumerate(TRACK_MEMBERS)},
-        "note": "a weighted blend of the learned track, the steering-flow track and extrapolation; weights "
-                "per lead were fitted on held-out seasons",
+        "note": "a weighted blend of the learned track, the steering-flow track, extrapolation and -- when "
+                "given -- the tracks through the model's own rollout; weights per lead were fitted on held-out "
+                "seasons, and a member that was not computed drops out of the blend",
     }
 
 
@@ -483,7 +497,9 @@ def build_forecast(
             turns every downstream number into noise, however trained the heads are.
         consensus: ``{"weights": model.track_consensus, "storm_state": (F,) tensor}`` to add the
             multi-model ``track_consensus`` section. Left out when the weights were never fitted, or
-            when the outputs carry no steering track.
+            when the outputs carry no steering track. Add ``"rollout": {"rollout_steering": (L, 2),
+            "rollout_vortex": (L, 2)}`` (:func:`naturev1.tracker.rollout_member_tracks`) to bring the
+            rollout members in; without them those members drop out of the blend.
     """
     bundle = {
         "issued": issued.isoformat(),
@@ -533,7 +549,7 @@ def build_forecast(
                 and not _untrained("track", trained)):
             bundle["track_consensus"] = decode_consensus(
                 outputs, storm_center[0], storm_center[1], lead_times_hours, issued, weights,
-                consensus["storm_state"], batch_index)
+                consensus["storm_state"], batch_index, consensus.get("rollout"))
         bundle["landfall"] = (_UNAVAILABLE if _untrained("landfall", trained) else decode_landfall(
             outputs, lead_times_hours, issued, batch_index, trained))
         bundle["intensity"] = (_UNAVAILABLE if _untrained("intensity", trained) else decode_intensity(

@@ -337,7 +337,9 @@ def check_forecast(bundle: dict) -> list[str]:
 
     consensus = bundle.get("track_consensus", {})
     for point in (consensus.get("track", []) if isinstance(consensus, dict) else []):
-        if not -90.0 <= point["latitude"] <= 90.0:
+        if point.get("latitude") is None:
+            problems.append(f"consensus has no position at +{point['lead_hours']}h: no member was available")
+        elif not -90.0 <= point["latitude"] <= 90.0:
             problems.append(f"consensus latitude {point['latitude']:.1f} at +{point['lead_hours']}h is off the planet")
     for point in rows("track_cone"):
         if not -90.0 <= point["latitude"] <= 90.0:

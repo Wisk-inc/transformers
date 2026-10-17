@@ -45,6 +45,17 @@ def atomic_torch_save(obj, path: str | os.PathLike) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = _temporary(path)
+    try:
+        temporary.write_bytes(data)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def atomic_copy(source: str | os.PathLike, destination: str | os.PathLike) -> None:
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)

@@ -156,16 +156,26 @@ def test_the_consensus_finds_the_member_that_is_right():
     torch.manual_seed(1)
     count, leads = 200, len(LEADS)
     truth = torch.randn(count, leads, 2)
+    missing = torch.full((count, leads, 2), float("nan"))          # rollout members not computed
     members = torch.stack([truth + torch.randn(count, leads, 2) * 0.5, truth + torch.randn(count, leads, 2) * 0.3,
-                           truth.clone(), truth + torch.randn(count, leads, 2)], 2)
+                           truth.clone(), truth + torch.randn(count, leads, 2), missing, missing], 2)
     valid = torch.ones(count, leads, dtype=torch.bool)
     latitude = torch.full((count,), 25.0)
     weights = fit_track_consensus(members, truth, valid, latitude)
     assert weights.shape == (leads, len(TRACK_MEMBERS))
     assert torch.allclose(weights.sum(-1), torch.ones(leads), atol=1e-4) and (weights >= 0).all()
     assert (weights[:, 2] > 0.97).all(), weights
+    assert float(weights[:, 4:].abs().sum()) == 0, "a member that was never computed gets no weight"
     blended = consensus_track(members, weights)
     assert float((blended - truth).abs().mean()) < 0.02
+    # A member present for some samples only: those samples use it, the rest renormalise without it.
+    members[:100, :, 4] = truth[:100]
+    weights[:, :] = 0.0
+    weights[:, 4] = 0.5
+    weights[:, 0] = 0.5
+    mixed = consensus_track(members, weights)
+    assert torch.isfinite(mixed).all()
+    assert torch.allclose(mixed[100:], members[100:, :, 0], atol=1e-6)
 
 
 def test_samples_with_nothing_to_verify_do_not_dilute_the_track_loss():

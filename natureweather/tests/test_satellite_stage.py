@@ -59,12 +59,14 @@ def banks(tmp_path_factory):
 
 
 def test_tracked_outputs_only_grow_at_the_end_and_old_checkpoints_load():
-    assert TRACKED_HEADS[-1] == "storm_satellite"
+    # Positions are what the saved counts are read by: 0.11 appended one, 0.12 five more, never in between.
+    assert TRACKED_HEADS.index("storm_satellite") == 22
+    assert TRACKED_HEADS[23:] == ("satnet", "retrieval", "ri2", "satnet_fusion", "backbone_tail")
     model = _model()
     old = {k: v for k, v in model.state_dict().items()
            if not k.startswith(("storm_satellite.", "ri_calibration", "landfall_calibration", "feature_",
-                                "state_tendency"))}
-    old["head_steps"] = torch.arange(len(TRACKED_HEADS) - 1)          # a 0.10 record: one output shorter
+                                "state_tendency", "intensity_correction", "eyewall_correction", "ri2_calibration"))}
+    old["head_steps"] = torch.arange(22)                                 # a 0.10 record
     fresh = _model()
     fresh.load_state_dict(old)
     assert fresh.trained_heads()["storm_satellite"] == 0

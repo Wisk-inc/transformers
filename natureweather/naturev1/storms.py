@@ -366,6 +366,7 @@ def format_pairing(report: dict) -> str:
 def _backbone_fingerprint(model) -> str:
     """Changes whenever any frozen weight the storm features depend on changes."""
     heads = {id(p) for p in model.storm_head_parameters()}
+    heads |= {id(p) for p in getattr(model, "satellite_parameters", lambda: [])()}
     total = torch.zeros(2, dtype=torch.float64)
     for index, parameter in enumerate(model.parameters()):
         if id(parameter) in heads:
@@ -720,7 +721,10 @@ def track_members(outputs: dict, targets: dict, lead_times_hours) -> torch.Tenso
     The consensus members for every sample: ``(N, L, len(TRACK_MEMBERS), 2)`` displacements in degrees.
 
     The learned head's most likely scenario and its probability-weighted mean, the steering-flow track
-    (from the bank, so it is there whether or not the head was trained on it), and extrapolation.
+    (from the bank, so it is there whether or not the head was trained on it), extrapolation, and -- when
+    the bank carries them (:func:`naturev1.tracker.rollout_member_tracks`) -- the storm steered through
+    the model's own rollout and the vortex followed in it. A member that was not computed is NaN, and the
+    consensus is blended over the members each sample has.
     """
     size = outputs["displacement"].shape[0]
     probabilities = outputs["mode_logits"].softmax(-1)
@@ -728,7 +732,10 @@ def track_members(outputs: dict, targets: dict, lead_times_hours) -> torch.Tenso
     mean = (outputs["displacement"] * probabilities.view(size, -1, 1, 1)).sum(1)
     steering = targets["track_prior"].float()
     extrapolation = extrapolation_track(targets["storm_state"], lead_times_hours)
-    return torch.stack([top, mean, steering, extrapolation], 2)
+    missing = torch.full_like(steering, float("nan"))
+    rolled = targets.get("rollout_steering", missing).float()
+    vortex = targets.get("rollout_vortex", missing).float()
+    return torch.stack([top, mean, steering, extrapolation, rolled, vortex], 2)
 
 
 def _consensus_inputs(model, bank: dict, leads):
@@ -768,20 +775,28 @@ def fit_track_consensus(members: torch.Tensor, truth: torch.Tensor, valid: torch
     count, leads, size, _ = members.shape
     members_km = displacement_km(members.double(), latitude.double().view(count, 1, 1))
     truth_km = displacement_km(truth.double(), latitude.double().view(count, 1))
-    weights = torch.full((leads, size), 1.0 / size, dtype=torch.float64)
+    finite = torch.isfinite(members).all(-1)                                         # (N, L, M)
+    weights = torch.zeros((leads, size), dtype=torch.float64)
     for lead in range(leads):
         ok = valid[:, lead]
-        if int(ok.sum()) < size:
+        # Members computed for (nearly) every verifying sample take part; the rest get no weight here.
+        present = [m for m in range(size) if ok.any() and float(finite[ok, lead, m].float().mean()) >= 0.9]
+        if not present:
             continue
-        design = members_km[ok, lead].permute(0, 2, 1).reshape(-1, size)          # (2n, M)
-        target = truth_km[ok, lead].reshape(-1)                                     # (2n,)
+        rows = ok & finite[:, lead, present].all(-1)
+        k = len(present)
+        weights[lead, present] = 1.0 / k
+        if int(rows.sum()) < k:
+            continue
+        design = members_km[rows, lead][:, present].permute(0, 2, 1).reshape(-1, k)   # (2n, k)
+        target = truth_km[rows, lead].reshape(-1)                                     # (2n,)
         gram = design.T @ design / design.shape[0]
         moment = design.T @ target / design.shape[0]
         step = 1.0 / float(torch.linalg.eigvalsh(gram).max().clamp_min(1e-9))
-        w = weights[lead].clone()
+        w = weights[lead, present].clone()
         for _ in range(iterations):
             w = _project_to_simplex(w - step * (gram @ w - moment))
-        weights[lead] = w
+        weights[lead, present] = w
     return weights.float()
 
 
@@ -794,8 +809,20 @@ def describe_consensus(weights: torch.Tensor, lead_times_hours) -> str:
 
 
 def consensus_track(members: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-    """Blend ``(N, L, M, 2)`` members with ``(L, M)`` weights into ``(N, L, 2)``."""
-    return (members * weights.to(members.dtype).view(1, *weights.shape, 1)).sum(2)
+    """
+    Blend ``(N, L, M, 2)`` members with ``(L, M)`` weights into ``(N, L, 2)``.
+
+    Over the members each sample actually has: a member that is NaN for a sample drops out and the rest
+    are renormalised. If every weighted member is missing, the plain mean of what is there is used.
+    """
+    finite = torch.isfinite(members).all(-1)                                          # (N, L, M)
+    w = weights.to(members.dtype).view(1, *weights.shape) * finite.to(members.dtype)
+    total = w.sum(-1, keepdim=True)
+    filled = torch.nan_to_num(members)
+    blended = (filled * w.unsqueeze(-1)).sum(2) / total.clamp_min(1e-12)
+    count = finite.sum(-1, keepdim=True).to(members.dtype)
+    fallback = (filled * finite.unsqueeze(-1).to(members.dtype)).sum(2) / count.clamp_min(1.0)
+    return torch.where(total > 0, blended, fallback)
 
 
 def _cross_validated_consensus(members, truth, valid, latitude, seasons) -> torch.Tensor:
@@ -836,9 +863,13 @@ def storm_scorecard(model, bank: dict, lead_times_hours) -> str:
     blended = _cross_validated_consensus(members, truth, valid, centre[:, 0], seasons)
     wind_now = targets["current_wind_kt"]
     distinct = len(set(seasons.tolist()))
+    # The rollout members, where the bank carries them: steered through the model's own forecast, and the
+    # vortex followed in it. Scored over the samples that have them.
+    extra = [(index, label) for index, label in ((4, "roll-steer"), (5, "vortex"))
+             if bool(torch.isfinite(members[:, :, index]).any())]
 
     lines = [f"{'lead':>6} {'n':>6} {'model km':>9} {'steering':>9} {'consensus':>9} {'stay-put':>9} "
-             f"{'extrap.':>9} {'wind MAE kt':>12} {'persist':>8}"]
+             f"{'extrap.':>9}" + "".join(f" {label:>10}" for _, label in extra) + f" {'wind MAE kt':>12} {'persist':>8}"]
     for lead, hours in enumerate(lead_times_hours):
         ok = valid[:, lead]
         if not ok.any():
@@ -860,8 +891,18 @@ def storm_scorecard(model, bank: dict, lead_times_hours) -> str:
         wind_pred = out["intensity_mean"][both, lead, 0] / KT_TO_MS
         mae = float((wind_pred - wind_true).abs().mean()) if both.any() else float("nan")
         persist = float((wind_now[both] - wind_true).abs().mean()) if both.any() else float("nan")
+        columns = ""
+        for index, _ in extra:
+            have = torch.isfinite(members[ok, lead, index]).all(-1)
+            if have.any():
+                d = members[ok, lead, index][have]
+                km = float(_great_circle_km(actual[0][have], actual[1][have], lat0[have] + d[:, 0],
+                                            lon0[have] + d[:, 1]).mean())
+                columns += f" {km:>10.0f}"
+            else:
+                columns += f" {'-':>10}"
         lines.append(f"{hours:>5}h {int(ok.sum()):>6} {scenario:>9.0f} {steer:>9.0f} {consensus:>9.0f} "
-                     f"{still:>9.0f} {extrapolated:>9.0f} {mae:>12.1f} {persist:>8.1f}")
+                     f"{still:>9.0f} {extrapolated:>9.0f}{columns} {mae:>12.1f} {persist:>8.1f}")
     lines.append("")
     lines.append("'steering' is physics alone: the deep-layer wind around the storm, no training. 'consensus' blends")
     lines.append("model, steering and extrapolation with weights fitted on "
