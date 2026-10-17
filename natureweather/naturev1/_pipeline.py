@@ -513,6 +513,8 @@ if RUN_SATELLITE:
     plain_val = dict(bank_val)
     bank_train["satellite"], bank_val["satellite"] = sat_train, sat_val
     coverage = float(sat_val["available"][:, 0].float().mean())
+    # The model as it arrives -- stage two, no satellite -- scored first: that is what stage three must beat.
+    before = None if loaded is not None else storm_scorecard(model, plain_val, CFG.lead_times_hours)
     if loaded is not None:
         print("\nstage three is already trained: its checkpoint is loaded (RETRAIN_SATELLITE = True trains it again)")
     elif coverage < 0.3:
@@ -533,8 +535,11 @@ if RUN_SATELLITE:
                  config=model.config.to_dict(), force=True)
     _stage3.push_now(TrainingState(step=int(model.trained_heads()["storm_satellite"])))
     banner("SCOREBOARD — what the satellite adds, on held-out storms")
-    print(f"without satellite:\n{storm_scorecard(model, plain_val, CFG.lead_times_hours)}")
-    print(f"\nwith satellite ({coverage:.0%} of samples have an image):\n"
+    if before is not None:
+        print(f"stage two, before the satellite (the score to beat):\n{before}")
+    else:
+        print(f"stage three with the images withheld:\n{storm_scorecard(model, plain_val, CFG.lead_times_hours)}")
+    print(f"\nstage three, with the satellite ({coverage:.0%} of held-out samples have an image):\n"
           f"{storm_scorecard(model, bank_val, CFG.lead_times_hours)}")
 
 # ═══ 9 ═══ did it learn? scorecards against persistence and climatology ════════════════════════════

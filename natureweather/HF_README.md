@@ -33,6 +33,10 @@ pipeline_tag: other
 >
 > **Training took about one week** of wall-clock time on a single GPU in a hosted notebook (molab), including
 > session restarts and re-staging; the rollout stage alone was 74 GPU-hours.
+>
+> **Version 0.11** adds stage three — storm-centred infrared satellite imagery for the hurricane heads — and fixes
+> what the red team found: calibrated probabilities, an input monitor, and a forecast that can no longer state
+> impossible structure (section 4.9). `training_record.json` says which stage the released weights come from.
 
 NatureV1 is an 89-million-parameter model of the atmosphere that forecasts global weather out to five days and,
 for tropical cyclones, where a storm will go, how strong it will get, whether it will intensify rapidly, and
@@ -73,7 +77,12 @@ variables on 13 pressure levels — on a 1.5° global grid), NatureV1 produces:
   It ranks risk well but its probabilities are far too high (section 4.8).
 - **Landfall**: the probability of landfall by each lead. (The landfall-timing head was never trained and is not
   shown.)
-- **Core structure**: peak eyewall wind, radius of maximum wind, and 34/50/64 kt wind radii by quadrant.
+- **Core structure**: peak eyewall wind, radius of maximum wind, and 34/50/64 kt wind radii by quadrant, kept
+  physically ordered (34 ≥ 50 ≥ 64 kt; radius of maximum wind inside the gale radius).
+- **A cone drawn from the whole scenario mixture** (`track_cone`: the radius holding 50% and 90% of the mixture
+  per lead), which on held-out storms held the truth as often as it claims to.
+- **What the satellite sees (0.11, after stage three).** Storm-centred 11-micron infrared — now and six hours
+  earlier — from HURSAT-B1, GridSat-B1 or a live GOES scene, read by a small branch aimed at intensity.
 - **The storm's environment**, read from the model's own atmosphere: deep-layer steering, 200–850 hPa shear,
   mid-level humidity, ocean temperature — the predictors operational statistical schemes (SHIPS) are built on.
 
@@ -85,7 +94,11 @@ This is as much a part of the model as the outputs above.
   `{"available": false, "reason": ...}`. The training record travels inside the checkpoint.
 - A forecast run from an input path the model was never trained on (today, the satellite path) is marked
   **`trustworthy: false`** and the live satellite forecast is refused outright.
-- `check_forecast` tests every scenario track, intensity, eyewall and RI value against **physical bounds**: no
+- An **input monitor** (0.11) compares the storm features with what training looked like; a forecast from
+  inputs unlike anything it learned from — corrupted data, noise, zeros — is marked `trustworthy: false`.
+- `check_forecast` tests every scenario track, the consensus and the cone, intensity, eyewall and RI value
+  against **physical bounds**, and checks that landfall never becomes less likely with time and wind radii stay
+  ordered: no
   400 kt hurricane, no pressure outside 850–1100 hPa, no cone wider than an ocean, no probabilities that do not sum
   to one. It reports problems; it does not block the forecast, so a caller must act on what it returns. Section
   4.8 lists what it does not catch.
@@ -168,6 +181,15 @@ minute of training.
    best-track label. The frozen backbone runs once per storm into a cached feature bank; the heads then train in
    seconds per epoch with early stopping on seasons never trained on. Afterwards the consensus weights are fitted
    on the held-out seasons.
+4. **Stage three — the satellite (0.11).** Every storm sample gets two storm-centred infrared images (now and
+   six hours earlier; 256 × 256 pixels at 0.07°, about 18° across): HURSAT-B1 for 1979–2016, GridSat-B1 after
+   — the same ISCCP B1 record on the same grid (on Katrina at landfall they agree with correlation 0.989).
+   A small network (0.84 M parameters: a CNN plus the Dvorak technique's own radial profile of cloud-top
+   temperature) is added to the hurricane heads with its output at exactly zero, then fine-tuned with the
+   backbone frozen. The model it starts from is the score to beat on held-out storms; if the satellite does not
+   beat it, that model is kept unchanged. Then landfall and rapid-intensification probabilities are calibrated
+   on held-out seasons, the input monitor is fitted, and the rollout's tendency statistics are stored with the
+   weights.
 
 ### 2.5 Data
 - **ERA5 via WeatherBench 2**, 1.5°, 240×121, six-hourly, 13 pressure levels. Split **by time** over 1959–2021
@@ -390,8 +412,36 @@ same latitude while it moved 5° north. **It cannot warn of explosive intensific
 from the training data; they are not shipped in this release, so reproducing the weather rollout exactly means
 re-measuring them from ERA5 2011–2015 (64 evenly spaced training windows).
 
-Still running at the time of writing: six more storms outside the Atlantic (West Pacific, Southern Hemisphere,
-East Pacific) and a 10-day rollout to test stability beyond the 72 h trained horizon. They will be added here.
+**Outside the Atlantic — the Southern Hemisphere** (full model from raw ERA5; the storm heads only ever saw
+Atlantic storms):
+
+| Storm | n | 24 h: NatureV1 / steering / straight | 72 h: NatureV1 / steering / straight | 72 h north–south: forecast vs actual |
+|---|---|---|---|---|
+| Seroja 2021 (South Indian) | 10 | 249 / **180** / 338 km | **682** / 788 / 962 km | −6.4° vs −6.6° |
+| Niran 2021 (South Pacific) | 9 | 209 / **181** / 277 km | **976** / 1125 / 1246 km | −3.2° vs −2.6° |
+
+It sends Southern Hemisphere storms poleward — south — as it should, and beats steering at 72 h, but at 24 h the
+learned correction, fitted only to Atlantic storms, makes the track *worse* than physics steering alone. Outside
+the Atlantic, trust the steering member at short range.
+
+Still running at the time of writing: four more storms outside the Atlantic (West and East Pacific) and a 10-day
+rollout to test stability beyond the 72 h trained horizon. They will be added here.
+
+### 4.9 Fixed in 0.11, measured on the same held-out storms
+| Red-team finding | Fix | Measured after the fix |
+|---|---|---|
+| RI probabilities far too high (Brier 74% worse than the base rate) | Platt calibration fitted on held-out seasons | **+12% Brier skill** over the base rate, each season calibrated without itself; says 16% → 12% happen, 38% → 44% |
+| Landfall over-forecast below 70% | same | says 20% → 21% happen, 39% → 44%; Brier skill unchanged at +29% |
+| Garbage inputs gave a plausible forecast | input monitor (feature z-score and length) | random noise and all-zero inputs flagged **100%**; real held-out storms flagged **0%** |
+| Landfall "by this lead" fell with lead in 20% | reported as a running maximum | 0% |
+| Wind radii out of order in 21%; RMW beyond the gale radius in 17% | structure made consistent when decoded | 0% |
+| Consensus track not bounds-checked; `cone_radius_km_68` mislabelled | checked; renamed `cone_radius_km_39`; `track_cone` from the full mixture | — |
+| Rollout tendency statistics not shipped | stored in the weights (`state_tendency`) | — |
+| No storm centre still produced intensity and RI | every storm section withheld | — |
+
+Not fixed, and why: a corrupted *steering prior* still passes through (it comes from the model's own analysis,
+and a 30° shift is not physically impossible on its own); intensity remains biased low until the satellite stage
+has been trained and scored — its results will be added here.
 
 ## 5. Limitations
 
@@ -403,12 +453,13 @@ East Pacific) and a 10-day rollout to test stability beyond the 72 h trained hor
 - **Verification is internal.** Three held-out seasons plus the 2023 season, scored by this project's own
   scripts; no independent party has verified it.
 - **Intensity.** Biased low, by 10–18 kt for major hurricanes; misses explosive intensification entirely (Otis).
-  Rapid-intensification probabilities are far too high; radius of maximum wind has no skill.
-- **Uncertainty display.** The full scenario mixture is well calibrated, but a single scenario's cone is
-  over-confident and the `cone_radius_km_68` field is a 39% ellipse. Draw cones from the mixture.
-- **No input sanity check.** Corrupted inputs can produce plausible-looking forecasts that pass every check
-  (section 4.8). Physically impossible structure (wind radii out of order, landfall probability falling with lead)
-  is not yet caught.
+  Rapid-intensification probabilities are calibrated in 0.11 but carry only modest skill; radius of maximum wind
+  has no skill. The satellite stage targets this; its effect is measured when it is trained.
+- **Uncertainty display.** The full scenario mixture is well calibrated; a single scenario's cone is
+  over-confident. Use `track_cone`, drawn from the mixture.
+- **Input checks are statistical.** The monitor catches inputs unlike training; a plausible but wrong input
+  (another storm's features, a shifted steering prior) is not detectable this way.
+- **Other basins.** At 24 h the learned track correction is worse than physics steering outside the Atlantic.
 - **Surface heads are stale.** The direct multi-lead surface fields were not retrained after the rollout stage;
   use the full-state rollout for weather.
 - **Small data.** Five years of reanalysis at 1.5°, and the storm heads start memorising after about three epochs.
@@ -424,7 +475,8 @@ East Pacific) and a 10-day rollout to test stability beyond the 72 h trained hor
 Install and train, or score, from one cell (marimo, Colab, Jupyter or a plain script):
 
 ```python
-pip install "naturev1[all]"
+pip install "naturev1[all]"            # 0.10 from PyPI
+pip install "naturev1[all] @ git+https://github.com/Wisk-inc/transformers@claude/linear-context-architecture-a35c6h#subdirectory=natureweather"   # 0.11
 ```
 The complete pipeline is the cell `colab_naturev1.py` shipped with the package; it installs what it needs, stages
 the data, trains in stages, scores itself, and only publishes if it earned it. Every setting is at the top.
@@ -436,6 +488,19 @@ from naturev1.hub import from_pretrained
 
 model, config, normalizer = from_pretrained("Sigmandndnns/NatureV1-500")
 print(model.trained_heads())      # steps each output has received; 0 = never trained, never shown
+```
+
+With satellite imagery (0.11, once stage three has been trained), from a live GOES ABI band 13 file:
+
+```python
+import numpy as np
+import torch
+from naturev1.stormsat import encode_bt, goes_patch
+
+now = goes_patch("C13_now.nc", (lat, lon))                  # storm-centred 0.07-degree patch, kelvin
+earlier = goes_patch("C13_6h_ago.nc", (lat_6h, lon_6h))     # where the storm was six hours ago
+codes = torch.from_numpy(encode_bt(np.stack([now, earlier])))[None]
+outputs = model(..., storm_satellite=(codes, torch.tensor([[True, True]])))
 ```
 
 The weights are also provided as `model.safetensors`. To reproduce the results in section 4, see [`eval/`](./eval):
@@ -455,7 +520,9 @@ training_record.json              steps per output, parameter count, stage-two s
 results/                          every scorecard and test in section 4, as produced
 eval/                             the scripts that produced them
 checkpoints/stage1|rollout|stage2 full training checkpoints (with optimizer state) for resuming or fine-tuning
+checkpoints/stage3                stage three: satellite branch, calibration, input monitor (0.11)
 checkpoints/storm_bank_*.pt       frozen-backbone features for the storm heads
+checkpoints/satellite_bank_*.pt   storm-centred infrared for every storm sample (one byte per pixel)
 staging/                          the normalised ERA5 staging, so a new session needs no re-download
 logs/train.log                    the complete training log, including every scorecard
 ```

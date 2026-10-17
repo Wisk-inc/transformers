@@ -588,7 +588,7 @@ def test_a_finished_stage_pushes_its_final_checkpoint(tmp_path, staged, monkeypa
     dataset = CachedERA5(staged, history=2, lead_steps=1, channels=WIDTH, augment=False, state_steps=2)
     stepper = StateStepper.build(dataset, WIDTH, grid, samples=8)
     model = _model(state_channels=stepper.roles.num_prognostic)
-    loader = era5_loader(dataset, batch_size=2, num_workers=0, analysis_grid=grid, output_grid=grid)
+    loader = loader_rollout = era5_loader(dataset, batch_size=2, num_workers=0, analysis_grid=grid, output_grid=grid)
     train_state_rollout(model, loader, stepper, max_steps=3, precision="fp32", hub_repo="someone/model",
                         schedule=RolloutSchedule(start_step=1, ramp_steps=1, max_steps=2),
                         checkpoint_dir=str(tmp_path / "rollout"))
@@ -601,3 +601,16 @@ def test_a_finished_stage_pushes_its_final_checkpoint(tmp_path, staged, monkeypa
                       device="cpu")
     trainer.fit(loader, epochs=1)
     assert pushed[-1] == ("stage1", 2)
+
+    # Run again with nothing left to train: the Hub already has this checkpoint; do not upload it twice.
+    count = len(pushed)
+    again = Trainer(_model(), TrainSettings(max_steps=2, checkpoint_dir=str(tmp_path / "stage1"),
+                                            precision="fp32", warmup_steps=1, hub_repo="someone/model"),
+                    device="cpu")
+    again.resume()                                        # what the pipeline does before fit()
+    again.fit(loader, epochs=1)
+    train_state_rollout(_model(state_channels=stepper.roles.num_prognostic), loader_rollout, stepper, max_steps=3,
+                        precision="fp32", hub_repo="someone/model",
+                        schedule=RolloutSchedule(start_step=1, ramp_steps=1, max_steps=2),
+                        checkpoint_dir=str(tmp_path / "rollout"))
+    assert len(pushed) == count, "a finished stage is not pushed again"

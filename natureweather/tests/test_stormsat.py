@@ -128,6 +128,10 @@ def test_hursat_picks_the_most_direct_view_and_crops_on_the_storm(tmp_path):
     assert np.nanmax(np.abs(patch[good] - expected[good])) < 0.1, "the 38-degree view, not the 60-degree one (+5 K)"
     assert archive.patch("AL122005", np.datetime64("2005-08-30T12:00"), (29.5, -89.6)) is None, "no image then"
     assert archive.patch("AL992005", np.datetime64("2005-08-29T12:00"), (29.5, -89.6)) is None, "unknown storm"
+    many = archive.storm_patches("AL122005", [(np.datetime64("2005-08-29T12:00"), (29.5, -89.6)),
+                                              (np.datetime64("2005-08-29T13:00"), (30.0, -89.0)),
+                                              (np.datetime64("2005-09-02T12:00"), (35.0, -80.0))])
+    assert many[0] is not None and many[1] is not None and many[2] is None, "one pass, nearest image within 90 min"
 
 
 class _Target:
@@ -150,10 +154,13 @@ class _FakeHursat:
     def __init__(self):
         self.calls = []
 
-    def patch(self, storm, when, centre):
-        self.calls.append((storm, str(when), centre))
-        lats, lons = patch_axes(centre)
-        return field_of(lats[:, None], lons[None, :]).astype(np.float32)
+    def storm_patches(self, storm, requests):
+        out = []
+        for when, centre in requests:
+            self.calls.append((storm, str(when), centre))
+            lats, lons = patch_axes(centre)
+            out.append(field_of(lats[:, None], lons[None, :]).astype(np.float32))
+        return out
 
 
 class _FakeGridsat:

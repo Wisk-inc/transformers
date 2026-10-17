@@ -267,29 +267,47 @@ class HursatArchive:
 
     def patch(self, storm_id: str, when, center: tuple[float, float], tolerance_minutes: int = 90) -> np.ndarray | None:
         """The storm patch nearest ``when`` (within the tolerance), or None if HURSAT has no image."""
+        return self.storm_patches(storm_id, [(when, center)], tolerance_minutes)[0]
+
+    def storm_patches(self, storm_id: str, requests: list[tuple[np.datetime64, tuple[float, float]]],
+                      tolerance_minutes: int = 90) -> list[np.ndarray | None]:
+        """
+        Every requested ``(time, centre)`` patch of one storm, reading its archive once.
+
+        A storm's tarball is compressed as a whole, so pulling images out one at a time decompresses it
+        again for each; one pass over it for all of a storm's samples is what makes 30,000 images minutes.
+        """
         import xarray as xr
 
         sid = self.atcf_to_sid.get(storm_id.upper())
-        if sid is None:
-            return None
-        year = int(str(np.datetime64(when, "Y")))
+        if sid is None or not requests:
+            return [None] * len(requests)
+        year = int(str(np.datetime64(requests[0][0], "Y")))
         members = self._members(sid, year)
         if not members:
-            return None
-        target = np.datetime64(when, "m")
-        nearest = min(members, key=lambda t: abs(t - target))
-        if abs(nearest - target) > np.timedelta64(tolerance_minutes, "m"):
-            return None
+            return [None] * len(requests)
+        wanted: dict[str, list[int]] = {}
+        for i, (when, _) in enumerate(requests):
+            target = np.datetime64(when, "m")
+            nearest = min(members, key=lambda t: abs(t - target))
+            if abs(nearest - target) <= np.timedelta64(tolerance_minutes, "m"):
+                wanted.setdefault(members[nearest], []).append(i)
+        out: list[np.ndarray | None] = [None] * len(requests)
         with tarfile.open(self._tarball(sid, year)) as archive:
-            raw = archive.extractfile(members[nearest]).read()
-        # Through a temporary file rather than memory: any installed netCDF engine can read a path.
-        with tempfile.NamedTemporaryFile(suffix=".nc") as handle:
-            handle.write(raw)
-            handle.flush()
-            with xr.open_dataset(handle.name) as dataset:
-                field = dataset["IRWIN"].values[0].astype(np.float32)
-                lat, lon = dataset["lat"].values, dataset["lon"].values
-        return crop_regular(lat, lon, field, center)
+            for member in archive:
+                if member.name not in wanted:
+                    continue
+                raw = archive.extractfile(member).read()
+                # Through a temporary file rather than memory: any installed netCDF engine can read a path.
+                with tempfile.NamedTemporaryFile(suffix=".nc") as handle:
+                    handle.write(raw)
+                    handle.flush()
+                    with xr.open_dataset(handle.name) as dataset:
+                        field = dataset["IRWIN"].values[0].astype(np.float32)
+                        lat, lon = dataset["lat"].values, dataset["lon"].values
+                for i in wanted[member.name]:
+                    out[i] = crop_regular(lat, lon, field, requests[i][1])
+        return out
 
 
 class GridSatArchive:
@@ -417,16 +435,24 @@ def satellite_bank(targets, cache: str | Path, hursat: HursatArchive | None = No
     new = [j for j in jobs if int(str(np.datetime64(j[3], "Y"))) > hursat_last_season]
     started = time.time()
     if hursat is not None and old:
-        for done, (i, slot, storm, when, centre) in enumerate(old, start=1):
+        by_storm: dict[str, list] = {}
+        for job in old:
+            by_storm.setdefault(job[2], []).append(job)
+
+        def one_storm(jobs):
             try:
-                patch = hursat.patch(storm, when, centre)
+                return jobs, hursat.storm_patches(jobs[0][2], [(when, centre) for *_, when, centre in jobs])
             except Exception:
-                patch = None
-            if patch is not None and np.isfinite(patch).mean() > 0.5:
-                ir[i, slot], available[i, slot], source[i] = encode_bt(patch), True, "HURSAT-B1"
-            if progress and (done % 500 == 0 or done == len(old)):
-                left = (time.time() - started) / done * (len(old) - done) / 60
-                print(f"[stormsat] HURSAT {done:,}/{len(old):,} images ({left:.0f} min left)", flush=True)
+                return jobs, [None] * len(jobs)
+
+        with cf.ThreadPoolExecutor(4) as pool:
+            for done, (jobs, patches) in enumerate(pool.map(one_storm, by_storm.values()), start=1):
+                for (i, slot, *_), patch in zip(jobs, patches):
+                    if patch is not None and np.isfinite(patch).mean() > 0.5:
+                        ir[i, slot], available[i, slot], source[i] = encode_bt(patch), True, "HURSAT-B1"
+                if progress and (done % 25 == 0 or done == len(by_storm)):
+                    left = (time.time() - started) / done * (len(by_storm) - done) / 60
+                    print(f"[stormsat] HURSAT {done:,}/{len(by_storm):,} storms ({left:.0f} min left)", flush=True)
     if gridsat is not None and new:
         patches = gridsat.patches([(when, centre) for _, _, _, when, centre in new], progress=progress)
         for (i, slot, *_), patch in zip(new, patches):
