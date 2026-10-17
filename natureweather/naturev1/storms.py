@@ -600,7 +600,7 @@ def _bank_loss(model, bank, index, device, augment: bool = False):
     satnet = _satnet_batch(bank, index, device)
     outputs = model.storm_heads(bank["features"][index].to(device), batch["storm_center"], batch["storm_state"],
                                 batch["storm_environment"], batch["track_prior"], batch["pooled_far"], satellite,
-                                satnet)
+                                satnet, batch.get("storm_physics"))
     loss, parts = total_loss(outputs, batch, SURFACE_FIELDS)
     if satellite is not None and bool(satellite[1][:, 0].any()):
         batch["storm_satellite"] = satellite
@@ -687,7 +687,7 @@ def train_storm_heads(
             model.mark_trained(parts, {key: batch.get(key) for key in ("storm_center", "storm_state",
                                                                       "storm_environment", "pooled_far",
                                                                       "track_prior", "storm_satellite",
-                                                                      "storm_satnet")})
+                                                                      "storm_satnet", "storm_physics")})
             running += float(loss.detach()) * len(index)
         entry = {"epoch": epoch, "train": running / count}
         beat(f"storm heads epoch {epoch}")
@@ -744,17 +744,33 @@ def _great_circle_km(lat1, lon1, lat2, lon2):
 
 @torch.no_grad()
 def _head_outputs(model, bank: dict, chunk: int = 4096) -> dict[str, torch.Tensor]:
-    """Every storm output for every sample in a bank, on the CPU."""
+    """
+    Every storm output for every sample in a bank, on the CPU.
+
+    When the model uses a rotation ensemble (``config.storm_rotations``) and the bank kept the rotated
+    pools, the outputs are the ensemble's (:func:`naturev1.model.merge_rotations`) -- the same thing a
+    forecast computes, so every fit made on a bank matches what it is applied to.
+    """
+    from .model import merge_rotations
+
     device = next(model.parameters()).device
     model.eval()
     outputs, size = [], bank["features"].shape[0]
+    extra = 0
+    if "features_tta" in bank:
+        extra = min(int(getattr(model.config, "storm_rotations", 1)) - 1, int(bank["features_tta"].shape[1]))
     for start in range(0, size, chunk):
         index = torch.arange(start, min(start + chunk, size))
         batch = {key: value[index].to(device) for key, value in bank["targets"].items()}
         prior = batch["track_prior"] if model.uses_track_prior() else None
-        out = model.storm_heads(bank["features"][index].to(device), batch["storm_center"], batch["storm_state"],
-                                batch["storm_environment"], prior, bank["features_far"][index].to(device),
-                                _satellite_batch(bank, index, device), _satnet_batch(bank, index, device))
+        rollout = {key: batch[key] for key in ("rollout_wind_kt", "rollout_pressure_hpa") if key in batch}
+        satellite, satnet = _satellite_batch(bank, index, device), _satnet_batch(bank, index, device)
+        pools = [(bank["features"][index], bank["features_far"][index])]
+        pools += [(bank["features_tta"][index, r], bank["features_far_tta"][index, r]) for r in range(max(extra, 0))]
+        members = [model.storm_heads(near.to(device), batch["storm_center"], batch["storm_state"],
+                                     batch["storm_environment"], prior, far.to(device), satellite, satnet,
+                                     batch.get("storm_physics"), rollout or None) for near, far in pools]
+        out = merge_rotations(members)
         outputs.append({k: v.float().cpu() for k, v in out.items()})
     return {key: torch.cat([o[key] for o in outputs]) for key in outputs[0]}
 
@@ -778,7 +794,9 @@ def track_members(outputs: dict, targets: dict, lead_times_hours) -> torch.Tenso
     missing = torch.full_like(steering, float("nan"))
     rolled = targets.get("rollout_steering", missing).float()
     vortex = targets.get("rollout_vortex", missing).float()
-    return torch.stack([top, mean, steering, extrapolation, rolled, vortex], 2)
+    analog = targets.get("analog_track", missing).float()
+    ensemble = targets.get("rollout_ensemble", missing).float()
+    return torch.stack([top, mean, steering, extrapolation, rolled, vortex, analog, ensemble], 2)
 
 
 def _consensus_inputs(model, bank: dict, leads):
@@ -1185,4 +1203,68 @@ def ri2_report(model, bank: dict) -> str:
         caught = float((y * (p >= cut)).sum() / y.sum().clamp_min(1.0))
         lines.append(f"{f'+{kt:.0f} kt / {hours} h':>14} {int(keep.sum()):>6} {100 * base:>6.2f}% {brier:>7.4f} "
                      f"{skill:>+7.3f} {100 * caught:>17.0f}%")
+    return "\n".join(lines)
+
+
+@torch.no_grad()
+def consensus_scorecard(model, bank: dict) -> str:
+    """
+    Every track and intensity member against the truth, the plain and the corrected consensus, and how well the
+    predicted-error cone covers -- on whatever storms ``bank`` holds (the test seasons, in stage B).
+    """
+    from .statistical import (
+        INTENSITY_MEMBERS, bank_intensity_members, consensus_radius_km, corrected_track, member_spread_km,
+    )
+    from .steering import displacement_km
+
+    leads = model.config.lead_times_hours
+    out = _head_outputs(model, bank)
+    t = bank["targets"]
+    centre = t["storm_center"].float()
+    truth, valid = t["track_target"].float(), t["track_valid"] > 0
+    members = track_members(out, t, leads)
+    plain = consensus_track(members, model.track_consensus.cpu().float())
+    corrected = corrected_track(model, members, centre[:, 0])
+    spread = member_spread_km(members, corrected, centre[:, 0])
+    radius = consensus_radius_km(model, spread)
+
+    def km(d):
+        return displacement_km((truth - d).double(), centre[:, 0].double().view(-1, 1)).norm(dim=-1)
+
+    columns = [name for i, name in enumerate(TRACK_MEMBERS) if bool(torch.isfinite(members[:, :, i]).any())]
+    lines = ["TRACK (km): " + " ".join(f"{c[:10]:>10}" for c in columns) + f" {'consensus':>10} {'corrected':>10} {'cone hit':>9}"]
+    for lead, hours in enumerate(leads):
+        ok = valid[:, lead]
+        if not ok.any():
+            continue
+        row = []
+        for name in columns:
+            index = TRACK_MEMBERS.index(name)
+            have = ok & torch.isfinite(members[:, lead, index]).all(-1)
+            row.append(f"{float(km(members[:, :, index])[have, lead].mean()):>10.0f}" if have.any() else f"{'-':>10}")
+        error = km(corrected)[ok, lead]
+        hit = radius[ok, lead]
+        cover = f"{100 * float((error <= hit).float().mean()):>8.0f}%" if bool(torch.isfinite(hit).all()) else f"{'-':>9}"
+        lines.append(f"+{hours:>3}h      " + " ".join(row) + f" {float(km(plain)[ok, lead].mean()):>10.0f} "
+                     f"{float(error.mean()):>10.0f} {cover}")
+    intensity = bank_intensity_members(model, bank)
+    blended = model.statistics.consensus(intensity)
+    wind_truth = t["intensity_target"][..., 0] / KT_TO_MS
+    wind_valid = t["intensity_mask"][..., 0] > 0
+    present = [i for i, name in enumerate(INTENSITY_MEMBERS) if bool(torch.isfinite(intensity[..., i]).any())]
+    lines.append("")
+    lines.append("INTENSITY (MAE kt): " + " ".join(f"{INTENSITY_MEMBERS[i][:10]:>10}" for i in present)
+                 + f" {'consensus':>10} {'persist':>8}")
+    for lead, hours in enumerate(leads):
+        ok = wind_valid[:, lead] & torch.isfinite(t["current_wind_kt"])
+        if not ok.any():
+            continue
+        row = []
+        for i in present:
+            have = ok & torch.isfinite(intensity[:, lead, i])
+            row.append(f"{float((intensity[have, lead, i] - wind_truth[have, lead]).abs().mean()):>10.1f}" if have.any()
+                       else f"{'-':>10}")
+        consensus = float((blended[ok, lead] - wind_truth[ok, lead]).abs().mean())
+        persist = float((t["current_wind_kt"][ok] - wind_truth[ok, lead]).abs().mean())
+        lines.append(f"+{hours:>3}h      " + " ".join(row) + f" {consensus:>10.1f} {persist:>8.1f}")
     return "\n".join(lines)

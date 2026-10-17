@@ -230,8 +230,12 @@ def total_loss(outputs: dict, batch: dict, field_names: tuple[str, ...], weights
         parts["landfall"] = float(term.detach())
 
     if "intensity_target" in batch:
-        term = gaussian_nll(outputs["intensity_mean"], outputs["intensity_log_var"],
-                            batch["intensity_target"], batch.get("intensity_mask"))
+        mask = batch.get("intensity_mask")
+        if mask is not None and "sample_weight" in batch:
+            # Rebalanced by intensity class: a major hurricane counts as much as the many weak storms that
+            # otherwise pull every prediction toward the middle (the red team's 10-18 kt low bias).
+            mask = mask * batch["sample_weight"].to(mask.dtype).view(-1, *([1] * (mask.dim() - 1)))
+        term = gaussian_nll(outputs["intensity_mean"], outputs["intensity_log_var"], batch["intensity_target"], mask)
         loss = loss + weights["intensity"] * term
         parts["intensity"] = float(term.detach())
 

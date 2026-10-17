@@ -185,7 +185,8 @@ def train_satnet(model, settings: EngineSettings, table: dict, patches, train_ro
             model.mark_trained({"satnet": 1.0})
             stop, save, evaluate = engine.poll()
             if evaluate:
-                report = evaluate_satnet(engine, engine.model, val_loader, max_batches=200)
+                with engine.averaged():
+                    report = evaluate_satnet(engine, engine.model, val_loader, max_batches=200)
                 engine.last_eval = time.time()
                 engine.history.append({"step": engine.step, **report})
                 if is_main():
@@ -195,11 +196,13 @@ def train_satnet(model, settings: EngineSettings, table: dict, patches, train_ro
             if stop:
                 break
         engine.epoch += 1
-    report = evaluate_satnet(engine, engine.model, val_loader)
+    with engine.averaged():
+        report = evaluate_satnet(engine, engine.model, val_loader)
     if is_main():
         print(f"[satnet] final held-out scores ({len(held):,} sequences):\n{describe_satnet(report)}", flush=True)
     engine.history.append({"step": engine.step, "final": True, **report})
     engine.finish(report)
+    _keep_average(engine)
     return report
 
 
@@ -323,7 +326,8 @@ def train_retrieval(model, settings: EngineSettings, frames, era5_path, stepper,
             model.mark_trained({"retrieval": 1.0})
             stop, save, evaluate = engine.poll()
             if evaluate:
-                report = evaluate_retrieval(engine, model, val_loader, stepper, grid, max_batches=50)
+                with engine.averaged():
+                    report = evaluate_retrieval(engine, model, val_loader, stepper, grid, max_batches=50)
                 engine.last_eval = time.time()
                 engine.history.append({"step": engine.step, "skill": report["skill"]})
                 if is_main():
@@ -333,12 +337,23 @@ def train_retrieval(model, settings: EngineSettings, frames, era5_path, stepper,
             if stop:
                 break
         engine.epoch += 1
-    report = evaluate_retrieval(engine, model, val_loader, stepper, grid)
+    with engine.averaged():
+        report = evaluate_retrieval(engine, model, val_loader, stepper, grid)
     if is_main():
         print(f"[retrieval] final held-out scores ({len(held):,} states):\n{describe_retrieval(report)}", flush=True)
     engine.history.append({"step": engine.step, "final": True, "skill": report["skill"]})
     engine.finish({"skill": report["skill"], "by_age": {str(k): v["skill"] for k, v in report["by_age"].items()}})
+    _keep_average(engine)
     return report
+
+
+def _keep_average(engine) -> None:
+    """Leave the in-memory model holding the averaged weights, as the final checkpoint does."""
+    if engine.ema_params:
+        with torch.no_grad():
+            live = [p for g in engine.optimizer.param_groups for p in g["params"]]
+            for p, e in zip(live, engine.ema_params):
+                p.copy_(e)
 
 
 # ------------------------------------------------------------------------------------------- CLI --

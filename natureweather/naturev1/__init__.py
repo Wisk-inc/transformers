@@ -185,6 +185,13 @@ _LAZY = {
     "vortex_centre": "tracker",
     "fit_intensity_correction": "storms", "ri2_report": "storms", "intensity_by_category": "storms",
     "hardware_preflight": "hardware", "publish_release": "b300",
+    "select_rotations": "stormtrain", "class_weights": "stormtrain", "refine_centre": "satnet",
+    "potential_intensity": "thermo", "storm_physics": "thermo", "cyclone_phase": "thermo", "genesis_map": "thermo",
+    "STORM_PHYSICS_FEATURES": "thermo",
+    "wind_field": "windfield", "wind_hazard": "windfield", "wind_probability_map": "windfield",
+    "StatisticalModels": "statistical", "fit_intensity_consensus": "statistical",
+    "multi_fix_centre": "tracker", "track_storm_in_rollout": "tracker", "AnalogForecaster": "tracker",
+    "merge_rotations": "model", "rotation_angles": "model",
 }
 
 

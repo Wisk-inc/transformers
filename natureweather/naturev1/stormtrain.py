@@ -171,7 +171,8 @@ class StormStep(nn.Module):
     """
 
     def __init__(self, model, stepper, grid, variables, tail: int = 4, state_weight: float = 1.0,
-                 anchor_weight: float = 1e-3, checkpointing: bool = True) -> None:
+                 anchor_weight: float = 1e-3, checkpointing: bool = True,
+                 class_weights: torch.Tensor | None = None) -> None:
         super().__init__()
         from .state import channel_loss_weights
 
@@ -180,6 +181,9 @@ class StormStep(nn.Module):
         self.checkpointing = checkpointing
         weights = channel_loss_weights(stepper.roles.channels, model.config.analysis_channels)[stepper.roles.prognostic]
         self.register_buffer("channel_weights", weights / weights.mean(), persistent=False)
+        # Intensity-loss weight per class (below hurricane, category 1-2, major), from :func:`class_weights`.
+        self.register_buffer("class_weights", torch.ones(3) if class_weights is None
+                             else torch.as_tensor(class_weights, dtype=torch.float32), persistent=False)
         start = len(model.blocks) - tail
         # Where the tail started, as buffers so they follow the module to the GPU (L2-SP pulls back to them).
         self.anchor_names = []
@@ -215,6 +219,7 @@ class StormStep(nn.Module):
         from .losses import total_loss
         from .steering import steering_track, storm_environment
         from .storms import ri2_targets
+        from .thermo import storm_physics
 
         model = self.model
         analysis = self._retrieved(batch)
@@ -254,8 +259,13 @@ class StormStep(nn.Module):
                    if key.startswith("storm/")}
         if model.ri2_head is not None:
             targets["ri2_target"], targets["ri2_mask"] = ri2_targets(targets, model.config.lead_times_hours)
+        wind_class = torch.bucketize(torch.nan_to_num(targets["current_wind_kt"].float(), nan=40.0),
+                                     torch.tensor(CLASS_EDGES_KT, device=centres.device), right=True)
+        targets["sample_weight"] = self.class_weights[wind_class]
+        with torch.no_grad():
+            physics = storm_physics(now, self.variables, self.stepper.normalizer, self.grid, centres, take("storm_state"))
         outputs = model.storm_heads(near, centres, take("storm_state"), environment,
-                                    prior if model.uses_track_prior() else None, far, None, satnet)
+                                    prior if model.uses_track_prior() else None, far, None, satnet, physics)
         loss, parts = total_loss({k: v.float() for k, v in outputs.items()}, targets, SURFACE_FIELDS)
 
         if self.state_weight and model.state_head is not None:
@@ -279,17 +289,42 @@ class StormStep(nn.Module):
         return loss, parts, {"storm_satnet": satnet} if satnet is not None else {}
 
 
+CLASS_EDGES_KT = (63.5, 95.5)
+
+
+def class_weights(items, power: float = 0.5, cap: float = 4.0) -> torch.Tensor:
+    """
+    Intensity-loss weights for the three classes (below hurricane, category 1-2, major hurricane).
+
+    Inverse class frequency to ``power`` (0.5: the square root, halfway between plain and fully balanced),
+    capped at ``cap`` times the smallest, then scaled so a training fix weighs one on average: the loss
+    keeps its size, but the rare strong storms the heads otherwise regress toward the middle count more.
+    """
+    counts = np.zeros(3)
+    for _, targets in items:
+        for target in targets[:MAX_STORMS]:
+            wind = float(target.track.max_wind_kt[target.point])
+            if np.isfinite(wind):
+                counts[int(np.searchsorted(CLASS_EDGES_KT, wind))] += 1
+    share = np.maximum(counts, 1.0) / max(counts.sum(), 1.0)
+    weights = share ** -power
+    weights = np.minimum(weights, cap * weights.min())
+    weights = weights / max(float((weights * counts).sum() / max(counts.sum(), 1.0)), 1e-9)
+    return torch.tensor(weights, dtype=torch.float32)
+
+
 def _collate(samples: list[dict]) -> dict:
     return {key: torch.stack([s[key] for s in samples]) for key in samples[0]}
 
 
 def train_storms(model, settings: EngineSettings, era5: str | Path, stepper, grid, variables, train_items, val_items,
                  satnet: dict | None = None, table: dict | None = None, frames=None, tail: int = 4,
-                 retrieval_share: float = 0.3, tail_lr_scale: float = 0.1) -> dict:
+                 retrieval_share: float = 0.3, tail_lr_scale: float = 0.1, rebalance: bool = True) -> dict:
     """Stage B. Returns the last held-out losses; see :func:`finalise_storms` for the fitting afterwards."""
     for parameter in model.parameters():
         parameter.requires_grad = False
-    step = StormStep(model, stepper, grid, variables, tail=tail)
+    weights = class_weights(train_items) if rebalance else None
+    step = StormStep(model, stepper, grid, variables, tail=tail, class_weights=weights)
     heads = list(model.storm_head_parameters())
     tail_params = list(step.tail_parameters()) + list(model.norm.parameters())
     for parameter in heads + tail_params:
@@ -316,6 +351,9 @@ def train_storms(model, settings: EngineSettings, era5: str | Path, stepper, gri
               f"tail of {tail} blocks + heads: {sum(p.numel() for p in heads + tail_params) / 1e6:.1f}M trainable; "
               f"retrieval in the loop for {100 * (retrieval_share if model.retrieval is not None else 0):.0f}% of samples",
               flush=True)
+        if weights is not None:
+            print("[storms-b] intensity weights by class (TS / cat 1-2 / major): "
+                  + " / ".join(f"{float(w):.2f}" for w in weights), flush=True)
 
     def held_out(max_batches=None) -> dict:
         step.eval()
@@ -349,10 +387,11 @@ def train_storms(model, settings: EngineSettings, era5: str | Path, stepper, gri
                                           "eyewall_rmw", "wind_radii", "ri2", "backbone_tail")}
             model.mark_trained(marks, {"storm_center": True, "storm_state": True, "storm_environment": True,
                                        "pooled_far": True, "track_prior": True if model.uses_track_prior() else None,
-                                       "storm_satnet": extra.get("storm_satnet")})
+                                       "storm_satnet": extra.get("storm_satnet"), "storm_physics": True})
             stop, save, evaluate = engine.poll()
             if evaluate:
-                report = held_out(max_batches=100)
+                with engine.averaged():
+                    report = held_out(max_batches=100)
                 engine.last_eval = time.time()
                 engine.history.append({"step": engine.step, **report})
                 if report.get("loss", math.inf) < engine.best:
@@ -365,9 +404,13 @@ def train_storms(model, settings: EngineSettings, era5: str | Path, stepper, gri
             if stop:
                 break
         engine.epoch += 1
-    report = held_out()
+    with engine.averaged():
+        report = held_out()
     engine.history.append({"step": engine.step, "final": True, **report})
     engine.finish(report)
+    from .sattrain import _keep_average
+
+    _keep_average(engine)
     return report
 
 
@@ -376,13 +419,20 @@ def train_storms(model, settings: EngineSettings, era5: str | Path, stepper, gri
 @torch.no_grad()
 def memmap_feature_bank(model, era5: str | Path, items, stepper, grid, variables, satnet: dict | None = None,
                         table: dict | None = None, rollout: bool = True, precision: str = "bf16",
-                        part: Path | None = None) -> dict:
+                        part: Path | None = None, analog=None, ensemble_members: int = 1, rotations: int = 1) -> dict:
     """
     The storm feature bank (:func:`naturev1.storm_feature_bank`'s format) straight from a staged memmap,
-    one backbone pass per initial time for all its storms -- plus, with ``rollout``, both rollout track
-    members from one full-state rollout per time. Distributed: each rank does every ``world``-th time and
-    rank 0 assembles; pass ``part`` (a path prefix) for the per-rank pieces.
+    one backbone pass per initial time for all its storms -- plus the storm physics
+    (:func:`naturev1.thermo.storm_physics`), the analog member when an :class:`naturev1.tracker.AnalogForecaster`
+    is given, and, with ``rollout``, every rollout member from one full-state rollout per time (an ensemble of
+    ``ensemble_members`` when more than one). With ``rotations`` above one it also keeps the storm pools of
+    that many members of the test-time rotation ensemble (:meth:`naturev1.model.NatureV1.rotated_pools`) as
+    ``features_tta`` / ``features_far_tta``, so :func:`select_rotations` can decide on held-out seasons
+    whether the ensemble earns its cost. Distributed: each rank does every ``world``-th time and rank 0
+    assembles; pass ``part`` (a path prefix) for the per-rank pieces.
     """
+    from .model import rotation_angles
+    from .thermo import storm_physics
     from .state import _autocast
     from .steering import steering_track, storm_environment
     from .storms import BANK_VERSION, _backbone_fingerprint, _stack_targets
@@ -408,12 +458,36 @@ def memmap_feature_bank(model, era5: str | Path, items, stepper, grid, variables
         rows = current.expand(count, -1, -1)
         piece = {"index": item, "features": model.storm_pool(rows, centres).float().cpu(),
                  "features_far": model.storm_pool(rows, centres, 2.0 * model.config.storm_pool_radius_km).float().cpu()}
+        if rotations > 1:
+            near, wide = [], []
+            for degrees in rotation_angles(rotations):
+                with _autocast(device, precision):
+                    a, b = model.rotated_pools({"analysis": (sample["analysis"], grid)}, sample["calendar"],
+                                               centres, degrees)
+                near.append(a.float().cpu())
+                wide.append(b.float().cpu())
+            piece["features_tta"], piece["features_far_tta"] = torch.stack(near, 1), torch.stack(wide, 1)
         now = sample["analysis"][:, -1].float().expand(count, -1, -1)
         piece["storm_environment"] = storm_environment(now, variables, stepper.normalizer, grid, centres).cpu()
         piece["track_prior"] = steering_track(now, variables, stepper.normalizer, grid, centres, leads).cpu()
+        state_vec = sample["storm/storm_state"][0, :count]
+        piece["storm_physics"] = storm_physics(now, variables, stepper.normalizer, grid, centres, state_vec).cpu()
+        wind_kt = sample["storm/current_wind_kt"][0, :count].float()
+        radii = sample["storm/wind_radii_target"][0, :count, 0, 0, :].float() if "storm/wind_radii_target" in sample else None
+        size_km = None
+        if radii is not None:
+            # The gale radius at the first lead stands in for now's (the label table's own is not in the bank).
+            size_km = torch.nan_to_num(radii.nanmean(-1), nan=200.0) * 1.852
+        if analog is not None:
+            day = (sample["valid_time"].double() % 31557600.0) / 31557600.0
+            predicted = analog.predict(centres.cpu(), state_vec.cpu(), torch.nan_to_num(wind_kt.cpu(), nan=50.0),
+                                       day.cpu().expand(count))
+            piece["analog_track"] = predicted["displacement"]
+            piece["analog_change_kt"] = predicted["change_kt"]
         if rollout and model.state_head is not None:
             members = rollout_member_tracks(model, {k: sample[k] for k in ("analysis", "calendar", "valid_time")},
-                                            stepper, centres, leads, variables, precision)
+                                            stepper, centres, leads, variables, precision, members=ensemble_members,
+                                            wind_kt=torch.nan_to_num(wind_kt, nan=50.0), size_km=size_km)
             piece.update({k: v.cpu() for k, v in members.items()})
         if satnet is not None:
             piece["satnet"] = {key: sample[f"satnet/{key}"][0, :count].cpu() for key in SATNET_KEYS}
@@ -443,12 +517,17 @@ def memmap_feature_bank(model, era5: str | Path, items, stepper, grid, variables
     stacked["basin"] = torch.tensor([BASINS.index(t.track.basin) if t.track.basin in BASINS else -1 for t in targets])
     stacked["storm_environment"] = torch.cat([p["storm_environment"] for p in pieces])
     stacked["track_prior"] = torch.cat([p["track_prior"] for p in pieces])
-    if rollout and all("rollout_steering" in p for p in pieces):
-        stacked["rollout_steering"] = torch.cat([p["rollout_steering"] for p in pieces])
-        stacked["rollout_vortex"] = torch.cat([p["rollout_vortex"] for p in pieces])
+    stacked["storm_physics"] = torch.cat([p["storm_physics"] for p in pieces])
+    for key in ("analog_track", "analog_change_kt", "rollout_steering", "rollout_vortex", "rollout_ensemble",
+                "rollout_ensemble_spread_km", "rollout_pressure_hpa", "rollout_wind_kt", "rollout_phase"):
+        if pieces and all(key in p for p in pieces):
+            stacked[key] = torch.cat([p[key] for p in pieces])
     bank = {"features": torch.cat([p["features"] for p in pieces]),
             "features_far": torch.cat([p["features_far"] for p in pieces]),
             "targets": stacked, "fingerprint": _backbone_fingerprint(model), "version": BANK_VERSION}
+    if rotations > 1 and pieces and all("features_tta" in p for p in pieces):
+        bank["features_tta"] = torch.cat([p["features_tta"] for p in pieces])
+        bank["features_far_tta"] = torch.cat([p["features_far_tta"] for p in pieces])
     if satnet is not None:
         present = torch.cat([p["satnet_present"] for p in pieces])
         bank["satnet"] = {key: torch.cat([p["satnet"][key] for p in pieces]) for key in SATNET_KEYS}
@@ -513,6 +592,63 @@ def satnet_outputs_for_table(model, table: dict, patches, rows=None, batch_size:
     return out
 
 
+def _head_skill(model, bank: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-lead error of the heads alone: the track mixture's mean (km) and the wind (kt), NaN where unverified."""
+    from .storms import KT_TO_MS, _great_circle_km, _head_outputs
+
+    out, t = _head_outputs(model, bank), bank["targets"]
+    size = out["displacement"].shape[0]
+    probabilities = out["mode_logits"].softmax(-1)
+    mean = (out["displacement"] * probabilities.view(size, -1, 1, 1)).sum(1)
+    centre, truth, valid = t["storm_center"].float(), t["track_target"].float(), t["track_valid"] > 0
+    leads = mean.shape[1]
+    track, wind = torch.full((leads,), float("nan")), torch.full((leads,), float("nan"))
+    for lead in range(leads):
+        ok = valid[:, lead]
+        if ok.any():
+            lat0, lon0 = centre[ok, 0], centre[ok, 1]
+            track[lead] = _great_circle_km(lat0 + truth[ok, lead, 0], lon0 + truth[ok, lead, 1],
+                                           lat0 + mean[ok, lead, 0], lon0 + mean[ok, lead, 1]).mean()
+        seen = t["intensity_mask"][:, lead, 0] > 0
+        if seen.any():
+            wind[lead] = ((out["intensity_mean"][seen, lead, 0] - t["intensity_target"][seen, lead, 0]).abs()
+                          / KT_TO_MS).mean()
+    return track, wind
+
+
+def select_rotations(model, val_bank: dict, margin: float = 0.002) -> str:
+    """
+    Decide on the held-out seasons how many members of the test-time rotation ensemble the storm outputs use.
+
+    Every size the bank supports is scored against a single pass, on the heads' own track error and wind
+    error at every lead; the score is the mean relative change over both. The smallest size within
+    ``margin`` of the best wins, and a single pass unless an ensemble beats it by more than ``margin`` --
+    a rotation ensemble costs a backbone pass per member at forecast time, so it has to pay for itself.
+    """
+    if "features_tta" not in val_bank:
+        model.config.storm_rotations = 1
+        return "rotation ensemble: not in the bank, single pass"
+    available = int(val_bank["features_tta"].shape[1]) + 1
+    scores, lines = {}, []
+    model.config.storm_rotations = 1
+    base_track, base_wind = _head_skill(model, val_bank)
+    for size in range(1, available + 1):
+        model.config.storm_rotations = size
+        track, wind = (base_track, base_wind) if size == 1 else _head_skill(model, val_bank)
+        change = torch.cat([track / base_track, wind / base_wind]) - 1.0
+        scores[size] = float(change[torch.isfinite(change)].mean()) if torch.isfinite(change).any() else 0.0
+        lines.append(f"  {size} member{'s' if size > 1 else ' '}: track {' '.join(f'{v:5.0f}' for v in track.tolist())} km, "
+                     f"wind {' '.join(f'{v:4.1f}' for v in wind.tolist())} kt ({100 * scores[size]:+.2f}%)")
+    best = min(scores.values())
+    chosen = min(size for size, score in scores.items() if score <= best + margin)
+    if scores[chosen] > -margin:
+        chosen = 1
+    model.config.storm_rotations = chosen
+    return ("rotation ensemble on held-out seasons (heads alone, per lead):\n" + "\n".join(lines)
+            + f"\n  -> {chosen} member{'s' if chosen > 1 else ''}"
+            + (" (a single pass: no ensemble beat it)" if chosen == 1 else ""))
+
+
 def finalise_storms(model, val_bank: dict, test_bank: dict, train_bank: dict | None = None) -> str:
     """
     Everything fitted after the heads, on the held-out seasons, then scored on the test seasons:
@@ -524,24 +660,45 @@ def finalise_storms(model, val_bank: dict, test_bank: dict, train_bank: dict | N
         fit_probability_calibration, fit_track_consensus, intensity_by_category, ri2_report, storm_scorecard,
     )
 
+    from .statistical import (
+        fit_climatology, fit_consensus_error, fit_intensity_consensus, fit_logistic, fit_regression, fit_rollout_map,
+        fit_track_bias,
+    )
+    from .storms import consensus_scorecard
+
     leads = model.config.lead_times_hours
-    weights = fit_track_consensus(*_consensus_inputs(model, val_bank, leads))
+    # First, because every fit after it reads the head outputs the choice produces.
+    sections = [select_rotations(model, val_bank)]
+    members, truth, valid, latitude = _consensus_inputs(model, val_bank, leads)
+    weights = fit_track_consensus(members, truth, valid, latitude)
     model.track_consensus.copy_(weights.to(model.track_consensus.device))
-    sections = ["consensus weights (fitted on held-out seasons): " + describe_consensus(model.track_consensus, leads)]
+    sections.append("consensus weights (fitted on held-out seasons): " + describe_consensus(model.track_consensus, leads))
+    sections.append(fit_track_bias(model, members, truth, valid, latitude))
+    sections.append(fit_consensus_error(model, members, truth, valid, latitude))
     sections.append("probability calibration: " + fit_probability_calibration(model, val_bank))
     sections.append("intensity bias correction (fitted on held-out seasons):\n" + fit_intensity_correction(model, val_bank))
-    threshold = fit_feature_monitor(model, train_bank if train_bank is not None else val_bank)
+    # The statistical-dynamical intensity models learn from training storms; their consensus weights from
+    # held-out ones -- the same separation the heads and the track consensus keep.
+    fitting = train_bank if train_bank is not None else val_bank
+    for fit in (fit_regression, fit_logistic, fit_climatology, fit_rollout_map):
+        sections.append(fit(model, fitting))
+    sections.append(fit_intensity_consensus(model, val_bank))
+    from .statistical import fit_ri_consensus
+
+    sections.append(fit_ri_consensus(model, val_bank))
+    threshold = fit_feature_monitor(model, fitting)
     sections.append(f"input monitor threshold {threshold:.3f}")
     sections.append("TEST SEASONS -- never fitted on:")
     sections.append(storm_scorecard(model, test_bank, leads))
+    sections.append(consensus_scorecard(model, test_bank))
     sections.append(intensity_by_category(model, test_bank))
     sections.append(calibration_report(model, test_bank))
     sections.append(ri2_report(model, test_bank))
     return "\n\n".join(sections)
 
 
-__all__ = ["MAX_STORMS", "StormStep", "StormTimeDataset", "finalise_storms", "memmap_feature_bank",
-           "satnet_outputs_for_table", "storm_times", "train_storms"]
+__all__ = ["MAX_STORMS", "StormStep", "StormTimeDataset", "class_weights", "finalise_storms", "memmap_feature_bank",
+           "satnet_outputs_for_table", "select_rotations", "storm_times", "train_storms"]
 
 
 @torch.no_grad()
@@ -654,6 +811,11 @@ def main(argv=None) -> None:
     parser.add_argument("--hub-repo", default=None)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--no-rollout-members", action="store_true")
+    parser.add_argument("--ensemble-members", type=int, default=4,
+                        help="rollout ensemble size for the ensemble-mean track member and its spread")
+    parser.add_argument("--rotations", type=int, default=4,
+                        help="test-time rotation ensemble size kept in the banks (1: none); used only if it "
+                             "beats a single pass on the held-out seasons")
     parser.add_argument("--monitor-share", type=float, default=0.2,
                         help="share of training times whose features fit the input monitor")
     args = parser.parse_args(argv)
@@ -706,14 +868,22 @@ def main(argv=None) -> None:
                  table=table, frames=frames, tail=args.tail, retrieval_share=args.retrieval_share)
 
     rollout = not args.no_rollout_members
+    # Historical analogs from the training seasons only: a held-out storm never finds itself.
+    from .tracker import AnalogForecaster
+
+    analog_tracks = [t for t in tracks if t.year not in VALIDATION_SEASONS + TEST_SEASONS]
+    analog = AnalogForecaster.from_tracks(analog_tracks, model.config.lead_times_hours)
+    if is_main():
+        print(f"[storms-b] analog database: {analog.features.shape[0]:,} fixes from {len(analog_tracks):,} storms",
+              flush=True)
     rng = np.random.default_rng(0)
     monitor_items = [train_items[i] for i in sorted(rng.choice(len(train_items), max(1, int(args.monitor_share * len(train_items))),
                                                                 replace=False))]
     banks = {}
-    for name, chosen, with_rollout in (("val", val_items, rollout), ("test", test_items, rollout),
-                                       ("monitor", monitor_items, False)):
+    for name, chosen in (("val", val_items), ("test", test_items), ("monitor", monitor_items)):
         banks[name] = memmap_feature_bank(model, args.era5, chosen, stepper, grid, variables, satnet=satnet, table=table,
-                                          rollout=with_rollout, part=output / f"bank_{name}")
+                                          rollout=rollout, part=output / f"bank_{name}", analog=analog,
+                                          ensemble_members=args.ensemble_members, rotations=args.rotations)
     # The model it started from, on the same test storms, for the comparison the release decision uses.
     from .sattrain import build_model
 

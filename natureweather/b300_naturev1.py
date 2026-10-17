@@ -36,6 +36,7 @@ SAT_RESOLUTION = 0.25          # degrees of the staged global frames (0.1 writes
 STAGE_A_HOURS  = 3.0           # both satellite networks, side by side, four GPUs each
 STAGE_B_HOURS  = 2.0           # storm heads + backbone tail on all eight GPUs (banks and scoring come after)
 TAIL_BLOCKS    = 4             # backbone blocks fine-tuned in stage B (of 17)
+ROTATIONS      = 4             # test-time rotation ensemble kept in the banks (1: off); used only if it helps
 STAGING_WORKERS = None         # None: all CPUs but 16
 KEEP_RAW       = False         # keep the raw GridSat files (4-6 TB) after staging
 BRANCH         = "claude/linear-context-architecture-a35c6h"
@@ -65,7 +66,7 @@ READY = hardware_preflight(DATA, HF_REPO, need_tb=1.6 if SAT_RESOLUTION >= 0.25 
 assert READY, "fix the lines marked !! above before spending GPU hours"
 
 # %% [2] the starting model and its statistics, from the Hub ───────────────────────────────────────────
-import json, shutil
+import shutil
 import torch
 from huggingface_hub import hf_hub_download
 
@@ -136,7 +137,8 @@ start_job("stage-b", ["-m", "naturev1.stormtrain", "--base", str(BASE),
                       "--retrieval", str(CKPT / "stage-a-retrieval" / "latest.pt"),
                       "--era5", str(ERA5), "--tendency", str(TENDENCY), "--ibtracs", str(IBTRACS),
                       "--table", str(LABELS), "--root", str(SAT), "--output", str(CKPT),
-                      "--hours", str(STAGE_B_HOURS), "--tail", str(TAIL_BLOCKS), "--hub-repo", HF_REPO], LOGS,
+                      "--hours", str(STAGE_B_HOURS), "--tail", str(TAIL_BLOCKS), "--rotations", str(ROTATIONS),
+                      "--hub-repo", HF_REPO], LOGS,
           gpus=list(range(8)))
 follow(LOGS, ["stage-b"])
 print((CKPT / "stage-b" / "report.txt").read_text() if (CKPT / "stage-b" / "report.txt").exists() else "no report yet")

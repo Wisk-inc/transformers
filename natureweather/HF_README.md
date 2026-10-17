@@ -468,6 +468,24 @@ adds conservative regridding, seam-free spherical convolution and grid-to-mesh p
 8 GPUs with a learning-rate schedule driven by the clock (it ends exactly when the budget does) and **every
 checkpoint pushed to this repository** under `checkpoints/<run>/` as it is written.
 
+### 4.11 0.12: physics, wind and a wider consensus (code ready, not yet trained)
+
+No single change here is promised to help. The approach is to give the forecast many independent ways to be
+right and let the **held-out seasons decide** how much each one counts: every member below enters a consensus
+whose weights are fitted on 2017/2019/2021 and can go to zero, and nothing is scored until the test seasons.
+
+| Area | Added in 0.12 |
+|---|---|
+| Thermodynamics (`naturev1.thermo`) | Bister–Emanuel **potential intensity** from the model's own sounding (reversible CAPE, iterated eyewall pressure, Ck/Cd 0.9); Tang–Emanuel **ventilation index** and entropy deficit; Emanuel–Nolan **genesis potential**; Hart **cyclone phase space** (B, −VTL, −VTU) for tropical / hybrid / extratropical; 200 hPa divergence, 850 hPa vorticity, mid/low humidity, boundary-layer θe, core rain, land share — 23 storm predictors fed to every head and to RI 2.0 |
+| Steering | the steering layer depends on intensity (Velden & Leslie: 850–500 hPa for weak storms up to 850–200 for majors) and beta drift scales with storm size |
+| Tracking (`naturev1.tracker`) | **multi-field centre fix** (sea-level pressure, 850/700 hPa vorticity and geopotential, weighted by agreement); intensity and phase read *along the rollout*; a **rollout ensemble** member with its spread; an **analog** member (nearest storms in 45 years of best tracks, in the poleward frame); the satellite centre fix **iterates** — each pass reads a loop cut at the better centre |
+| Wind (`naturev1.windfield`) | an **asymmetric Holland wind field** (B from Vickery–Wadhera or fitted to the 34 kt radius per quadrant, Willoughby RMW climatology, Phadke inflow angle, Lin–Chavas motion asymmetry, land roughness, gusts); **NHC-style wind-speed probabilities** (34/50/64 kt) and gale **arrival times** by Monte Carlo over the forecast, at points or on a 0.25° map; Kaplan–DeMaria **inland decay**; R-CLIPER **rain** totals |
+| Intensity consensus (`naturev1.statistical`) | a SHIPS-style **regression**, an LGEM-style **logistic growth** model bounded by potential intensity, **climatology–persistence**, the rollout's own intensity, SatNet and the analogs — combined with the network's heads by weights *and* biases fitted per lead on held-out seasons |
+| Track consensus | 8 members (two head summaries, steering, extrapolation, rollout-steered, rollout vortex, rollout ensemble, analogs), a per-lead **bias correction** in the poleward frame, and a Goerss-style **predicted consensus error** cone that widens when the members disagree |
+| RI | a stacked RI consensus over RI 2.0, the satellite network, the statistical models and the rollout |
+| Training | intensity loss **rebalanced by class** (square-root inverse frequency, capped: a major hurricane counts ~4× a tropical storm, the loss keeps its size); an **average of the weights** (EMA 0.999) is what is evaluated and released |
+| Forecast time | a **test-time rotation ensemble**: the whole planet turned by the golden angle and run again — the storm, its latitude and its surroundings unchanged, the arithmetic different — merged as a mixture (disagreement widens the uncertainty). Used only if it beats a single pass on the held-out seasons |
+
 ## 5. Limitations
 
 - **Resolution.** 1.5° (~165 km) cannot resolve an eyewall, so intensity is the weakest output. The explicit

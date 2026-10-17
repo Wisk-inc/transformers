@@ -122,6 +122,19 @@ missed, southern-hemisphere tracks worse than physics, poleward turns missed, a 
 - `b300_naturev1.py` — the runbook: preflight, staging, stage A (3 h, both satellite networks side by side),
   stage B, and a publish step that only replaces the release if the new model beat it.
 
+Then more ways to be right, each weighted by the held-out seasons (weights may be zero):
+
+- `naturev1.thermo` — potential intensity (Bister-Emanuel), ventilation, entropy deficit, genesis potential,
+  cyclone phase space and SHIPS-like predictors from the model's own atmosphere, fed to every storm head.
+- `naturev1.windfield` — asymmetric Holland wind field, NHC-style 34/50/64 kt probabilities and arrival times
+  (points or a 0.25 degree map), inland decay, gusts, R-CLIPER rain.
+- `naturev1.statistical` — SHIPS-style regression, LGEM-style logistic growth, climatology-persistence, an
+  intensity consensus with per-lead weights and biases, track bias correction, a predicted-error cone, an RI consensus.
+- `naturev1.tracker` — multi-field centre fix, intensity and phase along the rollout, rollout-ensemble and
+  analog track members; the satellite centre fix iterates to convergence.
+- Training and forecast time: intensity loss rebalanced by class, an average of the weights (EMA), and a
+  test-time rotation ensemble used only if it beats a single pass on held-out seasons.
+
 Tested end to end on CPU, including two-process data parallelism; not yet run on B300 hardware.
 
 ## Not trained

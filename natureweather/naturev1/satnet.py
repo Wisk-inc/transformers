@@ -376,6 +376,37 @@ def satnet_loss(out: dict, batch: dict, weights: dict | None = None) -> tuple[to
     return loss, {k: float(v.detach()) for k, v in parts.items()} | {"total": float(loss.detach())}
 
 
+@torch.no_grad()
+def refine_centre(network: SatNetStorm, fetch, first_guess: tuple[float, float], passes: int = 3,
+                  context: torch.Tensor | None = None, tolerance_km: float = 5.0) -> dict:
+    """
+    Find the storm from a rough first guess: read the loop around the guess, move to where the network says
+    the centre is, read again -- until it stops moving (``tolerance_km``) or ``passes`` run out. Each pass
+    looks at a loop cut around a better centre, so the estimate converges instead of extrapolating.
+
+    Args:
+        fetch: ``(lat, lon) -> (codes (1, F, 2, P, P) uint8, available (1, F))`` -- staged patches, GridSat or
+            live GOES, cut around that centre.
+
+    Returns:
+        ``{"centre": (lat, lon), "uncertainty_km": float, "passes": int, "outputs": the last pass's estimates}``.
+    """
+    lat, lon = float(first_guess[0]), float(first_guess[1])
+    out, used = None, 0
+    for used in range(1, passes + 1):
+        codes, available = fetch(lat, lon)
+        device = next(network.parameters()).device
+        out = network(codes.to(device), available.to(device), torch.tensor([lat], device=device),
+                      None if context is None else context.to(device))
+        north, east = (float(v) for v in out["centre_offset_km"][0])
+        lat = max(min(lat + north / KM_PER_DEGREE, 89.0), -89.0)
+        lon = (lon + east / (KM_PER_DEGREE * max(math.cos(math.radians(lat)), 0.05)) + 180.0) % 360.0 - 180.0
+        if math.hypot(north, east) < tolerance_km:
+            break
+    spread = float(torch.exp(0.5 * out["centre_log_var"][0]).norm())
+    return {"centre": (lat, lon), "uncertainty_km": spread, "passes": used, "outputs": out}
+
+
 # ------------------------------------------------------------------------------------- cloud motion --
 
 def cloud_motion(previous: torch.Tensor, current: torch.Tensor, hours: float, resolution_deg: float,
@@ -661,6 +692,6 @@ def apply_retrieval(stepper, background: torch.Tensor, out: dict, stale_hours: t
     return state
 
 
-__all__ = ["RI_WINDOWS", "init_ordinal", "ordinal_logits", "SatNetConfig", "SatNetStorm", "SatelliteRetrieval", "apply_retrieval", "cloud_motion",
+__all__ = ["RI_WINDOWS", "init_ordinal", "ordinal_logits", "refine_centre", "SatNetConfig", "SatNetStorm", "SatelliteRetrieval", "apply_retrieval", "cloud_motion",
            "increment_scale", "observation_weights", "retrieval_loss", "retrieval_targets", "ri_threshold_list",
            "satnet_loss", "satnet_targets_ri", "GLOBAL_CHANNELS"]

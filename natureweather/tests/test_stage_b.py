@@ -84,7 +84,7 @@ def test_items_group_every_storm_at_a_time(setup):
     assert items and all(len(group) == 2 for _, group in items), "both storms share every initial time"
 
 
-def test_tail_and_heads_learn_and_the_frozen_blocks_do_not_move(setup):
+def test_tail_and_heads_learn_and_the_frozen_blocks_do_not_move(setup, capsys):
     path, grid, model, stepper, items, directory = setup
     frozen = {k: v.clone() for k, v in model.blocks[0].state_dict().items()}
     tail = {k: v.clone() for k, v in model.blocks[-1].state_dict().items()}
@@ -103,18 +103,29 @@ def test_tail_and_heads_learn_and_the_frozen_blocks_do_not_move(setup):
     trained = model.trained_heads()
     assert trained["backbone_tail"] == 3 and trained["ri2"] == 3 and trained["track"] > 0
     assert model.config.hemisphere_frame
+    assert "intensity weights by class" in capsys.readouterr().out
 
 
 def test_banks_carry_both_rollout_members_and_finalise_reports(setup):
     path, grid, model, stepper, items, _ = setup
-    bank = memmap_feature_bank(model, path, items, stepper, grid, VARIABLES, rollout=True, precision="fp32")
+    bank = memmap_feature_bank(model, path, items, stepper, grid, VARIABLES, rollout=True, precision="fp32",
+                               rotations=3)
     count = sum(len(g) for _, g in items)
     assert bank["features"].shape == (count, 32)
+    assert bank["features_tta"].shape == (count, 2, 32) and bank["features_far_tta"].shape == (count, 2, 32)
+    assert not torch.allclose(bank["features_tta"][:, 0], bank["features"]), "a rotated member is a different pass"
     assert bank["targets"]["rollout_steering"].shape == (count, len(LEADS), 2)
     assert bank["targets"]["rollout_vortex"].shape == (count, len(LEADS), 2)
     report = finalise_storms(model, bank, bank)
     assert "TEST SEASONS" in report and "roll-steer" in report
-    assert model.track_consensus.shape[-1] == 6 and torch.isfinite(model.track_consensus).all()
+    assert "rotation ensemble on held-out seasons" in report and model.config.storm_rotations in (1, 2, 3)
+    from naturev1.model import TRACK_MEMBERS
+    from naturev1.thermo import STORM_PHYSICS_FEATURES
+
+    assert model.track_consensus.shape[-1] == len(TRACK_MEMBERS) and torch.isfinite(model.track_consensus).all()
+    assert bank["targets"]["storm_physics"].shape == (count, len(STORM_PHYSICS_FEATURES))
+    assert "INTENSITY (MAE kt)" in report and "predicted consensus error" in report
+    assert int(model.statistics.fitted[:4].min()) == 1, "regression, logistic, climatology and consensus fitted"
     assert (bank["targets"]["basin"] == -1).all(), "synthetic tracks carry no basin"
 
     from naturev1.stormtrain import compare_models, describe_comparison

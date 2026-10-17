@@ -54,6 +54,9 @@ class EngineSettings:
         hub_repo: the Hub repository every checkpoint is pushed to; None keeps them local.
         workers: DataLoader workers per GPU.
         max_steps: an optional hard cap, for smoke tests.
+        ema_decay: exponential moving average of the trained weights (0 turns it off). Evaluation and the final
+            checkpoint use the average: it smooths the noise of the last steps out of the weights, which is
+            worth something on held-out data at no cost in training.
     """
 
     run: str
@@ -76,6 +79,7 @@ class EngineSettings:
     seed: int = 0
     max_steps: int | None = None
     find_unused_parameters: bool = False
+    ema_decay: float = 0.999
     extra: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -272,6 +276,8 @@ class Engine:
                                            betas=(0.9, 0.95), **fused)
         for group in self.optimizer.param_groups:
             group.setdefault("base_lr", group["lr"])
+        self.ema_params = ([p.detach().clone() for g in self.optimizer.param_groups for p in g["params"]]
+                           if settings.ema_decay > 0 else [])
         model = trained
         if self.world > 1:
             from torch.nn.parallel import DistributedDataParallel
@@ -348,6 +354,13 @@ class Engine:
             torch.nn.utils.clip_grad_norm_([p for g in self.optimizer.param_groups for p in g["params"]],
                                            self.settings.grad_clip)
         self.optimizer.step()
+        if self.ema_params:
+            # Warm-started: the average follows the weights closely at first, then settles to its decay.
+            decay = min(self.settings.ema_decay, (1.0 + self.step) / (10.0 + self.step))
+            with torch.no_grad():
+                live = [p for g in self.optimizer.param_groups for p in g["params"]]
+                torch._foreach_mul_(self.ema_params, decay)
+                torch._foreach_add_(self.ema_params, [p.detach() for p in live], alpha=1.0 - decay)
         self.step += 1
         for key, value in (parts or {"loss": float(loss.detach())}).items():
             self._running[key] = self._running.get(key, 0.0) + float(value)
@@ -364,6 +377,29 @@ class Engine:
             text = "  ".join(f"{k} {v:.4f}" for k, v in sorted(means.items()))
             print(f"[{self.settings.run}] step {self.step:,}  {text}  lr x{factor:.3f}  "
                   f"{left:.0f} min left", flush=True)
+
+    def averaged(self):
+        """Context: the trained parameters replaced by their moving average, and put back on exit."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def swap():
+            if not self.ema_params:
+                yield
+                return
+            live = [p for g in self.optimizer.param_groups for p in g["params"]]
+            saved = [p.detach().clone() for p in live]
+            with torch.no_grad():
+                for p, e in zip(live, self.ema_params):
+                    p.copy_(e)
+            try:
+                yield
+            finally:
+                with torch.no_grad():
+                    for p, s in zip(live, saved):
+                        p.copy_(s)
+
+        return swap()
 
     # ---------------------------------------------------------------------------- checkpoints --
 
@@ -384,7 +420,8 @@ class Engine:
                        "scaler": None, "state": state.to_dict(), "config": self.config, "rng": _rng_state(),
                        "saved_at": time.time(), "format": 2, "tag": self.settings.run,
                        "engine": {"settings": self.settings.to_dict(), "world_size": self.world,
-                                  "metrics": metrics or {}}}
+                                  "metrics": metrics or {}},
+                       "ema": [e.detach().cpu() for e in self.ema_params]}
             path = self.directory / "latest.pt"
             atomic_torch_save(payload, path)
             atomic_write_text(self.directory / "state.json", json.dumps(state.to_dict(), indent=2, default=str))
@@ -424,6 +461,10 @@ class Engine:
         except (ValueError, KeyError, RuntimeError):
             if is_main():
                 print(f"[{self.settings.run}] optimizer state did not match; moments restart", flush=True)
+        stored = payload.get("ema") or []
+        if self.ema_params and len(stored) == len(self.ema_params):
+            for e, v in zip(self.ema_params, stored):
+                e.copy_(v.to(e.device, e.dtype))
         state = payload.get("state", {})
         self.step = int(state.get("step", 0))
         self.epoch = int(state.get("epoch", 0))
@@ -437,8 +478,9 @@ class Engine:
         return True
 
     def finish(self, metrics: dict | None = None, upload_timeout: float = 1800.0) -> None:
-        """Final checkpoint, then wait for every upload to land."""
-        self.checkpoint(metrics, final=True)
+        """Final checkpoint -- with the averaged weights -- then wait for every upload to land."""
+        with self.averaged():
+            self.checkpoint(metrics, final=True)
         if is_main() and self.settings.hub_repo:
             print(f"[{self.settings.run}] waiting for uploads to finish ...", flush=True)
             drained = self.pusher.wait(upload_timeout)

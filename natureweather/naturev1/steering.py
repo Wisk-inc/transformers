@@ -316,5 +316,104 @@ def displacement_km(displacement: torch.Tensor, latitude: torch.Tensor) -> torch
     return displacement * scale * (METRES_PER_DEGREE / 1000.0)
 
 
-__all__ = ["BETA_DRIFT_MS", "advect", "describe_environment", "displacement_km", "extrapolation_track",
-           "grid_latlon", "great_circle_km", "steering_track", "storm_environment"]
+
+
+# --------------------------------------------------------------------------------------------------
+# 0.12: steering that depends on the storm, and beta drift that depends on its size
+# --------------------------------------------------------------------------------------------------
+
+#: Top of the steering layer by intensity (Velden and Leslie 1991): a shallow depression is carried by the
+#: lower troposphere, a major hurricane by the whole depth of it. (wind threshold kt, top hPa)
+STEERING_TOPS = ((50.0, 500), (90.0, 300), (1e9, 200))
+
+
+def steering_top_hpa(wind_kt: torch.Tensor) -> torch.Tensor:
+    """``(B,)`` the top of the steering layer for each storm's current wind."""
+    top = torch.full_like(wind_kt, 200.0)
+    for threshold, level in reversed(STEERING_TOPS):
+        top = torch.where(wind_kt < threshold, torch.full_like(top, float(level)), top)
+    return top
+
+
+def beta_drift_ms(latitude: torch.Tensor, size_km: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Beta drift ``(u, v)`` m/s: north-westward in the north, south-westward in the south.
+
+    Its speed grows with the storm's outer circulation -- the beta gyres a large storm spins up are stronger
+    (Fiorino and Elsberry 1989) -- from 1 m/s for a 150 km gale radius to 2.5 m/s at 450 km and beyond, and
+    scales with the square root of the planetary-vorticity gradient, which weakens toward the poles.
+    """
+    lat = latitude.to(torch.float64)
+    size = torch.full_like(lat, 200.0) if size_km is None else size_km.to(lat.device, torch.float64)
+    speed = 1.0 + 1.5 * ((size - 150.0) / 300.0).clamp(0.0, 1.0)
+    speed = speed * (torch.cos(torch.deg2rad(lat)) / math.cos(math.radians(15.0))).clamp_min(0.2).sqrt()
+    heading = torch.deg2rad(torch.where(lat >= 0, torch.full_like(lat, 320.0), torch.full_like(lat, 220.0)))
+    return speed * torch.sin(heading), speed * torch.cos(heading)
+
+
+def _layered_wind(reader: _Reader, weights: torch.Tensor, top: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, bool]:
+    """Thickness-weighted mean wind from the lowest steering level up to each storm's own layer top."""
+    levels = [lv for lv in STEERING_LEVELS
+              if reader.has(f"u_component_of_wind@{lv}") and reader.has(f"v_component_of_wind@{lv}")]
+    if not levels:
+        zeros = torch.zeros(weights.shape[0], dtype=torch.float64, device=weights.device)
+        return zeros, zeros, False
+    u = torch.stack([reader.mean(f"u_component_of_wind@{lv}", weights) for lv in levels], -1)
+    v = torch.stack([reader.mean(f"v_component_of_wind@{lv}", weights) for lv in levels], -1)
+    total_u = torch.zeros_like(u[:, 0])
+    total_v = torch.zeros_like(v[:, 0])
+    for _, layer_top in STEERING_TOPS:
+        chosen = [lv for lv in levels if lv >= layer_top] or levels
+        thickness = torch.tensor(_thickness_weights(chosen), dtype=torch.float64, device=u.device)
+        index = [levels.index(lv) for lv in chosen]
+        mask = (top == float(layer_top)).to(torch.float64)
+        total_u = total_u + mask * (u[:, index] * thickness).sum(-1)
+        total_v = total_v + mask * (v[:, index] * thickness).sum(-1)
+    return total_u, total_v, True
+
+
+@torch.no_grad()
+def physics_steering_track(states: torch.Tensor, variables, normalizer, grid, storm_center: torch.Tensor,
+                           lead_times_hours, wind_kt: torch.Tensor | None = None, size_km: torch.Tensor | None = None,
+                           step_hours: float = 6.0, inner_km: float = 200.0, outer_km: float = 800.0) -> torch.Tensor:
+    """
+    :func:`steering_track` with the physics it leaves out: the steering layer deepens with intensity
+    (``wind_kt``, ``(B,)`` or ``(B, steps)`` along the forecast), and beta drift grows with size (``size_km``,
+    the mean gale radius). Same output convention: ``(B, L, 2)`` degrees from the start.
+    """
+    sequence = states if states.dim() == 4 else states.unsqueeze(0)
+    leads = [float(h) for h in lead_times_hours]
+    steps = int(math.ceil(max(leads) / step_hours)) if leads else 0
+    centre = storm_center.to(sequence.device, torch.float64)
+    origin = centre.clone()
+    batch = centre.shape[0]
+    winds = (torch.full((batch, steps), 60.0, dtype=torch.float64, device=sequence.device) if wind_kt is None
+             else wind_kt.to(sequence.device, torch.float64))
+    if winds.dim() == 1:
+        winds = winds.view(-1, 1).expand(-1, max(steps, 1))
+    positions = [centre]
+    for step in range(steps):
+        reader = _Reader(sequence[min(step, sequence.shape[0] - 1)], variables, normalizer, grid)
+        ring = reader.weights(centre, inner_km, outer_km)
+        top = steering_top_hpa(winds[:, min(step, winds.shape[1] - 1)])
+        u, v, observed = _layered_wind(reader, ring, top)
+        if observed:
+            bu, bv = beta_drift_ms(centre[:, 0], size_km)
+            centre = advect(centre, u + bu, v + bv, step_hours)
+        positions.append(centre)
+    path = torch.stack(positions, 1)
+    out = []
+    for hours in leads:
+        exact = hours / step_hours
+        low = min(int(math.floor(exact)), steps)
+        high = min(low + 1, steps)
+        frac = exact - low if high != low else 0.0
+        lat = path[:, low, 0] * (1 - frac) + path[:, high, 0] * frac
+        dlon = wrap_longitude(path[:, low, 1] - origin[:, 1]) * (1 - frac) + wrap_longitude(path[:, high, 1] - origin[:, 1]) * frac
+        out.append(torch.stack([lat - origin[:, 0], dlon], -1))
+    return torch.stack(out, 1).to(torch.float32)
+
+
+__all__ = ["BETA_DRIFT_MS", "STEERING_TOPS", "advect", "beta_drift_ms", "describe_environment", "displacement_km",
+           "extrapolation_track", "grid_latlon", "great_circle_km", "physics_steering_track", "steering_top_hpa",
+           "steering_track", "storm_environment"]

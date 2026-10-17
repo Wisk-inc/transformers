@@ -158,7 +158,7 @@ def test_the_consensus_finds_the_member_that_is_right():
     truth = torch.randn(count, leads, 2)
     missing = torch.full((count, leads, 2), float("nan"))          # rollout members not computed
     members = torch.stack([truth + torch.randn(count, leads, 2) * 0.5, truth + torch.randn(count, leads, 2) * 0.3,
-                           truth.clone(), truth + torch.randn(count, leads, 2), missing, missing], 2)
+                           truth.clone(), truth + torch.randn(count, leads, 2), missing, missing, missing, missing], 2)
     valid = torch.ones(count, leads, dtype=torch.bool)
     latitude = torch.full((count,), 25.0)
     weights = fit_track_consensus(members, truth, valid, latitude)

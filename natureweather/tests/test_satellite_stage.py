@@ -61,7 +61,7 @@ def banks(tmp_path_factory):
 def test_tracked_outputs_only_grow_at_the_end_and_old_checkpoints_load():
     # Positions are what the saved counts are read by: 0.11 appended one, 0.12 five more, never in between.
     assert TRACKED_HEADS.index("storm_satellite") == 22
-    assert TRACKED_HEADS[23:] == ("satnet", "retrieval", "ri2", "satnet_fusion", "backbone_tail")
+    assert TRACKED_HEADS[23:28] == ("satnet", "retrieval", "ri2", "satnet_fusion", "backbone_tail")
     model = _model()
     old = {k: v for k, v in model.state_dict().items()
            if not k.startswith(("storm_satellite.", "ri_calibration", "landfall_calibration", "feature_",

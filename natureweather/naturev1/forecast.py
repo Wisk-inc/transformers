@@ -179,6 +179,8 @@ def decode_consensus(
         extrapolation_track(storm_state.view(1, -1), lead_times_hours)[0],
         torch.as_tensor(rollout.get("rollout_steering", missing), dtype=missing.dtype).reshape(missing.shape),
         torch.as_tensor(rollout.get("rollout_vortex", missing), dtype=missing.dtype).reshape(missing.shape),
+        torch.as_tensor(rollout.get("analog_track", missing), dtype=missing.dtype).reshape(missing.shape),
+        torch.as_tensor(rollout.get("rollout_ensemble", missing), dtype=missing.dtype).reshape(missing.shape),
     ], 1).float()                                                                  # (L, M, 2)
     width = members.shape[1]
     weights = weights.float()
@@ -475,9 +477,15 @@ def build_forecast(
     trained: dict | None = None,
     inputs: tuple[str, ...] = (),
     consensus: dict | None = None,
+    storm_physics=None,
+    land_fn=None,
+    model=None,
+    hazard_samples: int = 400,
 ) -> dict:
     """
-    Assemble the whole forecast bundle: track scenarios, landfall, intensity, local weather, ENSO.
+    Assemble the whole forecast bundle: track scenarios, landfall, intensity, local weather, ENSO -- and, from
+    0.12, the storm's physics, the corrected intensity consensus, the situation-dependent cone, and the wind
+    hazard at ``point_of_interest`` (probability of 34/50/64 kt by each lead, gale arrival, rain).
 
     Args:
         outputs: what :meth:`NatureV1.forward` returned.
@@ -500,6 +508,10 @@ def build_forecast(
             when the outputs carry no steering track. Add ``"rollout": {"rollout_steering": (L, 2),
             "rollout_vortex": (L, 2)}`` (:func:`naturev1.tracker.rollout_member_tracks`) to bring the
             rollout members in; without them those members drop out of the blend.
+        storm_physics: ``(F,)`` or ``(B, F)`` from :func:`naturev1.thermo.storm_physics`, for the ``physics``
+            section (potential intensity, ventilation, phase -- tropical, hybrid or extratropical).
+        land_fn: ``(lat, lon) -> land fraction`` arrays, for inland decay and roughness in the wind hazard.
+        model: the model, for its fitted statistical parameters (the consensus cone).
     """
     bundle = {
         "issued": issued.isoformat(),
@@ -559,6 +571,16 @@ def build_forecast(
         bundle["rapid_intensification"] = (
             _UNAVAILABLE if _untrained("ri", trained)
             else decode_rapid_intensification(outputs, lead_times_hours, issued, batch_index, trained))
+        if "intensity_consensus_kt" in outputs and not _untrained("intensity", trained):
+            bundle["intensity_consensus"] = decode_intensity_consensus(outputs, lead_times_hours, issued, batch_index)
+        if storm_physics is not None:
+            physics = storm_physics if storm_physics.dim() == 1 else storm_physics[batch_index]
+            bundle["physics"] = decode_physics(physics, outputs, batch_index)
+        if model is not None and "track_consensus" in bundle and int(model.statistics.fitted[5]) > 0:
+            bundle["consensus_cone"] = decode_consensus_cone(bundle["track_consensus"], model, storm_center)
+        if point_of_interest is not None and not _untrained("track", trained) and not _untrained("intensity", trained):
+            bundle["wind_hazard"] = decode_wind_hazard(outputs, storm_center, point_of_interest, lead_times_hours,
+                                                       issued, batch_index, land_fn, trained, hazard_samples)
     if point_of_interest is not None and output_grid is not None:
         index = nearest_point(output_grid, *point_of_interest)
         bundle["point_forecast"] = {
@@ -567,6 +589,113 @@ def build_forecast(
                                               normalizer, trained),
         }
     return bundle
+
+
+def decode_intensity_consensus(outputs: dict, lead_times_hours, issued: dt.datetime, batch_index: int = 0) -> dict:
+    """The corrected intensity consensus per lead, with every member beside it (kt)."""
+    from .statistical import INTENSITY_MEMBERS
+
+    blended = outputs["intensity_consensus_kt"][batch_index]
+    members = outputs.get("intensity_members_kt")
+    rows = []
+    for lead, hours in enumerate(lead_times_hours):
+        row = {"lead_hours": hours, "valid_time": (issued + dt.timedelta(hours=hours)).isoformat(),
+               "wind_kt": round(float(blended[lead]), 1), "category": _category(float(blended[lead]) * 0.514444)}
+        if members is not None:
+            row["members"] = {name: (round(float(members[batch_index, lead, m]), 1)
+                                     if math.isfinite(float(members[batch_index, lead, m])) else None)
+                              for m, name in enumerate(INTENSITY_MEMBERS)}
+        rows.append(row)
+    return {"by_lead": rows, "note": "bias-corrected, weighted blend of the network's heads, a SHIPS-style "
+                                     "regression, a logistic-growth model, climatology-persistence, the satellite "
+                                     "network and the rollout; weights per lead fitted on held-out seasons"}
+
+
+def phase_label(b_m: float, vtl: float, vtu: float) -> str:
+    """Hart (2003) phase from thermal asymmetry B (m) and the lower and upper thermal winds."""
+    if b_m < 10.0 and vtl > 0 and vtu > 0:
+        return "tropical (symmetric, deep warm core)"
+    if b_m < 10.0 and vtl > 0:
+        return "shallow warm core (subtropical-like)"
+    if b_m >= 10.0 and vtl > 0:
+        return "transitioning (asymmetric, warm core below)"
+    if b_m >= 10.0 and vtl <= 0:
+        return "extratropical (asymmetric, cold core)"
+    return "cold core, symmetric (occluded or upper low)"
+
+
+def decode_physics(physics, outputs: dict, batch_index: int = 0) -> dict:
+    """The storm's thermodynamics in a forecaster's units, from the scaled physics vector."""
+    from .thermo import STORM_PHYSICS_FEATURES
+
+    f = {name: float(physics[i]) for i, name in enumerate(STORM_PHYSICS_FEATURES)}
+    if f["observed"] < 0.5:
+        return {"available": False, "reason": "the state carries no pressure-level winds, temperature and humidity"}
+    potential_kt = f["potential_intensity"] * 50.0 / 0.514444
+    b, vtl, vtu = f["phase_b"] * 20.0, f["phase_vtl"] * 100.0, f["phase_vtu"] * 100.0
+    ventilation = f["ventilation"] / 10.0
+    return {
+        "potential_intensity_kt": round(potential_kt, 0),
+        "below_potential_kt": round(f["intensity_gap"] * 50.0 / 0.514444, 0),
+        "outflow_temperature_c": round(f["outflow_temperature"] * 15.0 + 200.0 - 273.15, 1),
+        "ventilation_index": round(ventilation, 3),
+        "ventilation": ("strongly inhibits intensification" if ventilation > 0.1 else
+                        "inhibits intensification" if ventilation > 0.05 else "favourable"),
+        "mid_level_entropy_deficit": round(f["entropy_deficit"], 2),
+        "cape_j_per_kg": round(f["cape"] * 2000.0, 0),
+        "divergence_200hpa_per_s": round(f["divergence_200"] * 1e-5, 7),
+        "vorticity_850hpa_per_s": round(f["vorticity_850"] * 1e-5, 7),
+        "mid_level_humidity": round(f["rh_mid"], 2),
+        "phase": {"b_m": round(b, 1), "lower_thermal_wind": round(vtl, 0), "upper_thermal_wind": round(vtu, 0),
+                  "label": phase_label(b, vtl, vtu)},
+        "genesis_potential": round(math.expm1(f["genesis_potential"]), 2),
+        "land_share_within_300km": round(f["land_share"], 2),
+    }
+
+
+def decode_consensus_cone(consensus: dict, model, storm_center) -> list[dict]:
+    """The predicted-consensus-error radius at each lead, from how far apart the members are (km)."""
+    from .statistical import consensus_radius_km
+    from .steering import great_circle_km
+
+    rows = []
+    for index, point in enumerate(consensus["track"]):
+        if point.get("latitude") is None:
+            continue
+        distances = [float(great_circle_km(torch.tensor(point["latitude"]), torch.tensor(point["longitude"]),
+                                           torch.tensor(m["latitude"]), torch.tensor(m["longitude"])))
+                     for m in point["members"].values() if m is not None]
+        spread = torch.tensor([[sum(distances) / max(len(distances), 1)]]).expand(1, len(consensus["track"]))
+        radius = float(consensus_radius_km(model, spread.float())[0, index])
+        rows.append({"lead_hours": point["lead_hours"], "latitude": point["latitude"], "longitude": point["longitude"],
+                     "member_spread_km": round(spread[0, 0].item(), 0), "radius_km": round(radius, 0)})
+    return rows
+
+
+def decode_wind_hazard(outputs: dict, storm_center, point, lead_times_hours, issued: dt.datetime, batch_index: int,
+                       land_fn, trained, samples: int) -> dict:
+    """Wind-speed probabilities, gale arrival and rain at one point, by Monte Carlo over the forecast."""
+    from .windfield import THRESHOLDS_KT, wind_hazard
+
+    result = wind_hazard(outputs, batch_index, storm_center, lead_times_hours, [point[0]], [point[1]], samples=samples,
+                         land_fn=land_fn, trained=trained)
+    rows = []
+    for lead, hours in enumerate(lead_times_hours):
+        rows.append({"lead_hours": hours, "valid_time": (issued + dt.timedelta(hours=hours)).isoformat(),
+                     **{f"p_{int(t)}kt": round(float(result["probability"][0, lead, i]), 3)
+                        for i, t in enumerate(THRESHOLDS_KT)}})
+    arrival = result["arrival_hours"][0]
+
+    def when(hours):
+        return None if not math.isfinite(float(hours)) else (issued + dt.timedelta(hours=float(hours))).isoformat()
+
+    return {"point": {"latitude": point[0], "longitude": point[1]}, "by_lead": rows,
+            "gale_arrival": {"earliest_reasonable": when(arrival[0]), "most_likely": when(arrival[1])},
+            "median_peak_wind_kt": round(float(result["peak_kt"][0]), 0),
+            "rain_mm": {"median": round(float(result["rain_mm"][0, 0]), 0), "p90": round(float(result["rain_mm"][0, 1]), 0)},
+            "samples": result["samples"],
+            "note": "Holland-profile wind fields with inflow, motion asymmetry, land roughness and inland decay, over "
+                    "coherent realisations of the forecast; rain from the R-CLIPER climatology"}
 
 
 #: What an untrained section is replaced with.
