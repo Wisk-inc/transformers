@@ -575,3 +575,29 @@ def test_rollout_forecast_and_storm_features_under_bf16(staged):
     import contextlib
 
     assert isinstance(_autocast("cpu", "auto"), contextlib.nullcontext), "auto is full precision off-GPU"
+
+
+def test_a_finished_stage_pushes_its_final_checkpoint(tmp_path, staged, monkeypatch):
+    """The push timer had usually just fired at a normal finish, so the Hub stayed a few steps short."""
+    from naturev1.checkpoint import CheckpointManager
+
+    pushed = []
+    monkeypatch.setattr(CheckpointManager, "push_now", lambda self, state, timeout=120.0: pushed.append(
+        (self.tag, state.step)) or True)
+    grid = _grid()
+    dataset = CachedERA5(staged, history=2, lead_steps=1, channels=WIDTH, augment=False, state_steps=2)
+    stepper = StateStepper.build(dataset, WIDTH, grid, samples=8)
+    model = _model(state_channels=stepper.roles.num_prognostic)
+    loader = era5_loader(dataset, batch_size=2, num_workers=0, analysis_grid=grid, output_grid=grid)
+    train_state_rollout(model, loader, stepper, max_steps=3, precision="fp32", hub_repo="someone/model",
+                        schedule=RolloutSchedule(start_step=1, ramp_steps=1, max_steps=2),
+                        checkpoint_dir=str(tmp_path / "rollout"))
+    assert pushed == [("rollout", 3)]
+
+    loader = era5_loader(CachedERA5(staged, history=2, lead_steps=(1, 2), channels=WIDTH, augment=False),
+                         batch_size=2, num_workers=0, analysis_grid=grid, output_grid=grid)
+    trainer = Trainer(_model(), TrainSettings(max_steps=2, checkpoint_dir=str(tmp_path / "stage1"),
+                                              precision="fp32", warmup_steps=1, hub_repo="someone/model"),
+                      device="cpu")
+    trainer.fit(loader, epochs=1)
+    assert pushed[-1] == ("stage1", 2)

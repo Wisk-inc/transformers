@@ -15,13 +15,27 @@ and the pipeline behaves exactly as it does on a machine with a disk that lasts.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
 
 from .safeio import read_json
+
+
+#: Files up to this size are compared with the Hub copy by content, not just by size.
+HASH_LIMIT = 2 * 1024**3
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 24), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 class HubMirror:
@@ -82,6 +96,45 @@ class HubMirror:
         except Exception:
             return None
         return None
+
+    def remote_sha256(self, repo_path: str) -> str | None:
+        """
+        SHA-256 of a file in the repository, or None if it is not there (or cannot be asked).
+
+        A large file is stored through LFS and the Hub reports its hash; a small one is plain git, whose
+        blob id is not a SHA-256, so it is downloaded and hashed -- small files are what that costs.
+        """
+        if not self.can_pull:
+            return None
+        try:
+            from huggingface_hub import HfApi, hf_hub_download
+
+            for entry in HfApi(token=self.token).get_paths_info(self.repo_id, [repo_path], repo_type="model"):
+                lfs = getattr(entry, "lfs", None)
+                if lfs is not None:
+                    return lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)
+                with tempfile.TemporaryDirectory() as scratch:
+                    return _sha256(Path(hf_hub_download(self.repo_id, repo_path, repo_type="model",
+                                                        local_dir=scratch, token=self.token)))
+        except Exception:
+            return None
+        return None
+
+    def _same_on_hub(self, local: Path, repo_path: str) -> bool:
+        """
+        Whether the repository already holds exactly this file.
+
+        Size alone is not enough: a storm feature bank rebuilt for a new backbone has the same shape, so
+        the same byte count, and a size check left the stale bank on the Hub. Files up to
+        ``HASH_LIMIT`` are compared by content; the staged arrays above it are append-only, so for them a
+        matching size does mean the same data.
+        """
+        size = local.stat().st_size
+        if self.remote_size(repo_path) != size:
+            return False
+        if size > HASH_LIMIT:
+            return True
+        return self.remote_sha256(repo_path) == _sha256(local)
 
     def pull(self, local: str | os.PathLike, repo_path: str, what: str | None = None) -> bool:
         """
@@ -149,7 +202,7 @@ class HubMirror:
     def push(self, local: str | os.PathLike, repo_path: str, background: bool = True,
              what: str | None = None) -> bool:
         """
-        Upload ``local`` to ``repo_path`` unless the Hub already holds a file of the same size.
+        Upload ``local`` to ``repo_path`` unless the Hub already holds exactly this file.
 
         Background by default: a 40 GB staging uploads while training runs. Returns True if an upload
         was started (or done, when ``background`` is False).
@@ -162,8 +215,8 @@ class HubMirror:
             return False
         what = what or local.name
         size = local.stat().st_size
-        if self.remote_size(repo_path) == size:
-            return False                              # already there, byte count and all
+        if self._same_on_hub(local, repo_path):
+            return False                              # already there, byte for byte
 
         def upload() -> None:
             began = time.time()

@@ -421,12 +421,12 @@ class Trainer:
             print(f"[train] all {epochs} epochs done", flush=True)
         # Whatever ended the run -- a signal, the step limit, the data -- the last state is written down.
         self.save(force=True)
-        if self.interrupted and settings.hub_repo:
-            # A stop signal on a hosted notebook is the session ending, and its disk with it. The
-            # checkpoint just written is worth nothing there unless it reaches the Hub before the
-            # process is gone, so this push does not wait for the timer and does not return early.
+        if settings.hub_repo:
+            # The last checkpoint goes to the Hub now, not on the timer: a stop signal on a hosted
+            # notebook is the session ending, and its disk with it; and at a normal finish the timer
+            # had usually just fired, which left the Hub a few steps short of the finished stage.
             if self.checkpoints.push_now(self.state):
-                print("[train] last checkpoint pushed to the Hub; a new session resumes from it", flush=True)
+                print(f"[train] final checkpoint (step {self.state.step:,}) pushed to the Hub", flush=True)
         print(f"[train] stopped at step {self.state.step} after {self.state.wall_seconds / 60:.1f} min", flush=True)
         return self.state
 

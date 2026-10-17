@@ -196,3 +196,17 @@ def test_the_mirror_is_exported(name):
     import naturev1
 
     assert hasattr(naturev1, name)
+
+
+def test_a_rebuilt_file_of_the_same_size_is_pushed_again(tmp_path, monkeypatch):
+    """A storm bank rebuilt for a new backbone has the same shape; the size check left the stale one."""
+    hub = FakeHub().install(monkeypatch)
+    mirror = HubMirror("someone/model", token="hf_fake")
+    bank = tmp_path / "storm_bank_val.pt"
+    bank.write_bytes(b"old backbone".ljust(64, b"."))
+    assert mirror.push(bank, "checkpoints/storm_bank_val.pt", background=False)
+    bank.write_bytes(b"new backbone".ljust(64, b"."))
+    assert mirror.push(bank, "checkpoints/storm_bank_val.pt", background=False), "same size, new bytes"
+    assert hub.files["checkpoints/storm_bank_val.pt"] == bank.read_bytes()
+    assert not mirror.push(bank, "checkpoints/storm_bank_val.pt", background=False), "now identical"
+    assert hub.uploads.count("checkpoints/storm_bank_val.pt") == 2
