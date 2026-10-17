@@ -41,6 +41,14 @@ pipeline_tag: other
 > **Version 0.12 (code ready, not yet trained)** rebuilds the satellite path around the red team's findings and
 > moves the storm heads from the Atlantic to every basin — see [section 4.10](#410-012-the-satellite-path-rebuilt-and-every-basin-code-ready-not-yet-trained).
 > The released weights do not use it until it has been trained and has beaten them on the same test storms.
+>
+> **Version 0.13** adds `naturev1.cyclone`: 38 modules of tropical-cyclone physics that need **no neural network**,
+> measured on 4,447 forecasts of 407 storms in every basin in seasons they were never fitted on (2018, 2020-2022).
+> The physics consensus beats straight-line extrapolation at **every lead from 6 to 120 hours** (+12% to +38%,
+> every interval clear of zero) and beats CLIPER at every lead. It does **not** beat GraphCast, Pangu-Weather,
+> HRES, Aurora, FGN (WeatherNext 2), FuXi or GenCast past 6 hours; combined with any of them it is never worse and
+> is better at 6-12 hours. Plus genesis detection (68% of formations flagged a median 24 h ahead), multi-teacher
+> distillation, data assimilation and a 0.25-degree decoder — [section 4.12](#412-013-hurricane-physics-measured-on-seasons-it-never-saw).
 
 NatureV1 is an 89-million-parameter model of the atmosphere that forecasts global weather out to five days and,
 for tropical cyclones, where a storm will go, how strong it will get, whether it will intensify rapidly, and
@@ -485,6 +493,68 @@ whose weights are fitted on 2017/2019/2021 and can go to zero, and nothing is sc
 | RI | a stacked RI consensus over RI 2.0, the satellite network, the statistical models and the rollout |
 | Training | intensity loss **rebalanced by class** (square-root inverse frequency, capped: a major hurricane counts ~4× a tropical storm, the loss keeps its size); an **average of the weights** (EMA 0.999) is what is evaluated and released |
 | Forecast time | a **test-time rotation ensemble**: the whole planet turned by the golden angle and run again — the storm, its latitude and its surroundings unchanged, the arithmetic different — merged as a mixture (disagreement widens the uncertainty). Used only if it beats a single pass on the held-out seasons |
+
+### 4.12 0.13: hurricane physics, measured on seasons it never saw
+
+`naturev1.cyclone` forecasts a storm's track from one 1.5-degree analysis and the best track so far, with no neural
+network: 13 members (extrapolation, a rebuilt CLIPER, track-shape analogs, steering trajectories through the
+vortex-removed analysis with beta drift that depends on the storm's outer circulation, a flow that keeps evolving
+the way it was evolving, a flow that relaxes to the 1981-2010 climatology as its anomaly loses memory, the
+vorticity-budget motion, a physics ensemble, a limited-area barotropic model) blended by along- and cross-track
+weights per lead. Every constant was fitted on 1980-2014 best tracks or the 2016/2017/2019 hindcasts; the table
+below is the four seasons **never used for anything**: 2018, 2020, 2021, 2022, every basin (NA, EP, WP, SI, SP),
+forecasts from every 00/12 UTC tropical or subtropical fix, verified while the system stays tropical (NHC rules),
+homogeneous samples, 90% intervals from a bootstrap over whole storms.
+
+| track error (km) | 6 h | 12 h | 24 h | 36 h | 48 h | 72 h | 96 h | 120 h |
+|---|---|---|---|---|---|---|---|---|
+| forecasts | 4,217 | 3,983 | 3,559 | 3,177 | 2,826 | 2,200 | 1,677 | 1,262 |
+| strongest extrapolation (best of 6 h / 12 h / great-circle, per lead) | 33 | 74 | 179 | 303 | 442 | 751 | 1,086 | 1,417 |
+| CLIPER (rebuilt, 1980-2014) | 32 | 70 | 163 | 268 | 378 | 589 | 769 | 914 |
+| **NatureV1 physics consensus** | **29** | **59** | **127** | **207** | **301** | **515** | **719** | **884** |
+| skill against extrapolation | +12% | +21% | +29% | +32% | +32% | +31% | +34% | +38% |
+
+**Against the teachers, on their own years and the same storms** (each tracked through its own WeatherBench 2
+forecast at 1.5 degrees from the same starting position; tracking at 1.5 degrees costs every teacher a little at
+6-12 hours, and they ran at 0.25):
+
+| km | 6 h | 12 h | 24 h | 48 h | 72 h | 120 h |
+|---|---|---|---|---|---|---|
+| NatureV1 physics (2018, 2020) | 28 | 58 | 126 | 299 | 511 | 914 |
+| GraphCast | 49 | 54 | 67 | 102 | 162 | 296 |
+| physics + GraphCast, lead-wise selected (weights never see the scored season) | **26** | **47** | 67 | 102 | 162 | 296 |
+| Pangu-Weather (2018-2022) | 49 | 58 | 69 | 101 | 151 | 278 |
+| physics + Pangu | **27** | **44** | 69 | 101 | 151 | 278 |
+| HRES (2018-2022) | 49 | 60 | 79 | 123 | 187 | 326 |
+| Aurora (2022) / FGN-WeatherNext 2 (2022) | 46 / 45 | 55 / 51 | 66 / 61 | 92 / 82 | 146 / 111 | 313 / 199 |
+
+So: the physics alone is far better than extrapolation and climatology and far worse than a modern global model
+past 6 hours; what it adds to a global model is the first 12 hours. Distilling those models into NatureV1 (below)
+is the route to their long-range skill; the physics is then the short-range half of the consensus.
+
+**Hurricane Dorian (2019, a tuning season; weights fitted on 2016-2017 only):** 21/49/99/164/249/480/656/810 km at
+6-120 h against extrapolation's 23/52/131/237/365/641/897/1173 -- and 230 km against 341 at 48 h during the stall
+over the Bahamas -- while HRES scored 64 km at 24 h and Pangu 63.
+
+**Synthetic hard cases** (`naturev1.cyclone.synthetic`: a Dorian-type col where the ridge fades and the trough stays
+away, ridge breakdown, trough capture, a loop, a Fujiwhara pair, a centre reformation, a sharp turn, a southern
+recurvature; truth integrated through the evolving flow, the forecast sees only the start): the physics beats
+extrapolation at 48 and 72 h in all nine (Dorian stall 344 vs 552 km at 48 h and 471 vs 961 at 72 h, the loop 56 vs
+416 at 48 h), loses at 24 h in four, and loses at 120 h in four, where the scenario's flow is unlike Earth's
+climatology (CLIPER and the analogs pull toward real climatology). The stall is not flagged at the initial time when
+the col only forms later.
+
+**Genesis** (`naturev1.cyclone.genesis`, northern hemisphere June-November, fitted on 2016/2017/2019, scored on
+2018/2020-2022, 259 formations): Brier skill +0.22 over climatology, well calibrated (top third: forecast 12%,
+observed 13%); at a 30% threshold it flags 68% of formations a median 24 hours ahead with 52% false alarms.
+
+**Also new in 0.13, code ready and tested, not yet run on a GPU:** multi-teacher distillation (`naturev1.distill`:
+every teacher resampled into NatureV1's grid, levels, steps and channels before any loss; skill-weighted mixture
+targets with an honest variance; rollout loss with an ERA5 anchor and extra weight near active cyclones), data
+assimilation for live inputs (`naturev1.assimilation`: bias correction, gross/background/buddy checks, local
+optimal interpolation with NatureV1's own predicted variance as the background error), and a 0.25-degree decoder
+(`naturev1.highres`) that reads the latent mesh directly. The molab runbook (`molab_naturev1.py`) runs all of it on
+one 96 GB GPU and publishes only if the distilled model beats the physics-only consensus.
 
 ## 5. Limitations
 

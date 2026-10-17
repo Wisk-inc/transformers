@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "naturev1"
-version = "0.12.0"
-description = "Probabilistic weather and hurricane-track model over geolocated fields, with live GOES ingest"
+version = "0.13.0"
+description = "Probabilistic weather and hurricane model: geometric-attention backbone, tropical-cyclone physics that beats extrapolation, multi-teacher distillation, data assimilation"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Nathan" }]
-keywords = ["weather", "hurricane", "forecasting", "goes", "satellite", "geometric-deep-learning", "pytorch"]
+keywords = ["weather", "hurricane", "tropical-cyclone", "forecasting", "distillation", "data-assimilation", "goes", "satellite", "geometric-deep-learning", "pytorch"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -20,7 +20,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Atmospheric Science",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = ["torch>=2.5", "ihelix>=0.5.1", "numpy>=1.24"]
+dependencies = ["torch>=2.5", "ihelix>=0.6.0", "numpy>=1.24"]
 
 [project.optional-dependencies]
 satellite = ["xarray>=2023.1", "netCDF4>=1.6"]

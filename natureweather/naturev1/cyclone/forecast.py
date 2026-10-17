@@ -1,0 +1,120 @@
+# Copyright 2026 Nathan. Apache-2.0.
+"""
+One call, the whole physics forecast: track consensus, its members and cone, the regime, the Dorian-type stall
+warning, intensity and the environment that drives it -- from an analysis and the best track so far, with no
+neural network and nothing fitted at run time.
+
+:func:`physics_forecast` is what the rest of NatureV1 uses: the consensus track is a far stronger prior for the
+learned track head than a frozen steering flow, and every diagnostic here is something a forecaster would want
+next to the model's own answer.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+from .data import LEADS
+
+
+def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, intensity: bool = True) -> dict:
+    """
+    Args:
+        case: a :class:`naturev1.cyclone.data.Case` (position, intensity and the last 48 hours of best track; no
+            ``truth`` needed).
+        env: the analysis around the storm (:class:`naturev1.cyclone.fields.Environment`, with the 12-hour-earlier
+            winds in ``previous`` if available).
+        climatology: a :class:`naturev1.cyclone.climatology.Climatology` (members that need it are skipped
+            without it, and the consensus renormalises over the rest).
+        analogs: an :class:`naturev1.cyclone.analogs.AnalogDatabase`.
+
+    Returns:
+        ``{"leads", "track" (L, 2), "members": {name: (L, 2)}, "cone_km" (L,), "regime", "stall", "ridge",
+        "shear", "intensity_kt": {member: (L,)}, "intensity" (L,)}``.
+    """
+    from .consensus import apply_consensus
+    from .members import run_members
+    from .regimes import classify
+    from .ridge import ridge_diagnostics
+    from .shear import shear_diagnostics
+    from .stall import stall_diagnostics
+
+    out = run_members(case, env, climatology, analogs, leads=leads)
+    ctx = out.pop("_context", None)
+    ensemble = out.pop("_ensemble", None)
+    table = consensus_table(out)
+    nan = np.full((len(leads), 2), np.nan)
+    stack = np.stack([out.get(m, nan) for m in table["members"]], 1)[None]
+    track = apply_consensus([case], stack, table)[0]
+    result = {"leads": list(leads), "track": track, "members": out, "consensus_table": table["name"]}
+    from . import coefficients
+
+    cone = getattr(coefficients, "CONE_KM", None)
+    if cone is not None:
+        # The 67th percentile of the consensus's out-of-sample errors on past seasons -- NHC's cone construction --
+        # widened where the physics ensemble disagrees more than usual for that lead.
+        radius = np.interp(np.asarray(leads, np.float64), cone["leads"], cone["radius_km"])
+        if ensemble is not None:
+            radius = np.maximum(radius, 1.2 * np.nan_to_num(ensemble["spread_km"], nan=0.0))
+        result["cone_km"] = radius
+    if ctx is not None:
+        stall = stall_diagnostics(ctx.flows["med"], np.where(np.isfinite(track), track, case.lat), leads, case.lat, case.lon)
+        ridge = ridge_diagnostics(ctx.clean, case.lat, case.lon)
+        result.update({"stall": {k: v for k, v in stall.items() if k != "cols"}, "cols": stall["cols"], "ridge": ridge,
+                       "regime": classify(case, stall, ridge), "shear": shear_diagnostics(ctx.clean, case.lat, case.lon, ctx.motion),
+                       "outer_strength_ms": ctx.outer_ms})
+    if intensity:
+        result.update(_intensity(case, env, ctx, track, leads))
+    return result
+
+
+def consensus_table(members: dict) -> dict:
+    """
+    The shipped consensus whose members are all present: the full table when a climatology and an analog
+    database were given, else the basic one fitted for exactly the members that need neither -- renormalising
+    the full table over half its members would lean on combinations it was never fitted to trust.
+    """
+    from . import coefficients
+
+    for name in ("CONSENSUS", "CONSENSUS_BASIC"):
+        table = getattr(coefficients, name, None)
+        if table is None:
+            continue
+        have = [np.isfinite(np.asarray(members.get(m, [[np.nan]]))[0]).all() for m in table["members"]]
+        if all(have):
+            return {**table, "name": name}
+    return {**coefficients.CONSENSUS_BASIC, "name": "CONSENSUS_BASIC"}
+
+
+def _intensity(case, env, ctx, track, leads) -> dict:
+    from .intensity import decay_along, environment_along_track, lgem_intensity, shifor_intensity
+
+    members = {"persistence": np.full(len(leads), case.wind_kt)}
+    shifor = shifor_intensity(case, leads)
+    members["shifor"] = shifor
+    if ctx is None or not np.isfinite(track[0, 0]):
+        return {"intensity_kt": members, "intensity": shifor}
+    filled = track.copy()
+    good = np.isfinite(filled[:, 0])
+    filled[~good] = filled[np.nonzero(good)[0][-1]]
+    try:
+        along = environment_along_track(env, ctx.clean, case, filled, leads, np.nan_to_num(shifor, nan=case.wind_kt))
+    except Exception:                                       # missing fields in a live analysis: degrade, don't fail
+        return {"intensity_kt": members, "intensity": shifor}
+    members["decay_shifor"] = decay_along(case, along, leads, np.nan_to_num(shifor, nan=case.wind_kt))
+    members["lgem"] = lgem_intensity(case, along, leads)
+    try:
+        from .coefficients import INTENSITY_CONSENSUS
+        from .intensity import ships_intensity
+
+        members["ships"] = decay_along(case, along, leads, ships_intensity(case, along, leads))
+        weights = np.asarray(INTENSITY_CONSENSUS["weights"], np.float64)        # (L, members)
+        names = INTENSITY_CONSENSUS["members"]
+        stack = np.stack([members[n] for n in names], -1)
+        blended = (np.nan_to_num(stack) * weights).sum(-1) / np.maximum((np.isfinite(stack) * weights).sum(-1), 1e-9)
+        blended = blended + np.asarray(INTENSITY_CONSENSUS.get("bias", np.zeros(len(leads))), np.float64)
+    except ImportError:
+        blended = np.nanmean(np.stack([members["decay_shifor"], members["lgem"]]), 0)
+    return {"intensity_kt": members, "intensity": np.clip(blended, 15.0, 200.0), "environment": along}
+
+
+__all__ = ["consensus_table", "physics_forecast"]

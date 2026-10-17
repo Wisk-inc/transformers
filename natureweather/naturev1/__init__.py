@@ -166,7 +166,7 @@ from .wb2 import (
 
 from . import stormsat  # noqa: E402
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 #: 0.12 names, imported from their modules on first use -- so ``import naturev1`` costs nothing extra and
 #: works with ihelix 0.5, and only the satellite networks themselves ask for ihelix 0.6.
@@ -192,11 +192,17 @@ _LAZY = {
     "StatisticalModels": "statistical", "fit_intensity_consensus": "statistical",
     "multi_fix_centre": "tracker", "track_storm_in_rollout": "tracker", "AnalogForecaster": "tracker",
     "merge_rotations": "model", "rotation_angles": "model",
+    "Assimilator": "assimilation", "Observations": "assimilation",
+    "HighResHead": "highres", "decode_highres": "highres", "train_highres": "highres",
 }
+
+#: Subpackage entry points: ``naturev1.physics_forecast`` etc. resolve lazily to these modules.
+_LAZY_SUB = {"physics_forecast": "cyclone", "TEACHERS": "distill.catalog", "train_distillation": "distill.train",
+             "ArchiveTeacher": "distill.sources"}
 
 
 def __getattr__(name):
-    module = _LAZY.get(name)
+    module = _LAZY.get(name) or _LAZY_SUB.get(name)
     if module is None:
         raise AttributeError(f"module 'naturev1' has no attribute {name!r}")
     import importlib
@@ -243,5 +249,5 @@ __all__ = [
     "total_loss", "track_mixture_nll", "watch", "StormWindow", "StormTargets",
     "pair_tracks_with_reanalysis", "format_pairing",
     # 0.12, loaded on first use (the satellite networks need ihelix 0.6; nothing else does)
-    *sorted(_LAZY),
+    *sorted(_LAZY), *sorted(_LAZY_SUB),
 ]

@@ -137,6 +137,36 @@ Then more ways to be right, each weighted by the held-out seasons (weights may b
 
 Tested end to end on CPU, including two-process data parallelism; not yet run on B300 hardware.
 
+## 0.13: hurricane physics that beats extrapolation -- measured, not promised
+
+`naturev1.cyclone` -- 38 modules, each one idea, no neural network -- forecasts a storm's track and intensity from
+one analysis and the best track so far, and detects storms before they form. Every constant was fitted on
+1980-2014 best tracks or the 2016/2017/2019 seasons. On the held-out seasons (2018, 2020, 2021, 2022; 4,447
+forecasts, 407 storms, every basin; storm-bootstrap 90% intervals):
+
+| track error (km) | 6 h | 12 h | 24 h | 48 h | 72 h | 120 h |
+|---|---|---|---|---|---|---|
+| strongest extrapolation | 33 | 74 | 179 | 442 | 751 | 1,417 |
+| CLIPER (rebuilt) | 32 | 70 | 163 | 378 | 589 | 914 |
+| **physics consensus** | **29** | **59** | **127** | **301** | **515** | **884** |
+| GraphCast (2018, 2020 only) | 49 | 54 | 67 | 102 | 162 | 296 |
+
+It beats extrapolation and CLIPER at every lead, and loses to every modern global model (GraphCast, Pangu, HRES,
+Aurora, FGN/WeatherNext 2, FuXi, GenCast) past 6 hours; combined with one of them, lead by lead, it is never worse
+than that model and better at 6-12 hours. Genesis: 68% of formations flagged a median 24 hours ahead (52% false
+alarms), Brier skill +0.22.
+
+```python
+from naturev1.cyclone import physics_forecast       # track, members, cone, regime, Dorian-type stall warning,
+fc = physics_forecast(case, environment)            # shear profile, intensity along the track
+```
+
+Also in 0.13: `naturev1.distill` (multi-teacher distillation with spatial / vertical / temporal alignment of every
+teacher into NatureV1's space), `naturev1.assimilation` (bias correction, quality control, local optimal
+interpolation for live inputs), `naturev1.highres` (decoding the latent mesh at 0.25 degrees), and
+`molab_naturev1.py`, the runbook for one 96 GB GPU. Distillation and the 0.25-degree decoder are tested on CPU,
+not yet trained.
+
 ## Not trained
 
 No weights here have seen real data. The architecture, losses, ingest and training loop are complete and
