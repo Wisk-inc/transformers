@@ -118,6 +118,9 @@ from .steering import (
 )
 from .storms import (
                    StormTargets,
+                   calibration_report,
+                   fit_feature_monitor,
+                   fit_probability_calibration,
                    StormWindow,
                    consensus_track,
                    describe_consensus,
@@ -161,7 +164,9 @@ from .wb2 import (
 )
 
 
-__version__ = "0.10.0"
+from . import stormsat  # noqa: E402
+
+__version__ = "0.11.0"
 __author__ = "Nathan"
 __all__ = [
     "CORPORA", "RI_THRESHOLDS_KT", "WIND_RADII_THRESHOLDS_KT", "EyewallHead", "RapidIntensificationHead",
@@ -179,7 +184,8 @@ __all__ = [
     "HEADLINE_STATE_FIELDS", "score_state", "train_state_rollout", "lead_track_points",
     "launch", "follow", "progress", "status", "stop", "HubMirror", "session_started",
     "area_weights", "TRACKED_HEADS", "STORM_STATE_FEATURES", "storm_feature_bank", "storm_scorecard",
-    "storm_state_vector", "train_storm_heads",
+    "storm_state_vector", "train_storm_heads", "calibration_report", "fit_feature_monitor",
+    "fit_probability_calibration", "stormsat",
     "STORM_ENVIRONMENT_FEATURES", "TRACK_MEMBERS", "BETA_DRIFT_MS", "advect", "describe_environment",
     "extrapolation_track", "steering_track", "storm_environment", "consensus_track", "describe_consensus",
     "fit_track_consensus", "track_members",

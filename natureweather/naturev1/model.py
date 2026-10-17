@@ -91,12 +91,14 @@ TRACKED_HEADS = (
     "field", "weather_type", "track", "landfall", "landfall_timing", "intensity", "ri", "ri_delta",
     "ri_onset", "eyewall_peak", "eyewall_rmw", "wind_radii", "enso", "state",
     "analysis_encoder", "satellite_encoder", "environment_encoder", "storm_position", "storm_state",
-    "storm_environment", "storm_far", "track_prior",
+    "storm_environment", "storm_far", "track_prior", "storm_satellite",
 )
 #: Parameters added after 0.7. A checkpoint written before them loads with these freshly initialised --
 #: all of them start as exact no-ops, so the loaded model behaves exactly as it did when it was saved.
 OPTIONAL_STATE = ("head_steps", "storm_position.", "storm_state_embed.", "state_head.", "noise_proj.",
-                  "storm_environment_embed.", "storm_far_pool.", "track_consensus")
+                  "storm_environment_embed.", "storm_far_pool.", "track_consensus", "storm_satellite.",
+                  "ri_calibration", "landfall_calibration", "feature_mean", "feature_std", "feature_threshold",
+                  "feature_norm_bounds", "state_tendency")
 
 #: The storm's physical environment, computed from the state by :func:`naturev1.storm_environment`:
 #: the SHIPS predictors. Deep-layer steering and 200-850 hPa shear over the 200-800 km ring around the
@@ -372,6 +374,83 @@ class RapidIntensificationHead(nn.Module):
         }
 
 
+class StormSatelliteEncoder(nn.Module):
+    """
+    What a forecaster reads in storm-centred infrared, as a vector the storm heads can add.
+
+    Input is two storm-centred patches of 11-micron brightness temperature (see :mod:`naturev1.stormsat`):
+    now, and six hours earlier. Two views of them go in:
+
+    * a small convolutional network over the current image, its six-hour change and where data exists --
+      spiral bands, a clearing eye, a central dense overcast, a convective burst;
+    * a fixed radial profile, the Dvorak technique's own measurements: mean temperature and the share of
+      cloud colder than -60 C in 25 km rings out to 300 km, and the eye's contrast with the eyewall.
+
+    The output layer starts at exactly zero, so adding this branch to a trained model changes nothing
+    until it is trained -- and a sample with no image always contributes nothing.
+    """
+
+    RING_KM = 25.0
+    RINGS = 12
+
+    def __init__(self, hidden: int, pixels: int = 256, degrees: float = 0.07) -> None:
+        super().__init__()
+        self.pixels = pixels
+        widths = (32, 64, 128, 128, 192)
+        layers, channels = [], 3
+        for index, width in enumerate(widths):
+            kernel = 5 if index == 0 else 3
+            layers += [nn.Conv2d(channels, width, kernel, stride=2, padding=kernel // 2),
+                       nn.GroupNorm(8, width), nn.GELU()]
+            channels = width
+        self.cnn = nn.Sequential(*layers, nn.AdaptiveAvgPool2d(1), nn.Flatten())
+        profile = 2 * self.RINGS + 1 + 2
+        self.mlp = nn.Sequential(nn.Linear(widths[-1] + profile, hidden), nn.GELU())
+        self.project = nn.Linear(hidden, hidden, bias=False)
+        # Distance of every pixel from the centre, in km (8 km per pixel at 0.07 degrees), for the rings.
+        offsets = (torch.arange(pixels, dtype=torch.float32) - (pixels - 1) / 2.0) * degrees * 111.2
+        radius = torch.sqrt(offsets.view(-1, 1) ** 2 + offsets.view(1, -1) ** 2)
+        rings = torch.stack([(radius >= i * self.RING_KM) & (radius < (i + 1) * self.RING_KM)
+                             for i in range(self.RINGS)]).float()
+        self.register_buffer("rings", rings, persistent=False)
+        self.register_buffer("eye", (radius < 20.0).float(), persistent=False)
+
+    def forward(self, codes: torch.Tensor, available: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            codes: ``(B, 2, P, P)`` uint8 brightness temperatures from :func:`naturev1.stormsat.encode_bt`
+                -- now, and six hours earlier.
+            available: ``(B, 2)`` whether each image exists.
+
+        Returns:
+            ``(B, hidden)``, exactly zero for samples with no current image.
+        """
+        from .stormsat import decode_bt
+
+        kelvin = decode_bt(codes.to(self.rings.device))                       # (B, 2, P, P), NaN missing
+        available = available.to(kelvin.device).bool()
+        now, before = kelvin[:, 0], kelvin[:, 1]
+        valid_now = torch.isfinite(now)
+        both = valid_now & torch.isfinite(before) & available[:, 1].view(-1, 1, 1)
+        image = torch.nan_to_num((now - 250.0) / 30.0)
+        change = torch.where(both, (now - before) / 10.0, torch.zeros_like(now))
+        x = torch.stack([image, torch.nan_to_num(change), valid_now.float()], 1).to(self.rings.dtype)
+        learned = self.cnn(x)
+
+        weight = self.rings.unsqueeze(0) * valid_now.unsqueeze(1).to(self.rings.dtype)   # (B, R, P, P)
+        count = weight.sum((-1, -2)).clamp_min(1.0)
+        filled = torch.nan_to_num(now).unsqueeze(1)
+        ring_mean = (weight * filled).sum((-1, -2)) / count
+        ring_cold = (weight * (filled < 213.15).to(weight.dtype)).sum((-1, -2)) / count
+        eye = self.eye * valid_now.to(self.eye.dtype)
+        eye_temp = (eye * torch.nan_to_num(now)).sum((-1, -2)) / eye.sum((-1, -2)).clamp_min(1.0)
+        contrast = (eye_temp - ring_mean[:, 1:3].mean(-1)) / 30.0
+        profile = torch.cat([(ring_mean - 250.0) / 30.0, ring_cold, contrast.unsqueeze(-1),
+                             available.to(ring_mean.dtype)], -1)
+        out = self.project(self.mlp(torch.cat([learned, profile], -1)))
+        return out * available[:, :1].to(out.dtype)
+
+
 class NatureV1(GridBound, GradientCheckpointing, nn.Module):
     """
     The model. Reads any number of geolocated sources, forecasts fields and storm behaviour with
@@ -453,6 +532,22 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         # Training steps each output has actually received -- saved with the weights, so a forecast
         # built from a checkpoint knows which of its heads were ever trained.
         self.register_buffer("head_steps", torch.zeros(len(TRACKED_HEADS), dtype=torch.int64))
+        # Storm-centred infrared (see StormSatelliteEncoder). Registered after every other parameter, so
+        # the backbone fingerprint that keys the cached storm feature banks does not change.
+        self.storm_satellite = StormSatelliteEncoder(hidden)
+        # Probability calibration, fitted on held-out seasons after training: logit -> a * logit + b, per
+        # landfall lead and per rapid-intensification threshold. (1, 0) is no change.
+        self.register_buffer("landfall_calibration", torch.tensor([[1.0, 0.0]]).repeat(leads, 1))
+        self.register_buffer("ri_calibration", torch.tensor([[1.0, 0.0]]).repeat(len(RI_BASE_RATES), 1))
+        # What storm features looked like in training, to flag inputs unlike anything it learned from.
+        # Unfitted while the threshold is zero.
+        self.register_buffer("feature_mean", torch.zeros(hidden))
+        self.register_buffer("feature_std", torch.ones(hidden))
+        self.register_buffer("feature_threshold", torch.zeros(()))
+        self.register_buffer("feature_norm_bounds", torch.tensor([0.0, float("inf")]))
+        # Per-channel six-hour tendency spread the full-state rollout was trained with (StateStepper),
+        # shipped with the weights so a rollout can be reproduced. Zero until recorded.
+        self.register_buffer("state_tendency", torch.zeros(config.analysis_channels))
 
         self.apply(self._init)
         self._anchor_uncertainty()
@@ -495,6 +590,7 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
             self.storm_state_embed.weight.zero_()
             self.storm_environment_embed.weight.zero_()
             self.storm_far_pool.weight.zero_()
+            self.storm_satellite.project.weight.zero_()
 
     def _anchor_uncertainty(self) -> None:
         """
@@ -618,6 +714,7 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         storm_state: torch.Tensor | None = None,
         storm_environment: torch.Tensor | None = None,
         track_prior: torch.Tensor | None = None,
+        storm_satellite: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Args:
@@ -641,6 +738,8 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
             track_prior: ``(B, leads, 2)`` a physics track in degrees, from
                 :func:`naturev1.steering_track`; the track head then predicts the residual from it.
                 Pass it only if the head was trained with one -- see :meth:`uses_track_prior`.
+            storm_satellite: ``(codes, available)`` storm-centred infrared from
+                :mod:`naturev1.stormsat` -- ``(B, 2, P, P)`` uint8 and ``(B, 2)`` bool. Optional.
 
         Returns:
             A dict of forecasts. Gridded entries are ``(B, P, leads, ...)``; storm-scale entries are
@@ -673,13 +772,14 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         # reads the whole planet; the storm heads read around the storm when told where it is.
         area = self.latent_grid.weights.to(current.dtype).view(1, -1, 1)
         global_summary = self.summary_pool(self.summary_norm((current * area).sum(1) / area.sum()))
-        if storm_center is None and storm_state is None and storm_environment is None and track_prior is None:
+        if (storm_center is None and storm_state is None and storm_environment is None and track_prior is None
+                and storm_satellite is None):
             storm = self._storm_outputs(global_summary)
         else:
             far = None if storm_center is None else self.storm_pool(
                 current, storm_center, 2.0 * self.config.storm_pool_radius_km)
             storm = self.storm_heads(self.storm_pool(current, storm_center), storm_center, storm_state,
-                                     storm_environment, track_prior, far)
+                                     storm_environment, track_prior, far, storm_satellite)
         enso = self.enso_head(global_summary)
 
         state = {}
@@ -737,13 +837,27 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
     def storm_heads(self, pooled: torch.Tensor, storm_center: torch.Tensor | None = None,
                     storm_state: torch.Tensor | None = None, storm_environment: torch.Tensor | None = None,
                     track_prior: torch.Tensor | None = None, pooled_far: torch.Tensor | None = None,
+                    storm_satellite: tuple[torch.Tensor, torch.Tensor] | None = None,
                     ) -> dict[str, torch.Tensor]:
         """
         Every storm output, from pooled features plus where the storm is, how strong it is, what the
-        atmosphere around it is doing (``storm_environment``), the wider pool (``pooled_far``), and --
-        when a ``track_prior`` is given -- as a residual on that physics track, which is returned too.
+        atmosphere around it is doing (``storm_environment``), the wider pool (``pooled_far``), what it
+        looks like in infrared (``storm_satellite``), and -- when a ``track_prior`` is given -- as a
+        residual on that physics track, which is returned too.
+
+        Once fitted, the landfall and rapid-intensification logits come back calibrated, and
+        ``feature_score`` says how far the pooled features sit from what training looked like.
         """
         dtype = pooled.dtype
+        score = None
+        if float(self.feature_threshold) > 0:
+            features = pooled.to(self.feature_mean.dtype)
+            score = ((features - self.feature_mean) / self.feature_std.clamp_min(1e-6)).pow(2).mean(-1)
+            # A vector of the right shape but the wrong size (all zeros, say) can sit near the mean in every
+            # dimension; its length cannot.
+            norm = features.norm(dim=-1)
+            outside = (norm < self.feature_norm_bounds[0]) | (norm > self.feature_norm_bounds[1])
+            score = torch.where(outside, torch.full_like(score, float("inf")), score)
         if pooled_far is not None:
             pooled = pooled + self.storm_far_pool(pooled_far.to(pooled.device, dtype))
         if storm_center is not None:
@@ -757,7 +871,16 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         if storm_environment is not None:
             pooled = pooled + self.storm_environment_embed(
                 torch.nan_to_num(storm_environment.to(pooled.device, dtype)))
+        if storm_satellite is not None:
+            codes, available = storm_satellite
+            pooled = pooled + self.storm_satellite(codes.to(pooled.device), available.to(pooled.device)).to(dtype)
         outputs = self._storm_outputs(self.summary_pool(self.summary_norm(pooled)))
+        landfall, ri = self.landfall_calibration.to(dtype), self.ri_calibration.to(dtype)
+        outputs["landfall_logit"] = outputs["landfall_logit"] * landfall[:, 0] + landfall[:, 1]
+        outputs["ri_logits"] = outputs["ri_logits"] * ri[:, 0] + ri[:, 1]
+        if score is not None:
+            outputs["feature_score"] = score
+            outputs["feature_threshold"] = self.feature_threshold.expand_as(score)
         if track_prior is not None:
             prior = torch.nan_to_num(track_prior.to(outputs["displacement"].device, outputs["displacement"].dtype))
             outputs["displacement"] = outputs["displacement"] + prior.unsqueeze(1)    # every scenario
@@ -828,7 +951,8 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
             for key, name in (("analysis", "analysis_encoder"), ("satellite", "satellite_encoder"),
                               ("environment", "environment_encoder"), ("storm_center", "storm_position"),
                               ("storm_state", "storm_state"), ("storm_environment", "storm_environment"),
-                              ("pooled_far", "storm_far"), ("track_prior", "track_prior")):
+                              ("pooled_far", "storm_far"), ("track_prior", "track_prior"),
+                              ("storm_satellite", "storm_satellite")):
                 if batch.get(key) is not None:
                     touched.append(name)
             modules.update({"analysis_encoder": self.analysis_encoder,
@@ -840,7 +964,8 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
                             "storm_far": self.storm_far_pool,
                             # The prior has no parameters of its own: it is "trained" when the track
                             # head learns on top of it, which is what the record needs to say.
-                            "track_prior": self.track_head})
+                            "track_prior": self.track_head,
+                            "storm_satellite": self.storm_satellite})
         with torch.no_grad():
             for name in set(touched):
                 if any(p.requires_grad for p in modules[name].parameters()):
@@ -858,6 +983,11 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         0.7 checkpoint loads into a 0.8 model and behaves exactly as it did. Anything else missing, any
         unexpected key and any shape mismatch is still an error.
         """
+        steps = state_dict.get("head_steps")
+        if steps is not None and steps.numel() < len(TRACKED_HEADS):
+            # Written before some outputs existed: those were never trained, which is what zero says.
+            state_dict = dict(state_dict)
+            state_dict["head_steps"] = torch.cat([steps, steps.new_zeros(len(TRACKED_HEADS) - steps.numel())])
         result = super().load_state_dict(state_dict, strict=False, assign=assign)
         missing = [key for key in result.missing_keys if not key.startswith(OPTIONAL_STATE)]
         fresh = [key for key in result.missing_keys if key.startswith(OPTIONAL_STATE)]
@@ -882,7 +1012,8 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         """
         for module in (self.track_head, self.eyewall_head, self.ri_head, self.landfall_head,
                        self.intensity_head, self.summary_pool, self.summary_norm, self.storm_position,
-                       self.storm_state_embed, self.storm_environment_embed, self.storm_far_pool):
+                       self.storm_state_embed, self.storm_environment_embed, self.storm_far_pool,
+                       self.storm_satellite):
             yield from module.parameters()
 
     def freeze_backbone(self, frozen: bool = True) -> tuple[int, int]:

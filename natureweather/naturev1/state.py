@@ -759,6 +759,7 @@ def train_state_rollout(
     scaler = torch.amp.GradScaler(device.type, enabled=precision == "fp16" and device.type == "cuda")
     model.train()
     started = time.time() - state.wall_seconds
+    first_step = state.step
     last_log = [time.time(), state.step]
     try:
         while state.step < max_steps:
@@ -804,9 +805,9 @@ def train_state_rollout(
             state.epoch += 1
     finally:
         save(force=True)
-        if manager is not None and hub_repo:
+        if manager is not None and hub_repo and state.step > first_step:
             # Interrupted, the session may be ending; finished, the timer would leave the Hub a few steps
-            # short. Either way the checkpoint just written goes to the Hub now.
+            # short. Either way the checkpoint just written goes to the Hub now -- if this call trained.
             if manager.push_now(state):
                 print(f"[state] final checkpoint (step {state.step:,}) pushed to the Hub", flush=True)
     print(f"[state] finished at step {state.step:,} after {state.wall_seconds / 60:.1f} min", flush=True)

@@ -5,7 +5,7 @@ if __name__ not in ("__main__", "__naturev1_pipeline__"):
     raise ImportError("naturev1._pipeline is the training pipeline itself; start it with naturev1.launch()")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
-#  NatureV1 0.10.0 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
+#  NatureV1 0.11.0 — the whole thing in one cell. Pure Python: marimo, Colab, Jupyter or a plain script.
 #
 #  Paste and run. It installs what it needs, stages the data, builds the 89M-parameter model, trains it
 #  in stages, scores itself against persistence and climatology, and only publishes if it earned it.
@@ -35,6 +35,15 @@ if __name__ not in ("__main__", "__naturev1_pipeline__"):
 #  wider 1000 km pool. The track head predicts the residual from a physics-only steering track, and the
 #  forecast is a multi-model consensus of learned track, steering track and extrapolation, weighted per
 #  lead on held-out seasons. The scorecard shows every member, so you can see which one earns its place.
+#
+#  0.11: stage three -- what the satellite sees. Storm-centred infrared (HURSAT-B1 to 2016, GridSat-B1
+#  after, GOES band 13 live) feeds a small branch into the hurricane heads, aimed at intensity, which a
+#  1.5-degree reanalysis cannot see. It is fine-tuned with the backbone frozen and can never end worse on
+#  held-out storms than the model it started from. Then, from the red team: landfall and rapid-
+#  intensification probabilities are calibrated on held-out seasons, an input monitor marks forecasts
+#  from inputs unlike training as untrustworthy, the forecast can no longer state impossible structure,
+#  and the rollout's tendency statistics ship with the weights. Stages already trained are loaded, not
+#  redone: a finished 0.10 run goes straight to stage three.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 
 BACKGROUND    = True      # supervised background run: survives disconnects, restarts on crash or stall
@@ -45,6 +54,9 @@ MIRROR        = True      # mirror staged data, checkpoints and banks to HF_REPO
 RUN_PRETRAIN  = True      # stage one: every channel at every lead, on ERA5 reanalysis
 RUN_ROLLOUT   = True      # stage 1b: the whole atmosphere rolled forward 12 steps, CRPS ensemble
 RUN_STORMS    = True      # stage two: hurricane heads on HURDAT2, backbone frozen
+RETRAIN_STORMS = False    # stage two: train the heads again even if a stage-two checkpoint exists
+RUN_SATELLITE = True      # stage three: storm-centred infrared satellite, then calibration and the monitor
+RETRAIN_SATELLITE = False # stage three: train again even if a stage-three checkpoint exists
 RUN_SCORE     = True      # WeatherBench-style scorecards against persistence and climatology
 RUN_HINDCAST  = True      # forecast a held-out hurricane from its real analysis; compare with truth
 RUN_PUBLISH   = False     # push to the Hub -- only if it beats persistence somewhere
@@ -116,7 +128,10 @@ def _halt(message, kind="danger"):
     raise SystemExit(message)
 
 
-_NEEDED = {"naturev1": ("naturev1[all]>=0.10.0", (0, 10, 0)), "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
+# 0.11 is installed from the project's GitHub branch until it is on PyPI.
+_NEEDED = {"naturev1": ("naturev1[all] @ git+https://github.com/Wisk-inc/transformers"
+                        "@claude/linear-context-architecture-a35c6h#subdirectory=natureweather", (0, 11, 0)),
+           "ihelix": ("ihelix>=0.5.1", (0, 5, 1))}
 
 
 def _version(module):
@@ -173,7 +188,8 @@ if BACKGROUND and not os.environ.get("NATUREV1_BACKGROUND_CHILD"):
     import naturev1 as _naturev1
 
     _SETTINGS = {name: globals()[name] for name in (
-        "RUN_PRETRAIN", "RUN_ROLLOUT", "RUN_STORMS", "RUN_SCORE", "RUN_HINDCAST", "RUN_PUBLISH",
+        "RUN_PRETRAIN", "RUN_ROLLOUT", "RUN_STORMS", "RETRAIN_STORMS", "RUN_SATELLITE", "RETRAIN_SATELLITE",
+        "RUN_SCORE", "RUN_HINDCAST", "RUN_PUBLISH",
         "RUN_FORECAST", "RUN_WATCHER", "STAGE_YEARS", "VAL_YEARS", "EPOCHS", "BATCH", "MAX_BATCH", "WORKERS",
         "ROLLOUT_STEPS", "ROLLOUT_TRAIN", "MEMBERS", "STORM_FIRST_SEASON", "HINDCAST", "STORM", "CITY",
         "HF_REPO", "HF_TOKEN", "DATA_DIR", "BACKUP_DIR", "MIRROR")}
@@ -220,7 +236,11 @@ from naturev1 import (HEADLINE_STATE_FIELDS, CachedERA5, CheckpointManager, ERA5
                       storm_feature_bank, storm_scorecard, storm_state_vector, train_state_rollout,
                       train_storm_heads, training_plan, upper_air_report, watch)
 from naturev1.besttrack import download
+from naturev1.checkpoint import TrainingState
 from naturev1.era5 import _target_index
+from naturev1.storms import calibration_report, fit_feature_monitor, fit_probability_calibration
+from naturev1.stormsat import (IBTRACS_NA_URL, GridSatArchive, HursatArchive, describe_patch, encode_bt,
+                               ibtracs_atcf_map, satellite_bank)
 from naturev1.safeio import atomic_write_text, read_json
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -432,10 +452,8 @@ def paired(which):
     return starts, targets, report
 
 
-if RUN_STORMS:
-    if not (RUN_PRETRAIN or RUN_ROLLOUT) and restore("rollout", "stage1") is None:
-        _halt("no pretrained backbone found. Freezing an untrained one would fine-tune the storm "
-              "heads on noise -- set RUN_PRETRAIN = True.")
+def storm_banks():
+    """The frozen backbone's features for every storm sample: built once, cached, mirrored."""
     (tr_starts, tr_targets, tr_report), (va_starts, va_targets, va_report) = paired("train"), paired("validation")
     print(f"\n{format_pairing(tr_report)}")
     print(f"validation: {va_report['paired']:,} samples from {va_report['storms']} unseen storms "
@@ -444,23 +462,84 @@ if RUN_STORMS:
           "(cached; resumes if interrupted):")
     for _name in ("storm_bank_train", "storm_bank_val"):
         mirror.pull(f"{CKPT_DIR}/{_name}.pt", f"checkpoints/{_name}.pt")   # rebuilt anyway if the backbone changed
-    bank_train = storm_feature_bank(model, ERA5, stream, tr_starts, tr_targets, SRC,
-                                    cache=f"{CKPT_DIR}/storm_bank_train.pt", precision=R["precision"])
-    bank_val = storm_feature_bank(model, ERA5, stream, va_starts, va_targets, SRC,
-                                  cache=f"{CKPT_DIR}/storm_bank_val.pt", precision=R["precision"])
+    train = storm_feature_bank(model, ERA5, stream, tr_starts, tr_targets, SRC,
+                               cache=f"{CKPT_DIR}/storm_bank_train.pt", precision=R["precision"])
+    val = storm_feature_bank(model, ERA5, stream, va_starts, va_targets, SRC,
+                             cache=f"{CKPT_DIR}/storm_bank_val.pt", precision=R["precision"])
     for _name in ("storm_bank_train", "storm_bank_val"):
         mirror.push(f"{CKPT_DIR}/{_name}.pt", f"checkpoints/{_name}.pt")
-    history = train_storm_heads(model, bank_train, bank_val, epochs=300,
-                                patience=25, checkpoint_dir=f"{CKPT_DIR}/stage2", hub_repo=HF_REPO)
-    best = min(history, key=lambda h: h["val"])
-    banner("SCOREBOARD — is it generalising, or memorising?")
-    print(f"best epoch {best['epoch']}: held-out {best['val']:.4f}  training {best['train']:.4f}  "
-          f"gap {best['val'] - best['train']:+.4f}   (a large positive gap = memorised the training storms)")
+    return train, val, tr_targets, va_targets
+
+
+bank_train = bank_val = None
+if RUN_STORMS:
+    # A finished stage two is loaded *before* the banks are built: its backbone is the one they were
+    # built with, so they are reused rather than rebuilt from whatever checkpoint the Hub has for 1b.
+    resumed = None if RETRAIN_STORMS else restore("stage2")
+    if resumed is None and not (RUN_PRETRAIN or RUN_ROLLOUT) and restore("rollout", "stage1") is None:
+        _halt("no pretrained backbone found. Freezing an untrained one would fine-tune the storm "
+              "heads on noise -- set RUN_PRETRAIN = True.")
+    bank_train, bank_val, tr_targets, va_targets = storm_banks()
+    if resumed is not None:
+        print("\nstage two is already trained: its checkpoint is loaded (RETRAIN_STORMS = True trains it again)")
+    else:
+        history = train_storm_heads(model, bank_train, bank_val, epochs=300,
+                                    patience=25, checkpoint_dir=f"{CKPT_DIR}/stage2", hub_repo=HF_REPO)
+        best = min(history, key=lambda h: h["val"])
+        banner("SCOREBOARD — is it generalising, or memorising?")
+        print(f"best epoch {best['epoch']}: held-out {best['val']:.4f}  training {best['train']:.4f}  "
+              f"gap {best['val'] - best['train']:+.4f}   (a large positive gap = memorised the training storms)")
     print(f"\nheld-out storms, seasons never trained on:\n{storm_scorecard(model, bank_val, CFG.lead_times_hours)}")
 
+# ═══ 8b ═══ stage three — what the satellite sees ══════════════════════════════════════════════════
+if RUN_SATELLITE:
+    banner("STAGE THREE — storm-centred infrared (HURSAT-B1 to 2016, GridSat-B1 after)")
+    loaded = None if RETRAIN_SATELLITE else restore("stage3")
+    if loaded is None and not RUN_STORMS and restore("stage2") is None:
+        _halt("no trained hurricane heads to build on -- run with RUN_STORMS = True first")
+    if bank_train is None:
+        bank_train, bank_val, tr_targets, va_targets = storm_banks()
+    print("\nstorm-centred infrared for every sample, now and six hours earlier (cached; mirrored):")
+    hursat = HursatArchive(os.path.join(DATA_DIR, "hursat"),
+                           ibtracs_atcf_map(download(IBTRACS_NA_URL, os.path.join(DATA_DIR, "ibtracs.NA.csv"))))
+    gridsat = GridSatArchive()
+    for _name in ("satellite_bank_train", "satellite_bank_val"):
+        mirror.pull(f"{CKPT_DIR}/{_name}.pt", f"checkpoints/{_name}.pt")
+    sat_train = satellite_bank(tr_targets, f"{CKPT_DIR}/satellite_bank_train.pt", hursat, gridsat)
+    sat_val = satellite_bank(va_targets, f"{CKPT_DIR}/satellite_bank_val.pt", hursat, gridsat)
+    for _name in ("satellite_bank_train", "satellite_bank_val"):
+        mirror.push(f"{CKPT_DIR}/{_name}.pt", f"checkpoints/{_name}.pt")
+    shutil.rmtree(os.path.join(DATA_DIR, "hursat"), ignore_errors=True)    # the patches are kept; the archives are not
+    plain_val = dict(bank_val)
+    bank_train["satellite"], bank_val["satellite"] = sat_train, sat_val
+    coverage = float(sat_val["available"][:, 0].float().mean())
+    if loaded is not None:
+        print("\nstage three is already trained: its checkpoint is loaded (RETRAIN_SATELLITE = True trains it again)")
+    elif coverage < 0.3:
+        print(f"\nonly {coverage:.0%} of held-out samples have an image: too few to judge the satellite branch, "
+              "so it is not trained. Calibration and the input monitor still are.")
+    else:
+        history = train_storm_heads(model, bank_train, bank_val, epochs=80, batch_size=128, learning_rate=2e-4,
+                                    satellite_learning_rate=1e-3, augment=True, keep_if_no_better=True,
+                                    patience=15, log_every=5)
+    banner("CALIBRATION, INPUT MONITOR, ROLLOUT STATISTICS")
+    print("probabilities on held-out seasons, each season calibrated without itself:\n"
+          + calibration_report(model, bank_val))
+    fit_probability_calibration(model, bank_val)
+    print(f"\ninput monitor fitted on the training storms: limit {fit_feature_monitor(model, bank_train):.2f}")
+    model.state_tendency.copy_(stepper.tendency.to(model.state_tendency.device))
+    _stage3 = CheckpointManager(f"{CKPT_DIR}/stage3", repo_id=HF_REPO)
+    _stage3.save(model, None, state=TrainingState(step=int(model.trained_heads()["storm_satellite"])),
+                 config=model.config.to_dict(), force=True)
+    _stage3.push_now(TrainingState(step=int(model.trained_heads()["storm_satellite"])))
+    banner("SCOREBOARD — what the satellite adds, on held-out storms")
+    print(f"without satellite:\n{storm_scorecard(model, plain_val, CFG.lead_times_hours)}")
+    print(f"\nwith satellite ({coverage:.0%} of samples have an image):\n"
+          f"{storm_scorecard(model, bank_val, CFG.lead_times_hours)}")
+
 # ═══ 9 ═══ did it learn? scorecards against persistence and climatology ════════════════════════════
-if not (RUN_PRETRAIN or RUN_ROLLOUT or RUN_STORMS):
-    print(f"loaded: {restore('stage2', 'rollout', 'stage1') or 'nothing -- untrained'}")
+if not (RUN_PRETRAIN or RUN_ROLLOUT or RUN_STORMS or RUN_SATELLITE):
+    print(f"loaded: {restore('stage3', 'stage2', 'rollout', 'stage1') or 'nothing -- untrained'}")
 print(f"\ntraining record (steps per output; 0 = never trained, never shown as a forecast):\n"
       f"  {model.trained_heads()}")
 
@@ -522,12 +601,29 @@ if RUN_HINDCAST:
         environment = storm_environment(now, train_ds.variables, train_ds.normalizer, SRC, here)
         steer = steering_track(now, train_ds.variables, train_ds.normalizer, SRC, here, CFG.lead_times_hours)
         print(describe_environment(environment[0]))
+        # The satellite view at issue time and six hours earlier, if stage three has trained that branch.
+        seen = None
+        if model.trained_heads()["storm_satellite"] > 0:
+            from naturev1.stormsat import _earlier_position
+            earlier = _earlier_position(targets[choice])
+            when = np.datetime64(issued.replace(tzinfo=None), "m")
+            wanted = [(when, tuple(centre))] + ([earlier] if earlier is not None else [])
+            images = GridSatArchive().patches(wanted, progress=False)
+            if images[0] is not None:
+                codes = np.zeros((1, 2, *images[0].shape), np.uint8)
+                codes[0, 0] = encode_bt(images[0])
+                if len(images) > 1 and images[1] is not None:
+                    codes[0, 1] = encode_bt(images[1])
+                seen = (torch.from_numpy(codes).to(DEVICE),
+                        torch.tensor([[True, len(images) > 1 and images[1] is not None]], device=DEVICE))
+                print("satellite (GridSat-B1): " + describe_patch(images[0]))
         with torch.no_grad(), torch.autocast(DEVICE, dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
             out = model.eval()(analysis=window["analysis"][None].to(DEVICE), analysis_grid=SRC,
                                calendar=window["calendar"][None].to(DEVICE), output_grid=SRC,
                                storm_center=here, storm_state=target["storm_state"][None].to(DEVICE),
                                storm_environment=environment,
-                               track_prior=steer if model.uses_track_prior() else None)
+                               track_prior=steer if model.uses_track_prior() else None,
+                               storm_satellite=seen)
         out = {k: v.float().cpu() for k, v in out.items()}
         out.setdefault("track_prior", steer.float().cpu())
         # A second physics member: the storm carried by the atmosphere the model *forecasts*, step by

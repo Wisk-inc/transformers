@@ -531,14 +531,40 @@ def storm_feature_bank(
     return bank
 
 
-def _bank_loss(model, bank, index, device):
+def _satellite_batch(bank, index, device, augment: bool = False):
+    """
+    The storm-centred infrared for these samples, ``(codes, available)``, or None if the bank has none.
+
+    With ``augment``: a random quarter turn (rotation keeps a storm's spiral turning the right way; a
+    mirror image would not), a shift of up to three pixels (the best-track centre is uncertain by about
+    that much), and a brightness offset of up to 2 K (the spread between satellites and calibrations).
+    """
+    images = bank.get("satellite")
+    if images is None:
+        return None
+    codes = images["ir"][index].to(device)
+    available = images["available"][index].to(device)
+    if augment:
+        turns = int(torch.randint(0, 4, ()).item())
+        codes = torch.rot90(codes, turns, dims=(-2, -1))
+        shift = torch.randint(-3, 4, (2,)).tolist()
+        codes = torch.roll(codes, shifts=shift, dims=(-2, -1))
+        offset = torch.randint(-3, 4, (codes.shape[0], 1, 1, 1), device=device)
+        codes = torch.where(codes > 0, (codes.long() + offset).clamp(1, 255), 0).to(torch.uint8)
+    return codes, available
+
+
+def _bank_loss(model, bank, index, device, augment: bool = False):
     from .losses import total_loss
 
     batch = {key: value[index].to(device) for key, value in bank["targets"].items()}
     batch["pooled_far"] = bank["features_far"][index].to(device)
+    satellite = _satellite_batch(bank, index, device, augment)
     outputs = model.storm_heads(bank["features"][index].to(device), batch["storm_center"], batch["storm_state"],
-                                batch["storm_environment"], batch["track_prior"], batch["pooled_far"])
+                                batch["storm_environment"], batch["track_prior"], batch["pooled_far"], satellite)
     loss, parts = total_loss(outputs, batch, SURFACE_FIELDS)
+    if satellite is not None and bool(satellite[1][:, 0].any()):
+        batch["storm_satellite"] = satellite
     return loss, parts, batch
 
 
@@ -554,6 +580,9 @@ def train_storm_heads(
     checkpoint_dir: str | None = None,
     hub_repo: str | None = None,
     log_every: int = 10,
+    satellite_learning_rate: float | None = None,
+    augment: bool = False,
+    keep_if_no_better: bool = False,
 ) -> list[dict]:
     """
     Fit the storm heads on a feature bank, early-stopping on held-out seasons.
@@ -561,6 +590,10 @@ def train_storm_heads(
     The backbone is frozen (:meth:`NatureV1.freeze_backbone`), so only the heads -- about 0.12M
     parameters against 22k storm points -- ever see a best-track label. The weights from the epoch
     with the best held-out loss are the ones kept, not the last ones.
+
+    If the banks carry ``"satellite"`` (see :func:`naturev1.stormsat.satellite_bank`), the infrared
+    branch trains too, at ``satellite_learning_rate``. With ``keep_if_no_better`` the held-out loss of
+    the model as it arrives is the score to beat, so fine-tuning can never leave it worse.
 
     Returns:
         One entry per epoch: training and held-out loss.
@@ -570,9 +603,32 @@ def train_storm_heads(
     device = next(model.parameters()).device
     model.freeze_backbone(True)
     heads = list(model.storm_head_parameters())
-    optimizer = torch.optim.AdamW(heads, lr=learning_rate, weight_decay=weight_decay)
+    satellite = {id(p) for p in model.storm_satellite.parameters()}
+    groups = [{"params": [p for p in heads if id(p) not in satellite], "lr": learning_rate}]
+    if satellite_learning_rate is not None:
+        groups.append({"params": [p for p in heads if id(p) in satellite], "lr": satellite_learning_rate})
+    else:
+        groups[0]["params"] = heads
+    optimizer = torch.optim.AdamW(groups, weight_decay=weight_decay)
+    # Calibration is fitted on the finished heads; training on calibrated logits would fit the wrong thing.
+    model.landfall_calibration[:] = torch.tensor([1.0, 0.0])
+    model.ri_calibration[:] = torch.tensor([1.0, 0.0])
     count = train_bank["features"].shape[0]
     best, best_state, since, history = math.inf, None, 0, []
+
+    def held_out() -> float:
+        model.eval()
+        with torch.no_grad():
+            total, size = 0.0, val_bank["features"].shape[0]
+            for start in range(0, size, 1024):
+                index = torch.arange(start, min(start + 1024, size))
+                total += float(_bank_loss(model, val_bank, index, device)[0]) * len(index)
+        return total / max(size, 1)
+
+    if keep_if_no_better and val_bank is not None:
+        best = held_out()
+        best_state = {name: value.detach().clone() for name, value in model.state_dict().items()}
+        print(f"[storms] held-out loss before fine-tuning {best:.4f} -- the score to beat", flush=True)
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -580,26 +636,20 @@ def train_storm_heads(
         running = 0.0
         for start in range(0, count, batch_size):
             index = order[start : start + batch_size]
-            loss, parts, batch = _bank_loss(model, train_bank, index, device)
+            loss, parts, batch = _bank_loss(model, train_bank, index, device, augment=augment)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(heads, 1.0)
             optimizer.step()
-            model.mark_trained(parts, {key: batch[key] for key in ("storm_center", "storm_state", "storm_environment",
-                                                                  "pooled_far", "track_prior")})
+            model.mark_trained(parts, {key: batch.get(key) for key in ("storm_center", "storm_state",
+                                                                      "storm_environment", "pooled_far",
+                                                                      "track_prior", "storm_satellite")})
             running += float(loss.detach()) * len(index)
         entry = {"epoch": epoch, "train": running / count}
         beat(f"storm heads epoch {epoch}")
 
         if val_bank is not None:
-            model.eval()
-            with torch.no_grad():
-                total = 0.0
-                size = val_bank["features"].shape[0]
-                for start in range(0, size, 4096):
-                    index = torch.arange(start, min(start + 4096, size))
-                    total += float(_bank_loss(model, val_bank, index, device)[0]) * len(index)
-            entry["val"] = total / max(size, 1)
+            entry["val"] = held_out()
             if entry["val"] < best - 1e-4:
                 best, since = entry["val"], 0
                 best_state = {name: value.detach().clone() for name, value in model.state_dict().items()}
@@ -619,6 +669,9 @@ def train_storm_heads(
         steps = model.head_steps.clone()
         model.load_state_dict(best_state)
         model.head_steps.copy_(steps)
+        if keep_if_no_better and history and min((h.get("val", math.inf) for h in history)) >= best:
+            print("[storms] fine-tuning never beat the model it started from on held-out storms; "
+                  "that model is kept unchanged", flush=True)
     if val_bank is not None:
         # The consensus weights are fitted on storms the heads never trained on; the scorecard then
         # judges them season by season on storms the *weights* were not fitted on either.
@@ -656,7 +709,8 @@ def _head_outputs(model, bank: dict, chunk: int = 4096) -> dict[str, torch.Tenso
         batch = {key: value[index].to(device) for key, value in bank["targets"].items()}
         prior = batch["track_prior"] if model.uses_track_prior() else None
         out = model.storm_heads(bank["features"][index].to(device), batch["storm_center"], batch["storm_state"],
-                                batch["storm_environment"], prior, bank["features_far"][index].to(device))
+                                batch["storm_environment"], prior, bank["features_far"][index].to(device),
+                                _satellite_batch(bank, index, device))
         outputs.append({k: v.float().cpu() for k, v in out.items()})
     return {key: torch.cat([o[key] for o in outputs]) for key in outputs[0]}
 
@@ -820,3 +874,131 @@ def storm_scorecard(model, bank: dict, lead_times_hours) -> str:
         lines.append("consensus weights in the checkpoint: "
                      + describe_consensus(model.track_consensus, lead_times_hours))
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------------------------------
+# Calibration and the input monitor, fitted after the heads are trained
+# --------------------------------------------------------------------------------------------------
+
+def _platt(logits: torch.Tensor, outcomes: torch.Tensor, steps: int = 200) -> tuple[float, float]:
+    """``(a, b)`` minimising the log loss of ``sigmoid(a * logit + b)``; ``a`` kept positive (ranking kept)."""
+    with torch.enable_grad():                       # callers may be inside no_grad (scorecards)
+        log_a = torch.zeros((), dtype=torch.float64, requires_grad=True)
+        b = torch.zeros((), dtype=torch.float64, requires_grad=True)
+        optimizer = torch.optim.LBFGS([log_a, b], lr=0.5, max_iter=steps)
+        logits, outcomes = logits.double().detach().cpu(), outcomes.double().detach().cpu()
+
+        def closure():
+            optimizer.zero_grad()
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(log_a.exp() * logits + b, outcomes)
+            loss.backward()
+            return loss
+
+        optimizer.step(closure)
+    return float(log_a.detach().exp()), float(b.detach())
+
+
+def _raw_logits(model, bank):
+    """Landfall and RI logits with the calibration switched off."""
+    saved = model.landfall_calibration.clone(), model.ri_calibration.clone()
+    model.landfall_calibration[:] = torch.tensor([1.0, 0.0])
+    model.ri_calibration[:] = torch.tensor([1.0, 0.0])
+    try:
+        out = _head_outputs(model, bank)
+    finally:
+        model.landfall_calibration.copy_(saved[0])
+        model.ri_calibration.copy_(saved[1])
+    return out["landfall_logit"], out["ri_logits"]
+
+
+def fit_probability_calibration(model, bank: dict, min_events: int = 5) -> str:
+    """
+    Fit the landfall and rapid-intensification calibration on held-out storms; returns a summary.
+
+    The red team found the RI head said 21% when 1% happened, and landfall 39% when 31% did. Both rank
+    storms well (AUC 0.82-0.86), so a monotone rescaling of each logit -- Platt scaling -- fixes the
+    probabilities without touching the ranking. A column with fewer than ``min_events`` outcomes keeps
+    no calibration rather than one fitted to noise.
+    """
+    landfall, ri = _raw_logits(model, bank)
+    t = bank["targets"]
+    lines = []
+    for column, (logits, target, mask, label, store) in enumerate(
+            [(landfall[:, l], t["landfall_target"][:, l], t["landfall_mask"][:, l], f"landfall +{h}h",
+              model.landfall_calibration[l]) for l, h in enumerate(model.config.lead_times_hours)]
+            + [(ri[:, j], t["ri_target"][:, j], t["ri_mask"][:, j], f"RI threshold {j}", model.ri_calibration[j])
+               for j in range(ri.shape[1])]):
+        keep = mask > 0
+        y = target[keep].float()
+        if int(y.sum()) < min_events or int((1 - y).sum()) < min_events:
+            store.copy_(torch.tensor([1.0, 0.0]))
+            continue
+        a, b = _platt(logits[keep], y)
+        store.copy_(torch.tensor([a, b]))
+        before = float(((torch.sigmoid(logits[keep]) - y) ** 2).mean())
+        after = float(((torch.sigmoid(a * logits[keep] + b) - y) ** 2).mean())
+        lines.append(f"{label}: Brier {before:.4f} -> {after:.4f}")
+    return "; ".join(lines)
+
+
+def calibration_report(model, bank: dict) -> str:
+    """
+    Reliability of landfall-by-72h and RI +30 kt, with the calibration fitted leave-one-season-out --
+    each season's probabilities come from a calibration that never saw that season.
+    """
+    landfall, ri = _raw_logits(model, bank)
+    t = bank["targets"]
+    seasons = t.get("season", torch.zeros(landfall.shape[0], dtype=torch.int64))
+    lines = []
+    lead = list(model.config.lead_times_hours).index(72) if 72 in model.config.lead_times_hours else -1
+    for label, logits, target, mask in (("landfall by 72 h", landfall[:, lead], t["landfall_target"][:, lead],
+                                         t["landfall_mask"][:, lead]),
+                                        ("RI +30 kt / 24 h", ri[:, 1], t["ri_target"][:, 1], t["ri_mask"][:, 1])):
+        keep = mask > 0
+        p_raw = torch.sigmoid(logits)
+        p_cal = p_raw.clone()
+        for season in seasons[keep].unique().tolist():
+            fit = keep & (seasons != season)
+            apply = keep & (seasons == season)
+            y = target[fit].float()
+            if int(y.sum()) < 5 or int((1 - y).sum()) < 5:
+                continue
+            a, b = _platt(logits[fit], y)
+            p_cal[apply] = torch.sigmoid(a * logits[apply] + b)
+        y = target[keep].float()
+        base = float(((y.mean() - y) ** 2).mean()) if y.numel() else 0.0
+        if base == 0.0:
+            lines.append(f"{label}: nothing to score -- every held-out sample has the same outcome")
+            continue
+        raw, cal = float(((p_raw[keep] - y) ** 2).mean()), float(((p_cal[keep] - y) ** 2).mean())
+        bins = []
+        for low, high in ((0, 0.1), (0.1, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 1.01)):
+            sel = (p_cal[keep] >= low) & (p_cal[keep] < high)
+            if int(sel.sum()) >= 5:
+                bins.append(f"said {float(p_cal[keep][sel].mean()):.0%} got {float(y[sel].mean()):.0%}")
+        lines.append(f"{label}: Brier skill vs base rate {1 - raw / base:+.0%} raw, {1 - cal / base:+.0%} calibrated"
+                     f" (leave-one-season-out); " + ", ".join(bins))
+    return "\n".join(lines)
+
+
+@torch.no_grad()
+def fit_feature_monitor(model, bank: dict, quantile: float = 0.999, margin: float = 1.5) -> float:
+    """
+    Learn what the pooled storm features look like in training, so unlike inputs can be flagged.
+
+    The red team fed random noise in place of the backbone features and got a normal-looking forecast
+    that passed every check. This stores the per-dimension mean and spread of the training features; a
+    forecast whose mean squared z-score exceeds ``margin`` times the training ``quantile`` is marked
+    untrustworthy by :func:`naturev1.build_forecast`. Returns the threshold.
+    """
+    features = bank["features"].double()
+    mean, std = features.mean(0), features.std(0).clamp_min(1e-6)
+    scores = ((features - mean) / std).pow(2).mean(-1)
+    threshold = float(scores.quantile(quantile)) * margin
+    norms = features.norm(dim=-1)
+    model.feature_mean.copy_(mean.to(model.feature_mean.dtype))
+    model.feature_std.copy_(std.to(model.feature_std.dtype))
+    model.feature_threshold.fill_(threshold)
+    model.feature_norm_bounds.copy_(torch.tensor([float(norms.quantile(1 - quantile)) / margin,
+                                                  float(norms.quantile(quantile)) * margin]))
+    return threshold

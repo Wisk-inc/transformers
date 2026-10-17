@@ -87,7 +87,9 @@ def decode_track(
                     "cone_semi_major_deg": round(major, 3),
                     "cone_semi_minor_deg": round(minor, 3),
                     "cone_bearing_deg": round(bearing, 1),
-                    "cone_radius_km_68": round(major * 111.0, 1),
+                    # One standard deviation of a 2-D Gaussian holds 39% of it, not the 68% it holds in
+                    # one dimension; 2.448 standard deviations hold 95%.
+                    "cone_radius_km_39": round(major * 111.0, 1),
                     "cone_radius_km_95": round(major * 111.0 * 2.448, 1),
                 }
             )
@@ -95,6 +97,50 @@ def decode_track(
             {"rank": rank + 1, "probability": round(float(probabilities[mode]), 4), "track": points}
         )
     return scenarios
+
+
+def decode_track_cone(
+    outputs: dict,
+    origin_lat: float,
+    origin_lon: float,
+    lead_times_hours: tuple[int, ...],
+    issued: dt.datetime,
+    batch_index: int = 0,
+    samples: int = 4000,
+) -> list[dict]:
+    """
+    The cone of uncertainty from the *whole* scenario mixture, not from one scenario.
+
+    One scenario's ellipse is over-confident by construction -- the other scenarios carry the rest of
+    the probability, and on held-out storms a single "95%" ellipse held the truth only 60-87% of the
+    time. This draws ``samples`` positions from the full mixture and reports, per lead, the radius
+    around the mixture's centre that holds 50% and 90% of them. On held-out storms the mixture's 90%
+    region held the truth 87-92% of the time.
+    """
+    generator = torch.Generator().manual_seed(0)
+    weights = outputs["mode_logits"][batch_index].softmax(-1).float().cpu()
+    mean = outputs["displacement"][batch_index].float().cpu()              # (M, L, 2)
+    scale = outputs["log_scale"][batch_index].float().cpu().exp()
+    rho = outputs["correlation"][batch_index].float().cpu().clamp(-0.99, 0.99)
+    pick = torch.multinomial(weights, samples, replacement=True, generator=generator)
+    first, second = torch.randn(samples, mean.shape[1], generator=generator), torch.randn(
+        samples, mean.shape[1], generator=generator)
+    r = rho[pick]
+    d_lat = mean[pick, :, 0] + scale[pick, :, 0] * first
+    d_lon = mean[pick, :, 1] + scale[pick, :, 1] * (r * first + (1 - r**2).sqrt() * second)
+    centre = (weights.view(-1, 1, 1) * mean).sum(0)                         # (L, 2)
+    rows = []
+    for lead, hours in enumerate(lead_times_hours):
+        latitude = origin_lat + float(centre[lead, 0])
+        shrink = max(math.cos(math.radians(latitude)), 1e-3)
+        km = 111.0 * torch.sqrt((d_lat[:, lead] - centre[lead, 0]) ** 2
+                                + ((d_lon[:, lead] - centre[lead, 1]) * shrink) ** 2)
+        rows.append({"lead_hours": hours, "valid_time": (issued + dt.timedelta(hours=hours)).isoformat(),
+                     "latitude": round(latitude, 3),
+                     "longitude": round((origin_lon + float(centre[lead, 1]) + 180.0) % 360.0 - 180.0, 3),
+                     "radius_km_50": round(float(km.quantile(0.5)), 1),
+                     "radius_km_90": round(float(km.quantile(0.9)), 1)})
+    return rows
 
 
 def decode_consensus(
@@ -152,7 +198,9 @@ def decode_landfall(
     trained: dict | None = None,
 ) -> dict:
     """Landfall probability per lead time, plus the window it is most likely to happen in."""
-    probability = outputs["landfall_logit"][batch_index].sigmoid()
+    # "Landfall by this lead" can only grow with the lead. The head does not always say so (the red team
+    # found it falling in a fifth of forecasts), so the running maximum is reported.
+    probability = torch.cummax(outputs["landfall_logit"][batch_index].sigmoid(), dim=0).values
     spread = outputs["landfall_time_log_var"][batch_index].mul(0.5).exp()
     # No loss has ever supervised the timing spread, so without evidence of training it is left out
     # rather than printed as if it meant something.
@@ -223,7 +271,12 @@ def decode_eyewall(
     peak_sigma = outputs["eyewall_peak_wind_log_var"][batch_index].mul(0.5).exp()
     rmw = outputs["eyewall_rmw_nmi"][batch_index]
     rmw_sigma = outputs["eyewall_rmw_log_var"][batch_index].mul(0.5).exp()
-    radii = outputs["wind_radii_nmi"][batch_index]
+    # Stronger winds reach less far: the 50 kt radius cannot exceed the 34 kt one, nor 64 kt the 50 kt one,
+    # and the radius of maximum wind sits inside the gale radius. The heads are trained separately and
+    # broke these in about a fifth of held-out forecasts, so the structure is made consistent here.
+    radii = torch.cummin(outputs["wind_radii_nmi"][batch_index].clamp_min(0.0), dim=1).values   # (L, 3, 4)
+    gale = radii[:, 0].amax(-1)
+    rmw = torch.where(gale > 0, torch.minimum(rmw, gale), rmw)
 
     entries = []
     for index, hours in enumerate(lead_times_hours):
@@ -447,7 +500,13 @@ def build_forecast(
                              "noise shaped like a forecast. Train on that input, or forecast from the "
                              "analysis the model was trained on.")
 
-    if _untrained("enso", trained):
+    score, threshold = outputs.get("feature_score"), outputs.get("feature_threshold")
+    if score is not None and threshold is not None and float(score[batch_index]) > float(threshold[batch_index]):
+        bundle["trustworthy"] = False
+        bundle["warning"] = (f"the storm features are unlike anything in training (score {float(score[batch_index]):.1f} "
+                             f"against a limit of {float(threshold[batch_index]):.1f}): the input is probably "
+                             "corrupted or far outside the model's experience. Do not use this forecast.")
+    if _untrained("enso", trained) or "enso_mean" not in outputs:
         bundle["enso"] = _UNAVAILABLE
     else:
         bundle["enso"] = {
@@ -455,8 +514,18 @@ def build_forecast(
             "sigma": round(float(outputs["enso_log_var"][batch_index].mul(0.5).exp()), 3),
             "phase": _enso_phase(float(outputs["enso_mean"][batch_index])),
         }
+    if storm_center is not None and not all(math.isfinite(float(v)) for v in storm_center):
+        # Every storm product is relative to the centre; without one there is nothing honest to show.
+        missing = {"available": False, "reason": "no valid storm centre was given"}
+        bundle["storm_center"] = missing
+        for key in ("track_scenarios", "landfall", "intensity", "eyewall", "rapid_intensification"):
+            bundle[key] = missing
+        storm_center = None
     if storm_center is not None:
         bundle["storm_center"] = {"latitude": storm_center[0], "longitude": storm_center[1]}
+        if not _untrained("track", trained):
+            bundle["track_cone"] = decode_track_cone(outputs, storm_center[0], storm_center[1],
+                                                     lead_times_hours, issued, batch_index)
         bundle["track_scenarios"] = (_UNAVAILABLE if _untrained("track", trained) else decode_track(
             outputs, storm_center[0], storm_center[1], lead_times_hours, issued, batch_index))
         weights = None if consensus is None else consensus.get("weights")

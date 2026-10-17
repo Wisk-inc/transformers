@@ -113,9 +113,11 @@ def _publish_naturev1(hf_token: str) -> None:
     print("1. training files")
     files = {CKPT / "storm_bank_train.pt": "checkpoints/storm_bank_train.pt",
              CKPT / "storm_bank_val.pt": "checkpoints/storm_bank_val.pt",
+             CKPT / "satellite_bank_train.pt": "checkpoints/satellite_bank_train.pt",
+             CKPT / "satellite_bank_val.pt": "checkpoints/satellite_bank_val.pt",
              CKPT / "batch.json": "staging/batch.json", DATA / "stats.json": "staging/stats.json",
              DATA / "train.log": "logs/train.log"}
-    for tag in ("stage1", "rollout", "stage2"):
+    for tag in ("stage1", "rollout", "stage2", "stage3"):
         files[CKPT / tag / "latest.pt"] = f"checkpoints/{tag}/latest.pt"
         files[CKPT / tag / "state.json"] = f"checkpoints/{tag}/state.json"
     for local, repo_path in files.items():
@@ -129,9 +131,17 @@ def _publish_naturev1(hf_token: str) -> None:
     from ihelix import fibonacci_sphere
     from naturev1.model import NatureConfig, NatureV1
 
-    final = CKPT / "stage2" / "latest.pt"
-    if not final.exists():
-        final = Path(hf_hub_download(REPO, "checkpoints/stage2/latest.pt", repo_type="model", token=token))
+    # The released model is the last stage that exists: stage three (satellite, calibration, input monitor)
+    # once it has run, otherwise stage two.
+    final = next((CKPT / tag / "latest.pt" for tag in ("stage3", "stage2") if (CKPT / tag / "latest.pt").exists()),
+                 None)
+    if final is None:
+        for tag in ("stage3", "stage2"):
+            try:
+                final = Path(hf_hub_download(REPO, f"checkpoints/{tag}/latest.pt", repo_type="model", token=token))
+                break
+            except Exception:
+                continue
     payload = torch.load(final, map_location="cpu", weights_only=False)
     config = NatureConfig.from_dict(payload["config"])
     model = NatureV1(config, fibonacci_sphere(config.latent_points, num_neighbours=config.latent_neighbours,
@@ -153,7 +163,8 @@ def _publish_naturev1(hf_token: str) -> None:
     (out / "config.json").write_text(json.dumps(asdict(config), indent=2, default=list))
     (out / "normalizer.json").write_text(stats.read_text())
     (out / "training_record.json").write_text(json.dumps(
-        {"trained_steps_per_output": model.trained_heads(), "stage2_state": payload["state"],
+        {"trained_steps_per_output": model.trained_heads(), "released_from": final.parent.name,
+             "final_stage_state": payload["state"],
          "parameters": model.num_parameters()}, indent=2, default=str))
     print(f"   NatureV1, {model.num_parameters():,} parameters, from {final.name} {step_of(final.parent)}")
 

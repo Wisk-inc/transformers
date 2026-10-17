@@ -335,6 +335,28 @@ def check_forecast(bundle: dict) -> list[str]:
                 problems.append(f"+{point['lead_hours']}h cone is {point['cone_radius_km_95']:.0f} km, "
                                 "wider than an ocean -- the forecast carries no information")
 
+    consensus = bundle.get("track_consensus", {})
+    for point in (consensus.get("track", []) if isinstance(consensus, dict) else []):
+        if not -90.0 <= point["latitude"] <= 90.0:
+            problems.append(f"consensus latitude {point['latitude']:.1f} at +{point['lead_hours']}h is off the planet")
+    for point in rows("track_cone"):
+        if not -90.0 <= point["latitude"] <= 90.0:
+            problems.append(f"cone centre latitude {point['latitude']:.1f} at +{point['lead_hours']}h is off the planet")
+        if point.get("radius_km_90", 0) > 8000:
+            problems.append(f"+{point['lead_hours']}h 90% cone is {point['radius_km_90']:.0f} km -- no information")
+
+    landfall = bundle.get("landfall", {})
+    chances = [row["probability"] for row in landfall.get("by_lead", [])] if isinstance(landfall, dict) else []
+    if any(later < earlier - 1e-6 for earlier, later in zip(chances, chances[1:])):
+        problems.append("landfall probability falls with lead time, but it is a 'by this time' probability")
+    for entry in rows("eyewall"):
+        radii = entry.get("wind_radii_nmi", {})
+        if isinstance(radii, dict) and all(isinstance(radii.get(k), dict) for k in ("34kt", "50kt", "64kt")):
+            for quadrant in radii["34kt"]:
+                if not radii["34kt"][quadrant] >= radii["50kt"][quadrant] >= radii["64kt"][quadrant]:
+                    problems.append(f"+{entry['lead_hours']}h {quadrant} wind radii are out of order")
+                    break
+
     if "nino34_index" in bundle.get("enso", {}):
         problems += PHYSICAL["enso_index"].check(
             torch.tensor([bundle["enso"]["nino34_index"]]), "Nino 3.4")

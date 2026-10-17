@@ -331,6 +331,7 @@ class Trainer:
     def _fit(self, loader, epochs: int, val_loader) -> TrainingState:
         settings = self.settings
         self.model.train()
+        first_step = self.state.step
         started = time.time() - self.state.wall_seconds
         micro = 0
         self.optimizer.zero_grad(set_to_none=True)
@@ -421,7 +422,7 @@ class Trainer:
             print(f"[train] all {epochs} epochs done", flush=True)
         # Whatever ended the run -- a signal, the step limit, the data -- the last state is written down.
         self.save(force=True)
-        if settings.hub_repo:
+        if settings.hub_repo and self.state.step > first_step:
             # The last checkpoint goes to the Hub now, not on the timer: a stop signal on a hosted
             # notebook is the session ending, and its disk with it; and at a normal finish the timer
             # had usually just fired, which left the Hub a few steps short of the finished stage.
