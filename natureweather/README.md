@@ -139,7 +139,9 @@ Tested end to end on CPU, including two-process data parallelism; not yet run on
 
 ## 0.13: hurricane physics that beats extrapolation -- measured, not promised
 
-`naturev1.cyclone` -- 38 modules, each one idea, no neural network -- forecasts a storm's track and intensity from
+Technical report: [Hurricane tracks without a neural network](https://corxlabs-papers.static.hf.space/naturev1-hurricane-physics-report.html) (CorX Labs report 05, also as a PDF).
+
+`naturev1.cyclone` -- 39 modules, each one idea, no neural network -- forecasts a storm's track and intensity from
 one analysis and the best track so far, and detects storms before they form. Every constant was fitted on
 1980-2014 best tracks or the 2016/2017/2019 seasons. On the held-out seasons (2018, 2020, 2021, 2022; 4,447
 forecasts, 407 storms, every basin; storm-bootstrap 90% intervals):

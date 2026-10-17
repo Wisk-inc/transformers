@@ -42,7 +42,7 @@ pipeline_tag: other
 > moves the storm heads from the Atlantic to every basin — see [section 4.10](#410-012-the-satellite-path-rebuilt-and-every-basin-code-ready-not-yet-trained).
 > The released weights do not use it until it has been trained and has beaten them on the same test storms.
 >
-> **Version 0.13** adds `naturev1.cyclone`: 38 modules of tropical-cyclone physics that need **no neural network**,
+> **Version 0.13** adds `naturev1.cyclone`: 39 modules of tropical-cyclone physics that need **no neural network**,
 > measured on 4,447 forecasts of 407 storms in every basin in seasons they were never fitted on (2018, 2020-2022).
 > The physics consensus beats straight-line extrapolation at **every lead from 6 to 120 hours** (+12% to +38%,
 > every interval clear of zero) and beats CLIPER at every lead. It does **not** beat GraphCast, Pangu-Weather,
@@ -495,6 +495,8 @@ whose weights are fitted on 2017/2019/2021 and can go to zero, and nothing is sc
 | Forecast time | a **test-time rotation ensemble**: the whole planet turned by the golden angle and run again — the storm, its latitude and its surroundings unchanged, the arithmetic different — merged as a mixture (disagreement widens the uncertainty). Used only if it beats a single pass on the held-out seasons |
 
 ### 4.12 0.13: hurricane physics, measured on seasons it never saw
+
+Technical report: [Hurricane tracks without a neural network: a physics consensus scored on four unseen seasons](https://corxlabs-papers.static.hf.space/naturev1-hurricane-physics-report.html).
 
 `naturev1.cyclone` forecasts a storm's track from one 1.5-degree analysis and the best track so far, with no neural
 network: 13 members (extrapolation, a rebuilt CLIPER, track-shape analogs, steering trajectories through the
