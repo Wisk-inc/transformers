@@ -65,8 +65,31 @@ def remote_sha(repo_path: str):
     return None
 
 
-def publish(local: Path, repo_path: str, note: str = "") -> None:
+def tensor_digest(tensors: dict) -> str:
+    """A hash of the weights themselves: safetensors writes its header in a different order in every process."""
+    digest = hashlib.sha256()
+    for name in sorted(tensors):
+        value = tensors[name]
+        digest.update(f"{name}|{value.dtype}|{tuple(value.shape)}|".encode())
+        digest.update(value.contiguous().view(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def remote_tensor_digest(repo_path: str):
+    try:
+        from huggingface_hub import get_safetensors_metadata
+
+        found = get_safetensors_metadata(REPO, token=token).files_metadata.get(repo_path)
+        return (found.metadata or {}).get("tensor_sha256") if found is not None else None
+    except Exception:
+        return None
+
+
+def publish(local: Path, repo_path: str, note: str = "", digest: str | None = None) -> None:
     label = f"{repo_path:<46} {local.stat().st_size / 1e6:>9.1f} MB"
+    if digest is not None and remote_tensor_digest(repo_path) == digest:
+        print(f"{label}  already identical weights {note}")
+        return
     mine = sha256(local)
     if remote_sha(repo_path) == mine:
         print(f"{label}  already identical {note}")
@@ -123,7 +146,9 @@ out = DATA / "hf_release"
 (out / "results").mkdir(parents=True, exist_ok=True)
 (out / "eval").mkdir(parents=True, exist_ok=True)
 state = {key: value.detach().contiguous().clone() for key, value in model.state_dict().items()}
-save_file(state, out / "model.safetensors", metadata={"format": "pt", "model": "NatureV1"})
+weights_digest = tensor_digest(state)
+save_file(state, out / "model.safetensors",
+          metadata={"format": "pt", "model": "NatureV1", "tensor_sha256": weights_digest})
 torch.save(model.state_dict(), out / "model.safetensors.pt")
 (out / "config.json").write_text(json.dumps(asdict(config), indent=2, default=list))
 (out / "normalizer.json").write_text(stats.read_text())
@@ -140,7 +165,8 @@ for remote, local in ([(CARD, out / "README.md")]
         local.write_bytes(response.read())
 
 for local in sorted(p for p in out.rglob("*") if p.is_file()):
-    publish(local, str(local.relative_to(out)), "release")
+    publish(local, str(local.relative_to(out)), "release",
+            digest=weights_digest if local.name == "model.safetensors" else None)
 
 # check: what anyone downloading it gets
 from naturev1.hub import from_pretrained
