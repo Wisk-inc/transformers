@@ -395,8 +395,9 @@ East Pacific) and a 10-day rollout to test stability beyond the 72 h trained hor
 
 ## 5. Limitations
 
-- **Resolution.** 1.5° (~165 km) cannot resolve an eyewall. Intensity is expected to be the weakest output; the
-  explicit environment inputs exist to compensate, and the scorecard will say how far they get.
+- **Resolution.** 1.5° (~165 km) cannot resolve an eyewall, so intensity is the weakest output. The explicit
+  environment inputs (shear, humidity, SST) were added to compensate; the red team shows they barely move the
+  intensity forecast (section 4.8).
 - **Not operational.** It runs on reanalysis, which is available days after the fact. There is no real-time
   analysis feed, and the satellite input path exists but is untrained.
 - **Verification is internal.** Three held-out seasons plus the 2023 season, scored by this project's own
