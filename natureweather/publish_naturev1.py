@@ -37,7 +37,7 @@ def _publish_naturev1(hf_token: str) -> None:
     disable_progress_bars()
     token = hf_token.strip() or os.environ.get("HF_TOKEN") or get_token()
     if not token:
-        raise SystemExit("no Hugging Face token: paste your write token into HF_TOKEN at the top of this cell")
+        raise SystemExit("no Hugging Face token: paste your write token into _HF_TOKEN at the top of this cell")
     api = HfApi(token=token)
 
 
