@@ -555,17 +555,59 @@ def _satellite_batch(bank, index, device, augment: bool = False):
     return codes, available
 
 
+def ri2_targets(targets: dict, lead_times_hours) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    RI 2.0 labels from a bank's targets: for every (window, threshold) of :data:`naturev1.satnet.RI_WINDOWS`,
+    whether the best-track wind ``window`` hours later is at least ``threshold`` above the wind now --
+    the endpoint definition SHIPS-RII uses. Masked where the start is not an eligible tropical fix or the
+    track has no wind at the end of the window.
+    """
+    from .satnet import RI_WINDOWS
+
+    leads = list(lead_times_hours)
+    now = targets["current_wind_kt"].float()
+    eligible = targets["ri_mask"][:, 0] > 0
+    labels, masks = [], []
+    for hours, thresholds in RI_WINDOWS:
+        if hours in leads:
+            lead = leads.index(hours)
+            later = targets["intensity_target"][:, lead, 0].float() / KT_TO_MS
+            seen = (targets["intensity_mask"][:, lead, 0] > 0) & torch.isfinite(now) & eligible
+        else:
+            later, seen = torch.zeros_like(now), torch.zeros_like(eligible)
+        for threshold in thresholds:
+            labels.append(((later - now) >= threshold).float() * seen.float())
+            masks.append(seen.float())
+    return torch.stack(labels, -1), torch.stack(masks, -1)
+
+
+def _satnet_batch(bank, index, device):
+    """The storm network's outputs for these samples, from the bank, or None."""
+    stored = bank.get("satnet")
+    if stored is None:
+        return None
+    return {key: value[index].to(device) for key, value in stored.items() if torch.is_tensor(value)}
+
+
 def _bank_loss(model, bank, index, device, augment: bool = False):
     from .losses import total_loss
 
     batch = {key: value[index].to(device) for key, value in bank["targets"].items()}
     batch["pooled_far"] = bank["features_far"][index].to(device)
+    if getattr(model, "ri2_head", None) is not None:
+        batch["ri2_target"], batch["ri2_mask"] = ri2_targets(batch, model.config.lead_times_hours)
     satellite = _satellite_batch(bank, index, device, augment)
+    satnet = _satnet_batch(bank, index, device)
     outputs = model.storm_heads(bank["features"][index].to(device), batch["storm_center"], batch["storm_state"],
-                                batch["storm_environment"], batch["track_prior"], batch["pooled_far"], satellite)
+                                batch["storm_environment"], batch["track_prior"], batch["pooled_far"], satellite,
+                                satnet)
     loss, parts = total_loss(outputs, batch, SURFACE_FIELDS)
     if satellite is not None and bool(satellite[1][:, 0].any()):
         batch["storm_satellite"] = satellite
+    if satnet is not None:
+        batch["storm_satnet"] = satnet
+        if getattr(model, "ri2_head", None) is not None:
+            parts.setdefault("ri2", parts.get("ri2", 0.0))
     return loss, parts, batch
 
 
@@ -644,7 +686,8 @@ def train_storm_heads(
             optimizer.step()
             model.mark_trained(parts, {key: batch.get(key) for key in ("storm_center", "storm_state",
                                                                       "storm_environment", "pooled_far",
-                                                                      "track_prior", "storm_satellite")})
+                                                                      "track_prior", "storm_satellite",
+                                                                      "storm_satnet")})
             running += float(loss.detach()) * len(index)
         entry = {"epoch": epoch, "train": running / count}
         beat(f"storm heads epoch {epoch}")
@@ -711,7 +754,7 @@ def _head_outputs(model, bank: dict, chunk: int = 4096) -> dict[str, torch.Tenso
         prior = batch["track_prior"] if model.uses_track_prior() else None
         out = model.storm_heads(bank["features"][index].to(device), batch["storm_center"], batch["storm_state"],
                                 batch["storm_environment"], prior, bank["features_far"][index].to(device),
-                                _satellite_batch(bank, index, device))
+                                _satellite_batch(bank, index, device), _satnet_batch(bank, index, device))
         outputs.append({k: v.float().cpu() for k, v in out.items()})
     return {key: torch.cat([o[key] for o in outputs]) for key in outputs[0]}
 
@@ -939,16 +982,21 @@ def _platt(logits: torch.Tensor, outcomes: torch.Tensor, steps: int = 200) -> tu
     return float(log_a.detach().exp()), float(b.detach())
 
 
-def _raw_logits(model, bank):
-    """Landfall and RI logits with the calibration switched off."""
-    saved = model.landfall_calibration.clone(), model.ri_calibration.clone()
-    model.landfall_calibration[:] = torch.tensor([1.0, 0.0])
-    model.ri_calibration[:] = torch.tensor([1.0, 0.0])
+def _raw_logits(model, bank, with_ri2: bool = False):
+    """Landfall and RI logits (and RI 2.0's, if asked) with the calibration switched off."""
+    stores = [model.landfall_calibration, model.ri_calibration]
+    if hasattr(model, "ri2_calibration"):
+        stores.append(model.ri2_calibration)
+    saved = [store.clone() for store in stores]
+    for store in stores:
+        store[:] = torch.tensor([1.0, 0.0])
     try:
         out = _head_outputs(model, bank)
     finally:
-        model.landfall_calibration.copy_(saved[0])
-        model.ri_calibration.copy_(saved[1])
+        for store, value in zip(stores, saved):
+            store.copy_(value)
+    if with_ri2:
+        return out["landfall_logit"], out["ri_logits"], out.get("ri2_logits")
     return out["landfall_logit"], out["ri_logits"]
 
 
@@ -961,14 +1009,20 @@ def fit_probability_calibration(model, bank: dict, min_events: int = 5) -> str:
     probabilities without touching the ranking. A column with fewer than ``min_events`` outcomes keeps
     no calibration rather than one fitted to noise.
     """
-    landfall, ri = _raw_logits(model, bank)
+    landfall, ri, ri2 = _raw_logits(model, bank, with_ri2=True)
     t = bank["targets"]
     lines = []
-    for column, (logits, target, mask, label, store) in enumerate(
-            [(landfall[:, l], t["landfall_target"][:, l], t["landfall_mask"][:, l], f"landfall +{h}h",
-              model.landfall_calibration[l]) for l, h in enumerate(model.config.lead_times_hours)]
-            + [(ri[:, j], t["ri_target"][:, j], t["ri_mask"][:, j], f"RI threshold {j}", model.ri_calibration[j])
-               for j in range(ri.shape[1])]):
+    columns = ([(landfall[:, l], t["landfall_target"][:, l], t["landfall_mask"][:, l], f"landfall +{h}h",
+                 model.landfall_calibration[l]) for l, h in enumerate(model.config.lead_times_hours)]
+               + [(ri[:, j], t["ri_target"][:, j], t["ri_mask"][:, j], f"RI threshold {j}", model.ri_calibration[j])
+                  for j in range(ri.shape[1])])
+    if ri2 is not None:
+        from .satnet import ri_threshold_list
+
+        target2, mask2 = ri2_targets(t, model.config.lead_times_hours)
+        columns += [(ri2[:, j], target2[:, j], mask2[:, j], f"RI2 +{kt:.0f} kt/{hours} h", model.ri2_calibration[j])
+                    for j, (hours, kt) in enumerate(ri_threshold_list())]
+    for column, (logits, target, mask, label, store) in enumerate(columns):
         keep = mask > 0
         y = target[keep].float()
         if int(y.sum()) < min_events or int((1 - y).sum()) < min_events:
@@ -1043,3 +1097,92 @@ def fit_feature_monitor(model, bank: dict, quantile: float = 0.999, margin: floa
     model.feature_norm_bounds.copy_(torch.tensor([float(norms.quantile(1 - quantile)) / margin,
                                                   float(norms.quantile(quantile)) * margin]))
     return threshold
+
+
+@torch.no_grad()
+def fit_intensity_correction(model, bank: dict, ridge: float = 50.0) -> str:
+    """
+    Fit the per-lead intensity bias correction on held-out storms; returns before/after by intensity class.
+
+    The red team measured the heads 10-18 kt too weak for major hurricanes -- regression to the mean,
+    the classic failure of a likelihood-trained intensity model. A correction linear in the predicted wind
+    (an offset, and a slope around 65 kt) is fitted per lead by ridge-regularised least squares on
+    storms the heads never trained on, for the intensity head and the eyewall peak-wind head separately.
+    Zero is no correction, and a lead with too few verifying storms keeps zero.
+    """
+    model.intensity_correction.zero_()
+    model.eyewall_correction.zero_()
+    out = _head_outputs(model, bank)
+    t = bank["targets"]
+    lines = []
+    for name, predicted, truth, mask, store in (
+            ("intensity", out["intensity_mean"][..., 0] / KT_TO_MS, t["intensity_target"][..., 0] / KT_TO_MS,
+             t["intensity_mask"][..., 0] > 0, model.intensity_correction),
+            ("eyewall", out["eyewall_peak_wind_kt"], t["eyewall_target"],
+             torch.isfinite(t["eyewall_target"]), model.eyewall_correction)):
+        for lead, hours in enumerate(model.config.lead_times_hours):
+            ok = mask[:, lead] & torch.isfinite(truth[:, lead])
+            if int(ok.sum()) < 50:
+                continue
+            x = (predicted[ok, lead].double() - 65.0) / 30.0
+            y = truth[ok, lead].double() - predicted[ok, lead].double()
+            design = torch.stack([torch.ones_like(x), x], -1)
+            gram = design.T @ design + torch.diag(torch.tensor([0.0, ridge], dtype=torch.float64))
+            coef = torch.linalg.solve(gram, design.T @ y)
+            store[lead] = coef.to(store.dtype)
+        lines.append(f"{name}: " + ", ".join(f"+{h}h {float(store[l, 0]):+.1f} kt / {float(store[l, 1]):+.1f}"
+                                             for l, h in enumerate(model.config.lead_times_hours)))
+    return "\n".join(lines) + "\n" + intensity_by_category(model, bank)
+
+
+@torch.no_grad()
+def intensity_by_category(model, bank: dict, leads_hours=(24, 48, 72)) -> str:
+    """Wind bias and MAE by the storm's *verifying* intensity class -- where regression to the mean shows."""
+    out = _head_outputs(model, bank)
+    t = bank["targets"]
+    lines = [f"{'lead':>6} {'class':>8} {'n':>6} {'bias kt':>8} {'MAE kt':>7}"]
+    leads = list(model.config.lead_times_hours)
+    for hours in leads_hours:
+        if hours not in leads:
+            continue
+        lead = leads.index(hours)
+        truth = t["intensity_target"][:, lead, 0] / KT_TO_MS
+        predicted = out["intensity_mean"][:, lead, 0] / KT_TO_MS
+        ok = t["intensity_mask"][:, lead, 0] > 0
+        for label, low, high in (("TS", 34, 64), ("Cat 1-2", 64, 96), ("Cat 3-5", 96, 400)):
+            band = ok & (truth >= low) & (truth < high)
+            if band.any():
+                error = predicted[band] - truth[band]
+                lines.append(f"{hours:>5}h {label:>8} {int(band.sum()):>6} {float(error.mean()):>+8.1f} "
+                             f"{float(error.abs().mean()):>7.1f}")
+    return "\n".join(lines)
+
+
+@torch.no_grad()
+def ri2_report(model, bank: dict) -> str:
+    """
+    RI 2.0 on held-out storms, per threshold: base rate, Brier score and Brier skill against climatology,
+    and how many events the top-decile probabilities catch (the share of real RI a forecaster's watch
+    list would have contained).
+    """
+    from .satnet import ri_threshold_list
+
+    out = _head_outputs(model, bank)
+    if "ri2_logits" not in out:
+        return "RI 2.0: not in this model"
+    target, mask = ri2_targets(bank["targets"], model.config.lead_times_hours)
+    probability = torch.sigmoid(out["ri2_logits"])
+    lines = [f"{'threshold':>14} {'n':>6} {'base %':>7} {'Brier':>7} {'skill':>7} {'caught by top 10%':>18}"]
+    for j, (hours, kt) in enumerate(ri_threshold_list()):
+        keep = mask[:, j] > 0
+        if int(keep.sum()) < 20:
+            continue
+        y, p = target[keep, j], probability[keep, j]
+        base = float(y.mean())
+        brier = float(((p - y) ** 2).mean())
+        skill = 1.0 - brier / max(base * (1 - base), 1e-9)
+        cut = torch.quantile(p, 0.9)
+        caught = float((y * (p >= cut)).sum() / y.sum().clamp_min(1.0))
+        lines.append(f"{f'+{kt:.0f} kt / {hours} h':>14} {int(keep.sum()):>6} {100 * base:>6.2f}% {brier:>7.4f} "
+                     f"{skill:>+7.3f} {100 * caught:>17.0f}%")
+    return "\n".join(lines)

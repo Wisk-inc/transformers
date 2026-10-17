@@ -26,7 +26,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.distributed as dist
 
 from .engine import Engine, EngineSettings, is_main
 from .satnet import ri_threshold_list, satnet_loss, satnet_targets_ri
@@ -42,13 +41,10 @@ REPORT_VARIABLES = ("geopotential@500", "temperature@850", "u_component_of_wind@
 
 
 def _sum_all(values: dict, device) -> dict:
-    """Sum every scalar over ranks."""
-    if not dist.is_initialized():
-        return values
-    keys = sorted(values)
-    tensor = torch.tensor([float(values[k]) for k in keys], device=device, dtype=torch.float64)
-    dist.all_reduce(tensor)
-    return dict(zip(keys, tensor.tolist()))
+    """Sum every scalar over ranks, over the union of their keys."""
+    from .engine import all_sum
+
+    return all_sum(values, device)
 
 
 def _add(totals: dict, key: str, value) -> None:
@@ -287,8 +283,10 @@ def train_retrieval(model, settings: EngineSettings, frames, era5_path, stepper,
         raise ValueError("the model has no retrieval; build it with NatureConfig(retrieval_layers=6)")
     for parameter in model.parameters():
         parameter.requires_grad = False
-    for parameter in model.retrieval.parameters():
-        parameter.requires_grad = True
+    for name, parameter in model.retrieval.named_parameters():
+        # The retrieval reads one instant, so its blocks' temporal strands never run; left trainable they
+        # would receive no gradient, which data parallelism treats as an error.
+        parameter.requires_grad = ".temporal." not in name
     if warm_start and int(model.head_steps[list(model.trained_heads()).index("retrieval")]) == 0:
         copied = model.warm_start_retrieval()
         if is_main():
@@ -367,6 +365,31 @@ def build_model(checkpoint: str, satnet_embed: int = 512, retrieval_layers: int 
     return model
 
 
+def merged_model(base: str, satnet: str | None = None, retrieval: str | None = None, **switches):
+    """
+    The model after stage A: the released weights, with the storm network from the ``satnet`` run and the
+    retrieval from the ``retrieval`` run (the two run side by side on separate GPUs, so each checkpoint
+    holds only its own network trained). Training counts are carried over for what each run trained.
+    """
+    from .model import TRACKED_HEADS
+
+    model = build_model(base, **switches)
+    state = model.state_dict()
+    for path, prefix, head in ((satnet, "storm_satnet.", "satnet"), (retrieval, "retrieval.", "retrieval")):
+        if not path:
+            continue
+        payload = torch.load(path, map_location="cpu", weights_only=False)["model"]
+        taken = {k: v for k, v in payload.items() if k.startswith(prefix)}
+        if not taken:
+            raise ValueError(f"{path} holds no {prefix[:-1]} weights")
+        state.update(taken)
+        steps = payload.get("head_steps")
+        if steps is not None and steps.numel() > TRACKED_HEADS.index(head):
+            state["head_steps"][TRACKED_HEADS.index(head)] = steps[TRACKED_HEADS.index(head)]
+    model.load_state_dict(state)
+    return model
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="NatureV1 stage A: the satellite networks")
     parser.add_argument("what", choices=("satnet", "retrieval"))
@@ -440,9 +463,12 @@ def staged_grid(meta: dict):
     # 0.12 record their axes, older ones are those of the store they came from.
     latitudes = meta.get("latitude") or np.linspace(-90.0, 90.0, rows).tolist()
     longitudes = meta.get("longitude") or (np.arange(cols) * 360.0 / cols).tolist()
-    lat, lon = np.meshgrid(np.radians(latitudes), np.radians(longitudes), indexing="ij")
-    coords = torch.tensor(np.stack([lat.reshape(-1), lon.reshape(-1)], -1), dtype=torch.float64)
-    weights = torch.tensor(equiangular_weights(np.asarray(latitudes), len(longitudes)))
+    # Exactly era5_source_grid's construction, so the grid -- and its fingerprint -- is the one the backbone
+    # was trained on.
+    from .corpora import latlon_to_coords
+
+    coords = latlon_to_coords(np.asarray(latitudes, np.float64), np.asarray(longitudes, np.float64))
+    weights = torch.tensor(equiangular_weights(np.asarray(latitudes, np.float64), len(longitudes)))
     return FieldGrid.source(coords, Geometry.globe(), weights=weights)
 
 

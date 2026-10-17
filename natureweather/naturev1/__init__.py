@@ -166,7 +166,37 @@ from .wb2 import (
 
 from . import stormsat  # noqa: E402
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
+
+#: 0.12 names, imported from their modules on first use -- so ``import naturev1`` costs nothing extra and
+#: works with ihelix 0.5, and only the satellite networks themselves ask for ihelix 0.6.
+_LAZY = {
+    "SatNetStorm": "satnet", "SatNetConfig": "satnet", "SatelliteRetrieval": "satnet", "apply_retrieval": "satnet",
+    "cloud_motion": "satnet", "RI_WINDOWS": "satnet",
+    "parse_ibtracs": "ibtracs", "storm_label_table": "ibtracs", "describe_table": "ibtracs", "fetch_ibtracs": "ibtracs",
+    "stage_gridsat": "satstage", "stage_month": "satstage", "read_gridsat": "satstage", "decode_global": "satstage",
+    "GlobalFrames": "satdata", "StormPatches": "satdata", "StormSequenceDataset": "satdata",
+    "RetrievalDataset": "satdata",
+    "Engine": "engine", "EngineSettings": "engine",
+    "train_satnet": "sattrain", "train_retrieval": "sattrain", "merged_model": "sattrain",
+    "train_storms": "stormtrain", "memmap_feature_bank": "stormtrain", "finalise_storms": "stormtrain",
+    "compare_models": "stormtrain",
+    "track_vortex": "tracker", "find_storms": "tracker", "rollout_member_tracks": "tracker",
+    "vortex_centre": "tracker",
+    "fit_intensity_correction": "storms", "ri2_report": "storms", "intensity_by_category": "storms",
+    "hardware_preflight": "hardware", "publish_release": "b300",
+}
+
+
+def __getattr__(name):
+    module = _LAZY.get(name)
+    if module is None:
+        raise AttributeError(f"module 'naturev1' has no attribute {name!r}")
+    import importlib
+
+    value = getattr(importlib.import_module(f".{module}", __name__), name)
+    globals()[name] = value
+    return value
 __author__ = "Nathan"
 __all__ = [
     "CORPORA", "RI_THRESHOLDS_KT", "WIND_RADII_THRESHOLDS_KT", "EyewallHead", "RapidIntensificationHead",
@@ -205,4 +235,6 @@ __all__ = [
     "latest_scene_keys", "load_for_inference", "nearest_point", "normalize_channels", "scene_from_netcdf",
     "total_loss", "track_mixture_nll", "watch", "StormWindow", "StormTargets",
     "pair_tracks_with_reanalysis", "format_pairing",
+    # 0.12, loaded on first use (the satellite networks need ihelix 0.6; nothing else does)
+    *sorted(_LAZY),
 ]

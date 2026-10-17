@@ -37,6 +37,10 @@ pipeline_tag: other
 > **Version 0.11** adds stage three — storm-centred infrared satellite imagery for the hurricane heads — and fixes
 > what the red team found: calibrated probabilities, an input monitor, and a forecast that can no longer state
 > impossible structure (section 4.9). `training_record.json` says which stage the released weights come from.
+>
+> **Version 0.12 (code ready, not yet trained)** rebuilds the satellite path around the red team's findings and
+> moves the storm heads from the Atlantic to every basin — see [section 4.10](#410-012-the-satellite-path-rebuilt-and-every-basin-code-ready-not-yet-trained).
+> The released weights do not use it until it has been trained and has beaten them on the same test storms.
 
 NatureV1 is an 89-million-parameter model of the atmosphere that forecasts global weather out to five days and,
 for tropical cyclones, where a storm will go, how strong it will get, whether it will intensify rapidly, and
@@ -442,6 +446,27 @@ rollout to test stability beyond the 72 h trained horizon. They will be added he
 Not fixed, and why: a corrupted *steering prior* still passes through (it comes from the model's own analysis,
 and a 30° shift is not physically impossible on its own); intensity remains biased low until the satellite stage
 has been trained and scored — its results will be added here.
+
+### 4.10 0.12: the satellite path rebuilt, and every basin (code ready, not yet trained)
+
+Every red-team finding mapped to a change. **None of these has results yet** — they are trained on 8x B300 by
+`b300_naturev1.py`, and this section will report what they measured on the test seasons (2018, 2020), next to the
+released model on the same storms. The release is replaced only if the new model beats it.
+
+| What went wrong | 0.12 |
+|---|---|
+| Intensity 10–18 kt too weak for majors; Otis 50→130 kt called 45 kt | **SatNet-Storm** (21.8M parameters): a four-frame loop (now, −3, −6, −9 h) of storm-centred 11 µm *and* 6.7 µm imagery → intensity, central pressure, wind radii, RMW, 12–72 h intensity change, motion; trained on ~230,000 fixes in every basin since 1980. Plus a per-lead **intensity bias correction** fitted on held-out seasons |
+| RI nearly invisible | **RI 2.0**: the SHIPS-RII thresholds (25/30/35/40 kt in 24 h, 45/36 h, 55/48 h, 65/72 h) as one *ordinal* family (P(≥40) ≤ P(≥35) ≤ …), fed the predictors that carry RI signal — distance below maximum potential intensity, shear, mid-level moisture, ocean temperature, persistence — and SatNet's reading of the inner core; focal loss; calibrated afterwards |
+| A storm-centre position was required | SatNet is given a first guess **wrong by up to 150 km** in training and must find the centre; a **vortex tracker** proposes first guesses from the model's own sea-level pressure where there is no advisory |
+| Southern hemisphere worse than physics; poleward turns missed (Otis, Rai) | heads work in a **poleward frame** (southern storms mirrored in, mirrored out — an exact mirror, tested); labels from **every basin** (IBTrACS, ~4,500 storms vs 584); two new consensus members from the **model's own rollout**: the storm steered by the *forecast* flow, and the low followed through the forecast pressure field |
+| "Satellites do not see the whole atmosphere" | the **retrieval** never pretends to: it brings a 6–48 h old state up to date from a three-frame global satellite loop (window + water vapour, conservative quarter-degree regridding that keeps each cell's coldest pixel and spread, cloud-motion vectors, satellite and view angle per pixel) and starts as *exactly* the stale state; its score is the share of the change since the stale state it recovers |
+| Heads trained on perfect reanalysis only | stage B trains the heads **and the backbone's last 4 blocks** with 30% of samples' newest frame replaced by the retrieval, so the model learns from what it gets in real time; the next-step state loss and a pull back to the starting weights keep it a weather model |
+| GridSat read naively is 99.95% masked | decoded by hand; QC removes single-pixel glitches but keeps sharp cloud edges; files under half observed rejected and recorded |
+
+Engine: [iHELIX 0.6](https://github.com/Wisk-inc/transformers/tree/claude/linear-context-architecture-a35c6h/ihelix)
+adds conservative regridding, seam-free spherical convolution and grid-to-mesh pooling. Training: data-parallel on
+8 GPUs with a learning-rate schedule driven by the clock (it ends exactly when the budget does) and **every
+checkpoint pushed to this repository** under `checkpoints/<run>/` as it is written.
 
 ## 5. Limitations
 

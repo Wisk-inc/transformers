@@ -120,15 +120,34 @@ def broadcast_flag(value: bool, device: torch.device) -> bool:
     return bool(flag.item())
 
 
+def shared_keys(values: dict) -> list:
+    """The union of every rank's keys, in one order -- so a reduction lines up even when one rank's shard
+    happened to have nothing for some key."""
+    if not dist.is_initialized():
+        return sorted(values)
+    gathered = [None] * dist.get_world_size()
+    dist.all_gather_object(gathered, sorted(values))
+    return sorted(set().union(*gathered))
+
+
+def all_sum(values: dict, device: torch.device) -> dict:
+    """The sum of each scalar over every rank (missing counts as zero)."""
+    if not dist.is_initialized():
+        return values
+    keys = shared_keys(values)
+    tensor = torch.tensor([float(values.get(k, 0.0)) for k in keys], device=device, dtype=torch.float64)
+    dist.all_reduce(tensor)
+    return dict(zip(keys, tensor.tolist()))
+
+
 def all_mean(values: dict, device: torch.device) -> dict:
     """The mean of each scalar over every rank -- for logging and evaluation."""
-    if not dist.is_initialized() or not values:
+    if not dist.is_initialized():
         return values
-    keys = sorted(values)
-    tensor = torch.tensor([float(values[k]) for k in keys], device=device, dtype=torch.float64)
-    dist.all_reduce(tensor)
-    tensor /= dist.get_world_size()
-    return dict(zip(keys, tensor.tolist()))
+    keys = shared_keys(values)
+    counts = {k: 1.0 if k in values else 0.0 for k in keys}
+    sums, seen = all_sum({k: values.get(k, 0.0) for k in keys}, device), all_sum(counts, device)
+    return {k: sums[k] / max(seen[k], 1.0) for k in keys}
 
 
 def lr_factor(step: int, elapsed: float, budget: float, warmup: int, floor: float) -> float:
@@ -151,6 +170,7 @@ class CheckpointPusher:
         self.jobs: queue.Queue = queue.Queue()
         self.pushed: list[str] = []
         self.failed: list[str] = []
+        self.submitted = 0
         self.thread = None
         if repo_id:
             self.thread = threading.Thread(target=self._work, name="checkpoint-pusher", daemon=True)
@@ -161,7 +181,8 @@ class CheckpointPusher:
             return
         staged = []
         for local, remote in uploads:
-            copy = local.with_name(f".push-{int(time.time() * 1000)}-{local.name}")
+            self.submitted += 1
+            copy = local.with_name(f".push-{os.getpid()}-{self.submitted}-{local.name}")
             shutil.copy2(local, copy)
             staged.append((copy, remote))
         self.jobs.put((staged, message))
@@ -243,7 +264,7 @@ class Engine:
         self.rank, self.local_rank, self.world, self.device = setup_distributed()
         torch.manual_seed(settings.seed + self.rank)
         self.owner = owner.to(self.device)
-        self.trained = trained
+        self.trained = trained.to(self.device)          # a wrapper may hold buffers of its own
         self.config = config or {}
         groups = parameters if parameters is not None else [p for p in trained.parameters() if p.requires_grad]
         fused = {"fused": True} if self.device.type == "cuda" else {}
@@ -472,5 +493,5 @@ def _save_weights(module: torch.nn.Module, path: Path, metadata: dict) -> None:
         torch.save({"weights": tensors, "metadata": metadata}, path.with_suffix(".pt"))
 
 
-__all__ = ["CheckpointPusher", "Engine", "EngineSettings", "all_mean", "barrier", "broadcast_flag", "is_main",
+__all__ = ["CheckpointPusher", "Engine", "EngineSettings", "all_mean", "all_sum", "shared_keys", "barrier", "broadcast_flag", "is_main",
            "lr_factor", "setup_distributed"]

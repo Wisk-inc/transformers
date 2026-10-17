@@ -541,11 +541,14 @@ def ri2_predictors(batch: int, device, storm_center=None, storm_state=None, stor
     if storm_center is not None:
         out[:, 5] = torch.nan_to_num(storm_center.to(device).float()[:, 0]).abs() / 30.0
     if satnet is not None and "ri_logits" in satnet:
-        out[:, 6] = 1.0
-        out[:, 7:14] = satnet["ri_logits"].to(device).float().clamp(-10, 10)
-        out[:, 14:19] = satnet["wind_change_kt"].to(device).float() / 15.0
+        present = satnet.get("present")
+        flag = (torch.ones(batch, device=device) if present is None
+                else present.to(device).float().view(-1))
+        out[:, 6] = flag
+        out[:, 7:14] = satnet["ri_logits"].to(device).float().clamp(-10, 10) * flag.view(-1, 1)
+        out[:, 14:19] = satnet["wind_change_kt"].to(device).float() / 15.0 * flag.view(-1, 1)
         if wind is not None:
-            out[:, 19] = (satnet["wind_kt"].to(device).float() - wind) / 20.0
+            out[:, 19] = (satnet["wind_kt"].to(device).float() - wind) / 20.0 * flag
     return out
 
 
@@ -1091,7 +1094,10 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
             codes, available = storm_satellite
             pooled = pooled + self.storm_satellite(codes.to(pooled.device), available.to(pooled.device)).to(dtype)
         if storm_satnet is not None and self.satnet_fusion is not None and "embedding" in storm_satnet:
-            pooled = pooled + self.satnet_fusion(storm_satnet["embedding"].to(pooled.device, dtype))
+            embedding = storm_satnet["embedding"].to(pooled.device, dtype)
+            if "present" in storm_satnet:
+                embedding = embedding * storm_satnet["present"].to(pooled.device, dtype).view(-1, 1)
+            pooled = pooled + self.satnet_fusion(embedding)
         summary = self.summary_pool(self.summary_norm(pooled))
         outputs = self._storm_outputs(summary)
         landfall, ri = self.landfall_calibration.to(dtype), self.ri_calibration.to(dtype)

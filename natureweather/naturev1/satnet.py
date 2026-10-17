@@ -35,7 +35,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from ihelix import FieldGrid, Geometry, GridToMesh, SphericalConv2d, latlon_channels
+try:
+    from ihelix import FieldGrid, Geometry, GridToMesh, SphericalConv2d, latlon_channels
+except ImportError as error:                         # ihelix 0.5 from PyPI: everything else still works
+    raise ImportError("the satellite networks need ihelix 0.6 or later (sphere operations): "
+                      "pip install -U 'ihelix @ git+https://github.com/Wisk-inc/transformers"
+                      "@claude/linear-context-architecture-a35c6h#subdirectory=ihelix'") from error
 
 from .ibtracs import CHANGE_HOURS
 from .satstage import GLOBAL_CHANNELS, SATELLITE_FAMILIES, band_axes, decode_global

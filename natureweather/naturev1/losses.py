@@ -248,6 +248,12 @@ def total_loss(outputs: dict, batch: dict, field_names: tuple[str, ...], weights
             loss = loss + weights["ri_delta"] * delta
             parts["ri_delta"] = float(delta.detach())
 
+    if "ri2_logits" in outputs and "ri2_target" in batch:
+        # RI 2.0: the SHIPS-RII thresholds as one ordinal family (naturev1.satnet.RI_WINDOWS).
+        term = focal_bce(outputs["ri2_logits"].float(), batch["ri2_target"], mask=batch.get("ri2_mask"))
+        loss = loss + weights.get("ri2", 2.0) * term
+        parts["ri2"] = float(term.detach())
+
     if "eyewall_target" in batch:
         # Peak wind is well observed; RMW is not; wind radii sit in between. All three are masked, so
         # each contributes exactly where it was measured.

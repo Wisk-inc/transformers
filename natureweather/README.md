@@ -103,6 +103,27 @@ DataLoader workers; hurricane lead targets at the wrong valid time on 10.9% of s
 landfalling stretches); a rollout loop that never rolled out; a publish gate that could never open; and
 untrained heads printed as forecasts. Each has a regression test in `tests/test_fixes_080.py`.
 
+## 0.12: the satellite path rebuilt, every basin, 8x B300
+
+Built from what the trained model and its red team showed: intensity biased low, rapid intensification
+missed, southern-hemisphere tracks worse than physics, poleward turns missed, a storm centre required.
+
+- `naturev1.ibtracs` — every basin since 1980 (IBTrACS), wind normalised to one-minute, ~230,000 labelled fixes.
+- `naturev1.satstage` — GridSat-B1 1980-2021 (4-6 TB) staged into quarter-degree global frames (mean, coldest
+  pixel, spread, coverage, satellite, view angle) and 320 px storm loops; hand-decoded, quality-controlled, resumable.
+- `naturev1.satnet` — **SatNet-Storm** (intensity, centre fix from a 150 km-wrong guess, radii, intensity change,
+  ordinal RI, motion; hemisphere-mirrored) and the **satellite retrieval** (stale state + satellite loop + cloud
+  motion → full state, starting exactly at the stale state).
+- `naturev1.stormtrain` — stage B: heads + the backbone's last blocks on every basin, retrieval in the loop,
+  RI 2.0, poleward frame; banks with two rollout track members; consensus, calibration, intensity bias
+  correction; scored on test seasons against the model it started from.
+- `naturev1.tracker` — vortex tracking through rollouts, storm detection.
+- `naturev1.engine` — DDP on N GPUs, bf16, a clock-driven schedule, every checkpoint pushed to the Hub in order.
+- `b300_naturev1.py` — the runbook: preflight, staging, stage A (3 h, both satellite networks side by side),
+  stage B, and a publish step that only replaces the release if the new model beat it.
+
+Tested end to end on CPU, including two-process data parallelism; not yet run on B300 hardware.
+
 ## Not trained
 
 No weights here have seen real data. The architecture, losses, ingest and training loop are complete and

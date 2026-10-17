@@ -20,9 +20,10 @@ whole job of this module. Every file is used twice:
 **Quality comes first.** GridSat stores brightness temperature as scaled int16 with a ``valid_range``
 attribute that netCDF4 cannot apply to the packed values -- read naively, 99.95% of every image comes back
 masked (found and fixed here; the fields are decoded by hand). Then: values outside 160-330 K are
-removed; isolated pixels more than 50 K from their neighbours (bit errors, scan-line glitches) are
-removed; water vapour warmer than the window channel by more than 10 K is removed (physically it cannot
-be); files less than half observed are rejected outright and recorded. Every month written carries its
+removed; isolated pixels more than 50 K from all four of their neighbours (bit errors, scan-line glitches)
+are removed; water vapour more than 10 K warmer than the window channel is removed (only a very strong
+surface inversion can do that, and in this band it marks a bad pixel far more often than a real one); files with less than 30% of the band observed are rejected outright and recorded (partial coverage
+is normal in the early years and is carried as a coverage channel). Every month written carries its
 own quality report.
 
 **Which satellite is looking matters.** Calibration differs between instruments and a pixel at 70 degrees
@@ -287,7 +288,7 @@ def _atomic_json(path: Path, payload: dict) -> None:
 
 def stage_month(root: str | Path, year: int, month: int, table: dict | None = None, resolution: float = 0.25,
                 raw_dir: str | Path | None = None, keep_raw: bool = False, mirror: str = "aws",
-                min_observed: float = 0.5, prefetch: int = 4, device: str = "cpu", download: bool = True) -> dict:
+                min_observed: float = 0.3, prefetch: int = 4, device: str = "cpu", download: bool = True) -> dict:
     """
     Stage one month: its global frames and the storm patches of every storm active in it.
 
@@ -314,10 +315,14 @@ def stage_month(root: str | Path, year: int, month: int, table: dict | None = No
     times = month_times(year, month)
     seconds = times.astype("datetime64[s]").astype(np.int64)
     rows_at: dict[int, list[int]] = {}
+    position: dict[int, tuple[float, float]] = {}
     if table is not None and len(table["time"]):
+        ids = table.get("row", np.arange(len(table["time"])))
         inside = np.where((table["time"] >= seconds[0]) & (table["time"] <= seconds[-1]))[0]
-        for row in inside:
-            rows_at.setdefault(int(table["time"][row]), []).append(int(row))
+        for local in inside:
+            row = int(ids[local])
+            rows_at.setdefault(int(table["time"][local]), []).append(row)
+            position[row] = (float(table["lat"][local]), float(table["lon"][local]))
     storm_rows = sorted(r for rows in rows_at.values() for r in rows)
     storm_slot = {row: i for i, row in enumerate(storm_rows)}
 
@@ -355,8 +360,8 @@ def stage_month(root: str | Path, year: int, month: int, table: dict | None = No
                 continue
             fields["ir"], fields["wv"], report = quality_control(fields["ir"], fields["wv"])
             report["time"] = stamp
-            if report["ir_kept"] < min_observed * 0.7:                   # 70S-70N of a global band is ~0.78
-                report["status"] = "rejected: under half observed"
+            if report["ir_kept"] < min_observed:                         # share of the 70S-70N band observed
+                report["status"] = f"rejected: under {100 * min_observed:.0f}% observed"
                 reports.append(report)
             else:
                 if encoder is None or encoder.source_shape != fields["ir"].shape:
@@ -365,7 +370,7 @@ def stage_month(root: str | Path, year: int, month: int, table: dict | None = No
                 available[index] = True
                 wanted = rows_at.get(stamp, [])
                 if wanted:
-                    centres = [(float(table["lat"][r]), float(table["lon"][r])) for r in wanted]
+                    centres = [position[r] for r in wanted]
                     crops = storm_crops(fields, centres)
                     for r, crop in zip(wanted, crops):
                         patches[storm_slot[r]] = crop
@@ -395,6 +400,16 @@ def stage_month(root: str | Path, year: int, month: int, table: dict | None = No
     return summary
 
 
+def month_rows(table: dict | None, year: int, month: int) -> dict | None:
+    """The label-table rows inside one month -- positions and their global row numbers, nothing else, so a
+    worker process is sent kilobytes rather than the whole table."""
+    if table is None:
+        return None
+    seconds = month_times(year, month).astype("datetime64[s]").astype(np.int64)
+    inside = np.where((table["time"] >= seconds[0]) & (table["time"] <= seconds[-1]))[0]
+    return {"time": table["time"][inside], "lat": table["lat"][inside], "lon": table["lon"][inside], "row": inside}
+
+
 def stage_gridsat(root: str | Path, years, table: dict | None = None, workers: int = 32, resolution: float = 0.25,
                   raw_dir: str | Path | None = None, keep_raw: bool = False, mirror: str = "aws",
                   progress: bool = True) -> list[dict]:
@@ -412,7 +427,7 @@ def stage_gridsat(root: str | Path, years, table: dict | None = None, workers: i
         print(f"[satstage] {len(months) - len(pending)} of {len(months)} months already staged; "
               f"{len(pending)} to go with {workers} workers", flush=True)
     with cf.ProcessPoolExecutor(workers) as pool:
-        futures = {pool.submit(stage_month, root, y, m, table, resolution,
+        futures = {pool.submit(stage_month, root, y, m, month_rows(table, y, m), resolution,
                                None if raw_dir is None else Path(raw_dir) / f"{y:04d}-{m:02d}", keep_raw, mirror): (y, m)
                    for y, m in pending}
         for done, future in enumerate(cf.as_completed(futures), start=1):
@@ -449,6 +464,43 @@ def staging_plan(years, resolution: float = 0.25, storm_fixes: int = 0) -> str:
     ])
 
 
+def main(argv=None) -> None:
+    """``python -m naturev1.satstage --root /data/sat --ibtracs ibtracs.since1980.csv --years 1980-2022``"""
+    import argparse
+
+    from .ibtracs import describe_table, parse_ibtracs, storm_label_table
+
+    parser = argparse.ArgumentParser(description="Stage GridSat-B1 into global frames and storm patches")
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--ibtracs", required=True, help="IBTrACS v04 CSV (ibtracs.since1980.list.v04r01.csv)")
+    parser.add_argument("--years", default="1980-2022", help="first-last, inclusive")
+    parser.add_argument("--workers", type=int, default=max((os.cpu_count() or 8) - 8, 1))
+    parser.add_argument("--resolution", type=float, default=0.25)
+    parser.add_argument("--raw-dir", default=None, help="keep or reuse raw GridSat files here")
+    parser.add_argument("--keep-raw", action="store_true")
+    parser.add_argument("--mirror", default="aws", choices=("aws", "ncei"))
+    args = parser.parse_args(argv)
+    first, last = (int(y) for y in args.years.split("-"))
+    root = Path(args.root)
+    root.mkdir(parents=True, exist_ok=True)
+    table_path = root / "labels.npz"
+    if table_path.exists():
+        table = dict(np.load(table_path, allow_pickle=False))
+    else:
+        table = storm_label_table(parse_ibtracs(args.ibtracs, since=first, until=last))
+        np.savez(table_path, **table)
+    print(describe_table(table), flush=True)
+    print(staging_plan(range(first, last + 1), args.resolution, len(table["time"])), flush=True)
+    results = stage_gridsat(root, range(first, last + 1), table, workers=args.workers, resolution=args.resolution,
+                            raw_dir=args.raw_dir, keep_raw=args.keep_raw, mirror=args.mirror)
+    done = sorted(root.glob("global/*.json"))
+    print(f"[satstage] {len(done)} months staged in {root}; this run added {len(results)}", flush=True)
+
+
 __all__ = ["GLOBAL_CHANNELS", "GRIDSAT_AWS", "GlobalFrameEncoder", "SATELLITE_FAMILIES", "STAGED_PATCH_PIXELS",
            "band_axes", "decode_global", "encode_global", "gridsat_url", "month_times", "nadir_view",
            "quality_control", "read_gridsat", "stage_gridsat", "stage_month", "staging_plan", "storm_crops"]
+
+
+if __name__ == "__main__":
+    main()
