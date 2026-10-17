@@ -1,0 +1,17 @@
+  lead      n  model km  steering consensus  stay-put   extrap.  wind MAE kt  persist
+    6h   1589        42        54        39       140        53          6.2      3.4
+   12h   1530        84       107        75       275       121          7.8      6.6
+   18h   1471       129       166       115       404       199          9.8      9.3
+   24h   1412       180       233       163       527       283         11.0     11.8
+   36h   1295       305       390       282       760       456         13.8     15.7
+   48h   1187       457       572       421       977       628         16.1     18.8
+   72h    997       844       978       739      1369      1002         19.5     24.2
+   96h    826      1204      1377      1051      1737      1418         21.9     27.9
+  120h    677      1576      1779      1373      2081      1828         22.8     31.6
+
+'steering' is physics alone: the deep-layer wind around the storm, no training. 'consensus' blends
+model, steering and extrapolation with weights fitted on the other held-out seasons.
+Beating 'extrap.' on track and 'persist' on wind is the bar; beating 'steering' is what the
+learned part is for. Losing to them means the heads have not learned anything the storm's own
+recent history, or the flow around it, did not already say.
+consensus weights in the checkpoint: +6h: scenario 18%, mixture_mean 76%, steering 0%, extrapolation 6%; +12h: scenario 20%, mixture_mean 80%, steering 0%, extrapolation 0%; +18h: scenario 22%, mixture_mean 78%, steering 0%, extrapolation 0%; +24h: scenario 25%, mixture_mean 70%, steering 0%, extrapolation 5%; +36h: scenario 35%, mixture_mean 46%, steering 0%, extrapolation 19%; +48h: scenario 42%, mixture_mean 27%, steering 0%, extrapolation 31%; +72h: scenario 53%, mixture_mean 4%, steering 0%, extrapolation 43%; +96h: scenario 56%, mixture_mean 0%, steering 0%, extrapolation 44%; +120h: scenario 51%, mixture_mean 0%, steering 0%, extrapolation 49%

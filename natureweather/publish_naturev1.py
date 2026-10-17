@@ -1,0 +1,153 @@
+# NatureV1 -- publish the finished model to the Hub: everything the run left on this machine, plus the release.
+#
+# Paste into a new molab cell and run it once, in the session that finished the run (or any session: what is
+# not on this disk is taken from the Hub). It needs your Hugging Face write token in this session: set
+# os.environ["HF_TOKEN"] in a cell first if it is not already there, and remove that line afterwards.
+#
+#  1. Final checkpoints, rebuilt storm banks, statistics and the training log -> the Hub, each compared with
+#     the Hub copy by SHA-256 (a same-size check is how the stale banks were left there).
+#  2. The release, built from the final model: model.safetensors (+ the .pt state dict from_pretrained reads),
+#     config.json, normalizer.json, training_record.json.
+#  3. The model card, results and evaluation scripts, fetched from the project's GitHub branch.
+# Re-running is safe: anything already identical on the Hub is skipped.
+import hashlib, json, os, subprocess, sys, tempfile, time, urllib.request
+from dataclasses import asdict
+from pathlib import Path
+
+REPO = "Sigmandndnns/NatureV1-500"
+DATA = Path("/home/marimo/naturev1_data")
+CKPT = DATA / "naturev1_ckpt"
+SOURCE = ("https://raw.githubusercontent.com/Wisk-inc/transformers/"
+          "claude/linear-context-architecture-a35c6h/natureweather")
+CARD = "HF_README.md"
+RESULTS = ["elnino_2023_end_to_end.txt", "heldout_landfall_ri_structure.txt",
+           "heldout_per_storm_and_hindcasts.txt", "heldout_storm_scorecard_2017_2019_2021.txt",
+           "maria_2017_end_to_end.txt"]
+EVAL = ["README.md", "arco15.py", "e2e_compare.py", "e2e_maria.py", "elnino2023.py", "other_heads.py",
+        "per_storm.py", "score2023.py", "test_storms.py", "validate15.py"]
+
+try:
+    import safetensors  # noqa: F401
+except ImportError:
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "safetensors"], check=True)
+import torch
+from huggingface_hub import HfApi, get_token, hf_hub_download
+from huggingface_hub.utils import disable_progress_bars
+from safetensors.torch import save_file
+
+disable_progress_bars()
+token = os.environ.get("HF_TOKEN") or get_token()
+if not token:
+    raise SystemExit("no Hugging Face token in this session: set os.environ['HF_TOKEN'] = '...' in a cell, run "
+                     "this again, then delete that line")
+api = HfApi(token=token)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 24), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def remote_sha(repo_path: str):
+    try:
+        for entry in api.get_paths_info(REPO, [repo_path], repo_type="model"):
+            lfs = getattr(entry, "lfs", None)
+            if lfs is not None:
+                return lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)
+            with tempfile.TemporaryDirectory() as scratch:   # small files are plain git: compare the bytes
+                return sha256(Path(hf_hub_download(REPO, repo_path, repo_type="model", local_dir=scratch,
+                                                   token=token)))
+    except Exception:
+        return None
+    return None
+
+
+def publish(local: Path, repo_path: str, note: str = "") -> None:
+    label = f"{repo_path:<46} {local.stat().st_size / 1e6:>9.1f} MB"
+    mine = sha256(local)
+    if remote_sha(repo_path) == mine:
+        print(f"{label}  already identical {note}")
+        return
+    began = time.time()
+    api.upload_file(path_or_fileobj=str(local), path_in_repo=repo_path, repo_id=REPO, repo_type="model",
+                    commit_message=f"{repo_path} {note}".strip())
+    ok = remote_sha(repo_path) == mine
+    print(f"{label}  pushed in {time.time() - began:.0f} s {note} -- "
+          + ("verified" if ok else "!! Hub copy does not match: run this cell again"))
+
+
+def step_of(directory: Path) -> str:
+    try:
+        return f"(step {json.loads((directory / 'state.json').read_text())['step']:,})"
+    except Exception:
+        return ""
+
+
+# 1 ── what the run left on this disk ───────────────────────────────────────────────────────────────────────
+print("1. training files")
+files = {CKPT / "storm_bank_train.pt": "checkpoints/storm_bank_train.pt",
+         CKPT / "storm_bank_val.pt": "checkpoints/storm_bank_val.pt",
+         CKPT / "batch.json": "staging/batch.json", DATA / "stats.json": "staging/stats.json",
+         DATA / "train.log": "logs/train.log"}
+for tag in ("stage1", "rollout", "stage2"):
+    files[CKPT / tag / "latest.pt"] = f"checkpoints/{tag}/latest.pt"
+    files[CKPT / tag / "state.json"] = f"checkpoints/{tag}/state.json"
+for local, repo_path in files.items():
+    if local.exists():
+        publish(local, repo_path, step_of(local.parent) if local.name in ("latest.pt", "state.json") else "")
+    else:
+        print(f"{repo_path:<46} {'':>12}  not on this machine -- the Hub copy stays")
+
+# 2 ── the release, from the final model ────────────────────────────────────────────────────────────────────
+print("\n2. release")
+from ihelix import fibonacci_sphere
+from naturev1.model import NatureConfig, NatureV1
+
+final = CKPT / "stage2" / "latest.pt"
+if not final.exists():
+    final = Path(hf_hub_download(REPO, "checkpoints/stage2/latest.pt", repo_type="model", token=token))
+payload = torch.load(final, map_location="cpu", weights_only=False)
+config = NatureConfig.from_dict(payload["config"])
+model = NatureV1(config, fibonacci_sphere(config.latent_points, num_neighbours=config.latent_neighbours,
+                                          cluster_size=config.latent_cluster))
+model.load_state_dict(payload["model"])
+model.eval()
+stats = DATA / "stats.json"
+if not stats.exists():
+    stats = Path(hf_hub_download(REPO, "staging/stats.json", repo_type="model", token=token))
+
+out = DATA / "hf_release"
+(out / "results").mkdir(parents=True, exist_ok=True)
+(out / "eval").mkdir(parents=True, exist_ok=True)
+state = {key: value.detach().contiguous().clone() for key, value in model.state_dict().items()}
+save_file(state, out / "model.safetensors", metadata={"format": "pt", "model": "NatureV1"})
+torch.save(model.state_dict(), out / "model.safetensors.pt")
+(out / "config.json").write_text(json.dumps(asdict(config), indent=2, default=list))
+(out / "normalizer.json").write_text(stats.read_text())
+(out / "training_record.json").write_text(json.dumps(
+    {"trained_steps_per_output": model.trained_heads(), "stage2_state": payload["state"],
+     "parameters": model.num_parameters()}, indent=2, default=str))
+print(f"   NatureV1, {model.num_parameters():,} parameters, from {final.name} {step_of(final.parent)}")
+
+# 3 ── card, results and evaluation scripts from GitHub ─────────────────────────────────────────────────────
+for remote, local in ([(CARD, out / "README.md")]
+                      + [(f"release/results/{n}", out / "results" / n) for n in RESULTS]
+                      + [(f"release/eval/{n}", out / "eval" / n) for n in EVAL]):
+    with urllib.request.urlopen(f"{SOURCE}/{remote}", timeout=60) as response:
+        local.write_bytes(response.read())
+
+for local in sorted(p for p in out.rglob("*") if p.is_file()):
+    publish(local, str(local.relative_to(out)), "release")
+
+# check: what anyone downloading it gets
+from naturev1.hub import from_pretrained
+
+check, _, normalizer = from_pretrained(REPO, device="cpu", token=token)
+same = all(torch.equal(check.state_dict()[k], v) for k, v in model.state_dict().items())
+print(f"\nfrom_pretrained('{REPO}'): {check.num_parameters():,} parameters, "
+      f"{len(normalizer.variables) if normalizer else 0} normalised channels, "
+      + ("weights identical to the trained model" if same else "!! weights differ -- run this cell again"))
+print(f"done: https://huggingface.co/{REPO}")

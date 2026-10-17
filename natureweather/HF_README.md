@@ -23,10 +23,12 @@ pipeline_tag: other
 
 # NatureV1 — a probabilistic weather and hurricane model built on geometric attention
 
-> **Status: training in progress.** This repository holds the live checkpoints of the first full training run,
-> mirrored here every ten minutes while it trains. No skill is claimed yet. The scorecards that decide whether
-> this model is any good are produced by the training pipeline itself and will be added to this card when the
-> run finishes. Until then, treat every number it produces as unverified. **Do not use it for real decisions.**
+> **Status: trained and scored — a research model, not an operational forecast.** The first full run is complete
+> and every number in [section 4](#4-results) was measured on data the model never trained on, including an
+> end-to-end test on the 2023 hurricane season (a strong El Niño year no part of the model ever saw). It beats
+> physics-only steering and straight-line extrapolation on hurricane track at every lead, but it is several times
+> less accurate than the National Hurricane Center and the leading global models. **Do not use it for real
+> decisions** — for those, use [the National Hurricane Center](https://www.nhc.noaa.gov).
 
 NatureV1 is an 89-million-parameter model of the atmosphere that forecasts global weather out to five days and,
 for tropical cyclones, where a storm will go, how strong it will get, whether it will intensify rapidly, and
@@ -151,8 +153,10 @@ uncertainties open at climatological spread rather than at a confident guess.
    on the held-out seasons.
 
 ### 2.5 Data
-- **ERA5 via WeatherBench 2**, 1.5°, 240×121, six-hourly, 13 pressure levels, 1959–2021. Split **by time**: train
-  to 2015, validation 2016–2019, test 2020–2021. A random split would leak tomorrow's answer into training.
+- **ERA5 via WeatherBench 2**, 1.5°, 240×121, six-hourly, 13 pressure levels. Split **by time** over 1959–2021
+  (train to 2015, validation 2016–2019, test 2020–2021); this run staged the last **five training years,
+  2011–2015 (7,300 global states, ~38 GB)**, and validated on 2016. A random split would leak tomorrow's answer
+  into training.
 - **HURDAT2** Atlantic best tracks, 1979 onward (the satellite era). Split **by season** (validation 2017, 2019,
   2021; test 2018, 2020). Labels are paired with the reanalysis **by timestamp**, not row index; off-synoptic
   landfall specials are dropped rather than snapped; scarce labels (radius of maximum wind exists on under 5% of
@@ -191,25 +195,109 @@ minutes.
 
 ---
 
-## 4. Results so far
+## 4. Results
 
-**None for skill.** The first full run is in progress. What has been verified end to end is the *mechanism*: the
-whole pipeline — staging, three training stages, scorecards and the hindcast — runs on real ERA5 and HURDAT2 data
-at reduced scale; 236 tests cover the physics (a storm in a uniform westerly moves east by exactly u·t, shear equals
-the level difference, a consensus recovers the member that is exactly right), the label pairing, the resilience
-paths and the honesty rules.
+All numbers below come from the published weights. Track errors are great-circle kilometres; "steering" is the
+physics-only steering-flow track (no training), "straight" is extrapolation of the last 12 hours, "stay-put" is a
+storm that does not move, and wind "persistence" is "it stays as strong as it is now". The raw outputs are in
+[`results/`](./results) and the scripts that produced them in [`eval/`](./eval).
 
-One result stands independently of training, because it uses no trained parameters: on Hurricane Dorian, issued
-2019‑08‑30 18Z from the 1.5° analysis, the **physics-only steering track** had errors of 177 km at 24 h, 382 km at
-48 h, 546 km at 72 h and 531 km at 120 h. Straight extrapolation scored 161, 397, 651 and 1012 km: it wins at
-24 h, and steering wins from 48 h onward. For scale only, NHC's official Atlantic track error averaged 35.7 n mi
-(66 km) at 24 h and 90.5 n mi (168 km) at 72 h over 2018–2022. That is an average over many storms from an operational
-centre, set against one storm from a 1.5° analysis, so it is not a like-for-like comparison. The steering member is
-the floor the learned model starts from, not the ceiling it is aiming at.
+### 4.1 Training, in numbers
+| Stage | What trained | Steps | Notes |
+|---|---|---|---|
+| One — reanalysis pretraining | backbone + surface heads | 7,275 (8 epochs) | ERA5 2011–2015, Gaussian NLL |
+| 1b — full-state rollout | backbone + state head | 4,000 | curriculum to 12 steps (72 h), 2-member CRPS; ~74 GPU-hours |
+| Two — hurricane heads | storm heads only, backbone frozen | best epoch 3 of 28 | 584 storms / 16,219 samples, 1979+; early-stopped on held-out seasons |
 
-When the run finishes, this section will carry the scorecards verbatim.
+One RTX PRO 6000 (96 GB). The full per-output training record is in `training_record.json`; outputs with zero
+steps (weather type, landfall timing, RI onset, ENSO, satellite and environment encoders) are never shown.
 
----
+### 4.2 Global weather (held-out data)
+From the run's own WeatherBench-style scorecard, on identical batches for every baseline:
+- **Full-state rollout: beats climatology by more than 1% on 84 of 84 field-lead pairs, and has skill against both
+  persistence and climatology out to +72 h on msl, q700, t2m, t850, u10, v10 and z500.** The ensemble
+  spread/skill ratio at +24 h is **1.08** (1.0 is perfectly calibrated).
+- The **direct multi-lead surface heads do not have skill** (they beat persistence on 6 of 45 field-lead pairs, all
+  precipitation). They were trained in stage one and not updated when the rollout retrained the backbone under
+  them; use the full-state rollout for weather. The complete tables are in `logs/train.log`.
+
+### 4.3 Hurricane track and intensity — held-out seasons 2017, 2019, 2021
+59 Atlantic storms (including Harvey, Irma, Maria, Dorian, Lorenzo, Ida) that neither the backbone nor the storm
+heads trained on. Consensus weights scored leave-one-season-out.
+
+| Lead | n | **NatureV1** consensus | learned track | steering | straight | stay-put | wind error | persistence |
+|---|---|---|---|---|---|---|---|---|
+| 6 h | 1589 | **39** | 42 | 54 | 53 | 140 | 6.2 kt | 3.4 kt |
+| 12 h | 1530 | **75** | 84 | 107 | 121 | 275 | 7.8 kt | 6.6 kt |
+| 24 h | 1412 | **163** | 180 | 233 | 283 | 527 | **11.0 kt** | 11.8 kt |
+| 48 h | 1187 | **421** | 457 | 572 | 628 | 977 | **16.1 kt** | 18.8 kt |
+| 72 h | 997 | **739** | 844 | 978 | 1002 | 1369 | **19.5 kt** | 24.2 kt |
+| 120 h | 677 | **1373** | 1576 | 1779 | 1828 | 2081 | **22.8 kt** | 31.6 kt |
+
+Track beats steering and straight-line extrapolation at **every** lead; wind beats persistence from 24 h on.
+
+### 4.4 End to end on an unseen El Niño season — the 2023 hurricanes
+2023 was a strong El Niño year and is outside everything the model saw. ERA5 for 2023 was rebuilt at WeatherBench 2's
+1.5° grid from ARCO-ERA5 with area-weighted conservative regridding — checked against the WeatherBench 2 store on
+an overlapping date, where it agrees to rounding precision (0.03 Pa in sea-level pressure) — and every forecast
+ran through the **full** model, raw weather in. All seven hurricanes, one forecast per day at 00Z (96 forecasts),
+with the shipped consensus weights and no refitting.
+
+| Lead | n | **NatureV1** | steering | straight | stay-put | wind error | persistence | 2017/19/21 for comparison |
+|---|---|---|---|---|---|---|---|---|
+| 6 h | 96 | **38** | 47 | 53 | 125 | 6.5 kt | 2.9 kt | 39 |
+| 12 h | 95 | **74** | 99 | 128 | 248 | 7.5 kt | 5.8 kt | 75 |
+| 24 h | 89 | **167** | 231 | 309 | 476 | **10.7 kt** | 11.9 kt | 163 |
+| 48 h | 82 | **503** | 689 | 719 | 866 | **14.7 kt** | 18.7 kt | 418 |
+| 72 h | 75 | **810** | 1146 | 1132 | 1211 | **15.8 kt** | 21.5 kt | 735 |
+| 120 h | 61 | **1487** | 2028 | 1868 | 1807 | **16.1 kt** | 28.0 kt | 1374 |
+
+| Storm (peak) | 24 h | 48 h | 72 h |
+|---|---|---|---|
+| Lee (145 kt) | **100** (steering 120) | **240** (378) | **325** (635) |
+| Margot | 84 (167) | 350 (522) | 678 (926) |
+| Tammy | 125 (223) | 441 (601) | 838 (1295) |
+| Don | 169 (222) | 439 (577) | 858 (1031) |
+| Idalia | 165 (245) | 534 (718) | 1049 (1373) |
+| Franklin | 211 (262) | 680 (944) | 827 (1263) |
+| Nigel | 292 (369) | 727 (924) | 1111 (1429) |
+
+Out to 24 h the El Niño season scored the same as the held-out neutral/La Niña seasons; from 48 h the errors are
+larger, but the margin over physics steering grew (29% better at 72 h, against 25%). It beat steering for every
+storm at every one of these leads. One season, seven storms, 00Z only: encouraging, not conclusive.
+
+### 4.5 Landfall, rapid intensification and structure (2017/19/21)
+| Output | Result | Verdict |
+|---|---|---|
+| Landfall probability | Brier skill over the base rate +4% (6 h) to +29% (72 h); AUC 0.81–0.86. 2023: +30 to +42% from 72 h, AUC 0.81–0.95 | skilful |
+| Rapid intensification (3 thresholds) | ranks risk well (AUC 0.82–0.84) but probabilities are too high (Brier worse than the base rate) | needs calibration before use |
+| Peak wind (eyewall head) | MAE 6 / 11 / 19 kt at 6 / 24 / 72 h vs 22–26 kt for the climatological mean | beats climatology |
+| 34/50/64 kt wind radii | MAE 32–37 n mi vs 47–49 for the mean | about 30% better |
+| Radius of maximum wind | 28 vs 29 n mi (6 h), loses by 72 h | no skill |
+
+### 4.6 Individual forecasts
+**Maria 2017**, issued 18 Sep 00Z east of the Lesser Antilles, the full model from raw ERA5 (`results/maria_2017_end_to_end.txt`):
+miss **14 / 26 / 15 / 65 / 118 / 343 km** at 6 h / 1 / 2 / 3 / 4 / 5 days, against 33 / 91 / 101 / 136 / 181 / 245 km
+for steering. Wind forecast about 70 kt against an observed 145–150 kt.
+
+**Dorian 2019**, issued 30 Aug 18Z, from the run's hindcast:
+
+| Lead | 6 h | 24 h | 48 h | 72 h | 120 h |
+|---|---|---|---|---|---|
+| learned track (top scenario 26%) | 24 | 99 | 336 | 688 | 1034 |
+| consensus | 12 | 106 | 355 | 669 | 935 |
+| steering | 14 | 177 | 382 | 546 | 531 |
+| straight | 17 | 161 | 397 | 651 | 1012 |
+
+Good to two days; Dorian then stalled over the Bahamas, which steering handled better.
+
+### 4.7 In context
+For scale only: the National Hurricane Center's official Atlantic track error averaged about 66 km at 24 h and
+168 km at 72 h over 2018–2022, and the leading global AI models (GraphCast, Pangu-Weather, FuXi) and ECMWF are in
+the same league. NatureV1's 163 km and 739 km are **2.5–4.5× larger**. It is a 1.5° model trained on five years
+of data with a few GPU-days of compute; those systems use 0.25°, decades of data and orders of magnitude more
+compute. Intensity is the weakest output: like every 1.5° model it cannot see an eyewall, and it forecasts about
+70 kt for storms that reach 145–160 kt.
 
 ## 5. Limitations
 
@@ -217,8 +305,13 @@ When the run finishes, this section will carry the scorecards verbatim.
   explicit environment inputs exist to compensate, and the scorecard will say how far they get.
 - **Not operational.** It runs on reanalysis, which is available days after the fact. There is no real-time
   analysis feed, and the satellite input path exists but is untrained.
-- **Verification is internal.** Three validation seasons, scored by the pipeline's own scorecards; no independent
-  party has verified it. Calibration of the landfall and RI probabilities has not yet been measured.
+- **Verification is internal.** Three held-out seasons plus the 2023 season, scored by this project's own
+  scripts; no independent party has verified it. Rapid-intensification probabilities are over-confident and
+  should be calibrated before use; radius of maximum wind has no skill; major-hurricane intensity is badly
+  underestimated.
+- **Surface heads are stale.** The direct multi-lead surface fields were not retrained after the rollout stage;
+  use the full-state rollout for weather.
+- **Small data.** Five years of reanalysis at 1.5°, and the storm heads start memorising after about three epochs.
 - **Atlantic only** for the storm heads, 1979 onward.
 - **Tornadoes, hail, flash floods** are far below this resolution and out of scope.
 
@@ -234,22 +327,17 @@ pip install "naturev1[all]"
 The complete pipeline is the cell `colab_naturev1.py` shipped with the package; it installs what it needs, stages
 the data, trains in stages, scores itself, and only publishes if it earned it. Every setting is at the top.
 
-Load a checkpoint from this repository:
+Load the released model (weights, config and the normalisation statistics it was trained with):
 
 ```python
-from naturev1 import NatureV1, NatureConfig, build_forecast
-from huggingface_hub import hf_hub_download
-import torch
-from ihelix import fibonacci_sphere
+from naturev1.hub import from_pretrained
 
-path = hf_hub_download("Sigmandndnns/NatureV1-500", "checkpoints/stage1/latest.pt")
-payload = torch.load(path, map_location="cpu", weights_only=False)
-config = NatureConfig.from_dict(payload["config"])
-model = NatureV1(config, fibonacci_sphere(config.latent_points, num_neighbours=config.latent_neighbours,
-                                          cluster_size=config.latent_cluster))
-model.load_state_dict(payload["model"])
+model, config, normalizer = from_pretrained("Sigmandndnns/NatureV1-500")
 print(model.trained_heads())      # steps each output has received; 0 = never trained, never shown
 ```
+
+The weights are also provided as `model.safetensors`. To reproduce the results in section 4, see [`eval/`](./eval):
+`elnino2023.py` rebuilds 1.5° ERA5 for any date from ARCO-ERA5 and runs the full model on a season's storms.
 
 `build_forecast(outputs, config.lead_times_hours, issued, storm_center=(lat, lon), trained=model.trained_heads())`
 turns a forward pass into the forecast bundle: track scenarios with cones, consensus with members, landfall,
@@ -258,12 +346,16 @@ every untrained section marked unavailable.
 
 ### Files in this repository
 ```
-checkpoints/stage1/latest.pt      stage one, pushed every 10 minutes while training
-checkpoints/rollout/latest.pt     stage 1b, once it starts
-checkpoints/stage2/latest.pt      hurricane heads, once they start
-checkpoints/storm_bank_*.pt       cached frozen-backbone features for the storm heads
-staging/era5.npy, era5_val.npy    the normalised ERA5 staging (mirror, so a new session needs no re-download)
-staging/stats.json, batch.json    normalisation statistics and the measured batch size
+model.safetensors                 the released weights (89.45 M parameters), safetensors format
+model.safetensors.pt              the same weights as a PyTorch state dict (what from_pretrained loads)
+config.json, normalizer.json      model configuration and the training normalisation statistics
+training_record.json              steps per output, parameter count, stage-two state
+results/                          every scorecard and test in section 4, as produced
+eval/                             the scripts that produced them
+checkpoints/stage1|rollout|stage2 full training checkpoints (with optimizer state) for resuming or fine-tuning
+checkpoints/storm_bank_*.pt       frozen-backbone features for the storm heads
+staging/                          the normalised ERA5 staging, so a new session needs no re-download
+logs/train.log                    the complete training log, including every scorecard
 ```
 
 ---
@@ -287,5 +379,6 @@ it fails visibly.
 
 ---
 
-*NatureV1, iHELIX and the training pipeline are by Nathan, Apache-2.0. This card describes version 0.10 of the
-pipeline; it will be updated with the scorecards when the first full training run completes.*
+*NatureV1, iHELIX and the training pipeline are by Nathan, Apache-2.0. This card describes the first full
+training run of version 0.10 of the pipeline. ERA5 data: Copernicus Climate Change Service; HURDAT2: NOAA
+National Hurricane Center.*

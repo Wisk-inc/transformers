@@ -1,0 +1,45 @@
+2023 storms scored: Don, Franklin, Idalia, Lee, Margot, Nigel, Tammy (96 forecasts, issued 00Z)
+
+2023 -- strong El Nino, never seen by any part of the model (full model from raw ERA5):
+ lead    n  NatureV1  steering  straight  stay-put  wind err  persist
+   6h   96      38km      47km      53km     125km     6.5kt    2.9kt
+  12h   95      74km      99km     128km     248km     7.5kt    5.8kt
+  18h   94     118km     160km     219km     376km     8.7kt    8.4kt
+  24h   89     167km     231km     309km     476km    10.7kt   11.9kt
+  36h   88     318km     438km     523km     681km    12.7kt   15.5kt
+  48h   82     503km     689km     719km     866km    14.7kt   18.7kt
+  72h   75     810km    1146km    1132km    1211km    15.8kt   21.5kt
+  96h   68    1175km    1605km    1501km    1516km    17.0kt   24.8kt
+ 120h   61    1487km    2028km    1868km    1807km    16.1kt   28.0kt
+
+2017 / 2019 / 2021 -- La Nina / neutral held-out seasons, same metrics, same shipped weights:
+ lead    n  NatureV1  steering  straight  stay-put  wind err  persist
+   6h 1589      39km      54km      53km     140km     6.2kt    3.4kt
+  12h 1530      75km     107km     121km     275km     7.8kt    6.6kt
+  18h 1471     115km     166km     199km     404km     9.8kt    9.3kt
+  24h 1412     163km     233km     283km     527km    11.0kt   11.8kt
+  36h 1295     281km     390km     456km     760km    13.8kt   15.7kt
+  48h 1187     418km     572km     628km     977km    16.1kt   18.8kt
+  72h  997     735km     978km    1002km    1369km    19.5kt   24.2kt
+  96h  826    1051km    1377km    1418km    1737km    21.9kt   27.9kt
+ 120h  677    1374km    1779km    1828km    2081km    22.8kt   31.6kt
+
+per storm, NatureV1 consensus track error (km) at 1 / 2 / 3 days, against physics steering:
+  Don       n=14     169 ( 222)     439 ( 577)     858 (1031)
+  Franklin  n=21     211 ( 262)     680 ( 944)     827 (1263)
+  Idalia    n=13     165 ( 245)     534 ( 718)    1049 (1373)
+  Lee       n=13     100 ( 120)     240 ( 378)     325 ( 635)
+  Margot    n=11      84 ( 167)     350 ( 522)     678 ( 926)
+  Nigel     n=11     292 ( 369)     727 ( 924)    1111 (1429)
+  Tammy     n=13     125 ( 223)     441 ( 601)     838 (1295)
+
+landfall probability (2023): Brier vs base rate, and AUC
+     6h n  96  landfalls   2  skill vs base rate -8%  AUC 0.81
+    12h n  95  landfalls   4  skill vs base rate +6%  AUC 0.86
+    18h n  94  landfalls   4  skill vs base rate -0%  AUC 0.86
+    24h n  89  landfalls   5  skill vs base rate +3%  AUC 0.84
+    36h n  88  landfalls   8  skill vs base rate +10%  AUC 0.89
+    48h n  82  landfalls   9  skill vs base rate +10%  AUC 0.87
+    72h n  75  landfalls  12  skill vs base rate +30%  AUC 0.92
+    96h n  68  landfalls  14  skill vs base rate +40%  AUC 0.95
+   120h n  61  landfalls  14  skill vs base rate +42%  AUC 0.94

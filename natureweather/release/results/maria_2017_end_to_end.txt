@@ -1,0 +1,12 @@
+
+Maria from 14.0N 58.0W | backbone features vs saved bank: cosine near 0.99995, far 0.99996 | top scenario 32%
+ lead        actual    end-to-end   miss    bank-based   miss  steer  wind e2e/bank/actual
+   6h  14.3N  59.0W  14.2N  58.9W     14  14.2N  58.9W     14     33    71 /   71 /   80 kt
+  12h  14.5N  59.7W  14.5N  59.5W     16  14.5N  59.6W     16     66    71 /   71 /  100 kt
+  18h  14.9N  60.4W  14.9N  60.2W     24  14.9N  60.2W     23     83    70 /   70 /  110 kt
+  24h  15.3N  61.1W  15.3N  60.9W     26  15.3N  60.9W     26     91    71 /   71 /  145 kt
+  36h  16.1N  62.7W  16.1N  62.5W     26  16.1N  62.5W     26    102    69 /   69 /  140 kt
+  48h  17.0N  64.3W  16.9N  64.4W     15  16.9N  64.4W     17    101    70 /   69 /  150 kt
+  72h  19.0N  67.6W  18.6N  68.0W     65  18.6N  68.0W     67    136    68 /   68 /   95 kt
+  96h  20.8N  70.0W  20.4N  71.1W    118  20.4N  71.1W    118    181    62 /   62 /  110 kt
+ 120h  23.7N  71.6W  22.0N  74.4W    343  22.0N  74.4W    344    245    63 /   63 /  105 kt
