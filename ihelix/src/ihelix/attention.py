@@ -45,6 +45,19 @@ def _duplicate_mask(index: torch.Tensor) -> torch.Tensor:
     return torch.zeros_like(repeated).scatter_(-1, order, repeated)
 
 
+def _scatter_plan(grid: FieldGrid) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    ``(points, slots)``: where each real (non-padding) cluster slot writes back to in point order.
+
+    Built at grid construction; recomputed here for a grid saved by an older version.
+    """
+    points = getattr(grid, "scatter_points", None)
+    if points is None or points.device != grid.order.device:
+        slots = grid.cluster_valid.reshape(-1).nonzero().squeeze(-1)
+        grid.scatter_slots, grid.scatter_points = slots, grid.order[slots]
+    return grid.scatter_points, grid.scatter_slots
+
+
 class RelativeEncoder(nn.Module):
     """
     Turns a neighbour displacement into a per-head attention bias.
@@ -366,9 +379,10 @@ class IndexAttention(nn.Module):
             batch, grid.num_points, proj.num_kv_heads, proj.groups, proj.head_dim,
             dtype=attended.dtype, device=x.device,
         )
-        flat_order = grid.order
-        keep = grid.cluster_valid.reshape(-1)
-        output[:, flat_order[keep]] = attended[:, keep]
+        # Integer indices worked out once per grid, not a boolean mask applied every step: a mask makes
+        # the shape of the write depend on the data, which a compiled graph has to break at.
+        points, slots = _scatter_plan(grid)
+        output = output.index_copy(1, points, attended.index_select(1, slots))
         return proj.merge(output)
 
 

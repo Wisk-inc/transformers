@@ -43,6 +43,7 @@ from .attention import CrossAttention, GeodesicAttention, GridLink, IndexAttenti
 from .domains import CATALOGUE, channel_flow, cylinder, describe, image, ocean, seismic, volume
 from .geometry import EARTH_RADIUS_KM, Axis, Geometry
 from .grid import FieldGrid, fibonacci_sphere, grid_fingerprint, latlon_grid
+from .sphere import ConservativeRegrid, GridToMesh, SphericalConv2d, cell_edges, latlon_channels, sphere_pad
 from .model import (
                     GradientCheckpointing,
                     GridBound,
@@ -53,12 +54,13 @@ from .model import (
                     TemporalStrand,
 )
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 __author__ = "Nathan"
 
 __all__ = [
     "EARTH_RADIUS_KM",
     "Axis",
+    "ConservativeRegrid",
     "CrossAttention",
     "FieldGrid",
     "GeodesicAttention",
@@ -74,15 +76,20 @@ __all__ = [
     "image",
     "describe",
     "GridLink",
+    "GridToMesh",
     "IHelixBlock",
     "IHelixConfig",
     "IHelixField",
     "IHelixFieldModel",
     "IndexAttention",
     "RelativeEncoder",
+    "SphericalConv2d",
     "TemporalStrand",
     "__version__",
     "grid_fingerprint",
     "fibonacci_sphere",
     "latlon_grid",
+    "cell_edges",
+    "latlon_channels",
+    "sphere_pad",
 ]

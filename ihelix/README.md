@@ -123,6 +123,35 @@ model.blocks[0].local.coverage(grid)     # 1.0 = every head decided by its radiu
 At `1.0` the invariances above are exact. Below it they degrade smoothly, and the number tells you so.
 The neighbour count is a preprocessing choice — the weights never change.
 
+## Regular grids, the way the sphere wants them (0.6)
+
+The data does not arrive as points. Satellite archives and reanalyses come as latitude-longitude arrays,
+and three things have to happen to them before any attention runs. `ihelix.sphere` does each of them
+without the usual artefact:
+
+| operation | the usual way | what goes wrong | `ihelix` |
+| --- | --- | --- | --- |
+| change resolution | bilinear interpolation | keeps 1 pixel in 13 going 0.07° → 0.25°; storms alias into noise | `ConservativeRegrid`: area-weighted, mask-aware, also returns per-cell min / max / spread |
+| convolve | `nn.Conv2d`, zero padding | a wall at the date line and at each pole | `SphericalConv2d`: longitude wraps, rows fold across the pole |
+| get onto the mesh | interpolate to mesh points | same aliasing, and polar caps filled with edge values | `GridToMesh`: every pixel to its nearest mesh point once; mean, extremes and coverage per point |
+
+All three are static: the geometry is worked out once, the forward pass is matrix products and indexed
+reductions with fixed shapes. A full GridSat infrared mosaic (2000 × 5143) regrids to 0.25° in about
+0.15 s on four CPU cores, mean, spread and extremes included.
+
+```python
+from ihelix import ConservativeRegrid, GridToMesh, SphericalConv2d
+
+regrid = ConservativeRegrid(src_lat, src_lon, dst_lat, dst_lon)
+mean, coverage = regrid(brightness_temperature)           # NaN = missing; coverage = observed share
+mean, spread, coverage = regrid.moments(brightness_temperature)
+coldest, warmest = regrid.extremes(brightness_temperature)
+on_mesh = GridToMesh(dst_lat, dst_lon, mesh)(mean, extremes=True)   # {"mean", "coverage", "min", "max"}
+```
+
+The index strand's write-back now uses integer indices fixed per grid instead of a boolean mask, so a
+compiled graph no longer breaks there. Results are bit-identical.
+
 ## Honest limits
 
 - **No trained checkpoints.** Nothing here has been trained on real data. Every claim above is about

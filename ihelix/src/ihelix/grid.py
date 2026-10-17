@@ -198,6 +198,10 @@ class FieldGrid:
         if padding:
             valid[-padding:] = False
         self.cluster_valid = valid.view(num_clusters, cluster_size)
+        # Where each real cluster slot goes back to in point order, as integer indices (see
+        # IndexAttention): fixed per grid, so worked out here rather than masked out every step.
+        self.scatter_slots = valid.nonzero().squeeze(-1)
+        self.scatter_points = order[self.scatter_slots]
 
         member_weights = self.weights[self.cluster_members] * self.cluster_valid
         self.cluster_weights = member_weights.sum(-1)
@@ -247,6 +251,7 @@ class FieldGrid:
         grid.neighbours = grid.neighbour_distances = grid.neighbour_offsets = None
         grid.neighbour_alignment = grid.cluster_members = grid.cluster_valid = None
         grid.cluster_points = grid.cluster_weights = grid.order = None
+        grid.scatter_slots = grid.scatter_points = None
         return grid
 
     @classmethod
