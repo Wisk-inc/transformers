@@ -27,8 +27,12 @@ pipeline_tag: other
 > and every number in [section 4](#4-results) was measured on data the model never trained on, including an
 > end-to-end test on the 2023 hurricane season (a strong El Niño year no part of the model ever saw). It beats
 > physics-only steering and straight-line extrapolation on hurricane track at every lead, but it is several times
-> less accurate than the National Hurricane Center and the leading global models. **Do not use it for real
-> decisions** — for those, use [the National Hurricane Center](https://www.nhc.noaa.gov).
+> less accurate than the National Hurricane Center and the leading global models, it misses rapid intensification,
+> and a red-team pass (section 4.8) found failure modes you should know before using any output. **Do not use it
+> for real decisions** — for those, use [the National Hurricane Center](https://www.nhc.noaa.gov).
+>
+> **Training took about one week** of wall-clock time on a single GPU in a hosted notebook (molab), including
+> session restarts and re-staging; the rollout stage alone was 74 GPU-hours.
 
 NatureV1 is an 89-million-parameter model of the atmosphere that forecasts global weather out to five days and,
 for tropical cyclones, where a storm will go, how strong it will get, whether it will intensify rapidly, and
@@ -49,11 +53,13 @@ Given six frames of the atmosphere (the last 30 hours of ERA5 reanalysis: 89 cha
 variables on 13 pressure levels — on a 1.5° global grid), NatureV1 produces:
 
 **Global weather, at 6, 12, 18, 24, 36, 48, 72, 96 and 120 hours**
-- 2 m temperature, mean sea-level pressure, 10 m wind, precipitation, each as a mean and a 90% interval, at every
-  grid point.
-- A weather-type category (clear to thunderstorm to snow) at every grid point.
 - A **full-state rollout**: the whole atmosphere — all 86 prognostic channels, surface to 50 hPa — stepped forward
-  6 hours at a time on its own forecast, with mass conservation, out to 72 hours, as an ensemble.
+  6 hours at a time on its own forecast, with mass conservation, out to 72 hours, as an ensemble. **This is the
+  weather output with measured skill** (section 4.2).
+- 2 m temperature, mean sea-level pressure, 10 m wind and precipitation directly at each lead, as a mean and a 90%
+  interval. These direct surface heads were not updated after the rollout stage and have no skill in this release;
+  use the rollout.
+- A weather-type category head exists but was never trained, so it is never shown.
 
 **For a tropical cyclone, given its current centre**
 - **Track as scenarios, not a line**: six weighted trajectories ("38% recurves offshore, 27% tracks the coast…"),
@@ -64,7 +70,9 @@ variables on 13 pressure levels — on a 1.5° global grid), NatureV1 produces:
   consensus beats every single model in it, done inside one model. Every member is reported alongside the blend.
 - **Intensity**: maximum wind and minimum central pressure per lead, with intervals and the Saffir–Simpson category.
 - **Rapid intensification**: the probability of a 25, 30 and 35 kt gain in 24 hours, plus the expected change.
-- **Landfall**: the probability of landfall by each lead and the most likely window.
+  It ranks risk well but its probabilities are far too high (section 4.8).
+- **Landfall**: the probability of landfall by each lead. (The landfall-timing head was never trained and is not
+  shown.)
 - **Core structure**: peak eyewall wind, radius of maximum wind, and 34/50/64 kt wind radii by quadrant.
 - **The storm's environment**, read from the model's own atmosphere: deep-layer steering, 200–850 hPa shear,
   mid-level humidity, ocean temperature — the predictors operational statistical schemes (SHIPS) are built on.
@@ -77,10 +85,13 @@ This is as much a part of the model as the outputs above.
   `{"available": false, "reason": ...}`. The training record travels inside the checkpoint.
 - A forecast run from an input path the model was never trained on (today, the satellite path) is marked
   **`trustworthy: false`** and the live satellite forecast is refused outright.
-- Every number is checked against **physical bounds** before it is shown or saved: no 400 kt hurricane, no
-  pressure outside 850–1100 hPa, no cone wider than an ocean, no probabilities that do not sum to one.
-- It is **published only if it beats persistence** on held-out data by a margin, and only if it demonstrably
-  changes its answer when the weather changes.
+- `check_forecast` tests every scenario track, intensity, eyewall and RI value against **physical bounds**: no
+  400 kt hurricane, no pressure outside 850–1100 hPa, no cone wider than an ocean, no probabilities that do not sum
+  to one. It reports problems; it does not block the forecast, so a caller must act on what it returns. Section
+  4.8 lists what it does not catch.
+- The pipeline publishes only if the model beats persistence somewhere on held-out data and demonstrably changes
+  its answer when the weather changes. That gate is weak (precipitation alone can pass it); this release was
+  published after the full scorecards and red-team below were reviewed.
 
 ---
 
@@ -142,6 +153,12 @@ uncertainties open at climatological spread rather than at a confident guess.
   model's own rolled-out atmosphere step by step. The steering track needs **no training at all**.
 
 ### 2.4 Training, in stages
+The whole run took **about one week of wall-clock time** on one RTX PRO 6000 (96 GB) in a hosted notebook. The
+GPU time was roughly three to four days; the rest was hosted-session overhead — sessions end after 12 hours or 90
+idle minutes and the disk is wiped, so each restart re-pulled checkpoints and staged data from this repository
+before training resumed. Every stage is resumable from a one-minute checkpoint, so no restart lost more than a
+minute of training.
+
 1. **Stage one — pretraining on reanalysis.** Every surface channel at every lead, Gaussian negative
    log-likelihood, area-weighted, on years of ERA5. This is where the backbone learns what the atmosphere does,
    from about 2×10¹¹ supervised values.
@@ -206,10 +223,10 @@ storm that does not move, and wind "persistence" is "it stays as strong as it is
 | Stage | What trained | Steps | Notes |
 |---|---|---|---|
 | One — reanalysis pretraining | backbone + surface heads | 7,275 (8 epochs) | ERA5 2011–2015, Gaussian NLL |
-| 1b — full-state rollout | backbone + state head | 4,000 | curriculum to 12 steps (72 h), 2-member CRPS; ~74 GPU-hours |
-| Two — hurricane heads | storm heads only, backbone frozen | best epoch 3 of 28 | 584 storms / 16,219 samples, 1979+; early-stopped on held-out seasons |
+| 1b — full-state rollout | backbone + state head | 4,000 | curriculum to 12 steps (72 h), 2-member CRPS; **74.3 GPU-hours** (4,459 min) |
+| Two — hurricane heads | storm heads only, backbone frozen | best epoch 3 of 28 | 584 storms / 16,219 samples, 1979+; feature banks ~2 h, heads minutes; early-stopped on held-out seasons |
 
-One RTX PRO 6000 (96 GB). The full per-output training record is in `training_record.json`; outputs with zero
+**About one week end to end** (three to four GPU-days plus hosted-notebook restarts), one RTX PRO 6000 (96 GB). The full per-output training record is in `training_record.json`; outputs with zero
 steps (weather type, landfall timing, RI onset, ENSO, satellite and environment encoders) are never shown.
 
 ### 4.2 Global weather (held-out data)
@@ -299,6 +316,83 @@ of data with a few GPU-days of compute; those systems use 0.25°, decades of dat
 compute. Intensity is the weakest output: like every 1.5° model it cannot see an eyewall, and it forecasts about
 70 kt for storms that reach 145–160 kt.
 
+### 4.8 Red team: where it breaks
+A deliberate attempt to break the published model: physically impossible inputs, calibration against what
+actually happened, removing one input at a time, logical consistency, a data-leak audit, and the hardest storm we
+could find. Everything here is on held-out data unless noted; scripts in [`eval/`](./eval).
+
+**Data leakage — none found.** Storm-head training seasons are 1979–2016; held-out 2017/2019/2021 and test
+2018/2020/2022 never appear in training; the weather backbone trained on 2011–2015 only. 2023 is outside
+everything.
+
+**Calibration — is the uncertainty honest?** (2017/19/21; 2023 in brackets)
+
+| Output | Claimed | Actually |
+|---|---|---|
+| Track, full 6-scenario mixture, 50% region | 50% | 47–53% (32–55%) — honest |
+| Track, full mixture, 90% region | 90% | 87–92% (81–93%) — honest, slightly tight at 4–5 days in 2023 |
+| Track, **top scenario's "95%" cone** (what a single cone shows) | 95% | **60–87%** — over-confident; the other scenarios carry the rest |
+| `cone_radius_km_68` field | 68% | it is the 1-sigma ellipse, which holds **39%** in two dimensions — mislabelled |
+| Wind, 90% interval | 90% | 85–93% — honest |
+| Landfall by 72 h | 18% / 39% / 61% / 79% | 10% / 31% / 51% / 79% — too high below 70% |
+| Rapid intensification (+30 kt/24 h) | 21% / 39% / 55% | **1% / 10% / 38%** — far too high; do not read these as probabilities |
+
+**Intensity is biased low, and worse for stronger storms** (forecast minus actual, held-out):
+
+| Current strength | 24 h | 72 h |
+|---|---|---|
+| Tropical storm (<64 kt) | −3 kt | −6 kt |
+| Category 1–2 | −7 kt | −15 kt |
+| Category 3–5 | −10 kt | −18 kt |
+
+**What the hurricane heads actually rely on** (remove one input, held-out error change):
+
+| Removed | Track 24 h | Track 72 h | Wind 24 h |
+|---|---|---|---|
+| Physics steering-track prior | **+240%** | +40% | 0% |
+| All backbone features | +30% | +13% | +18% |
+| Backbone features from a different storm | +29% | +12% | +43% |
+| 1,000 km far pool | +10% | +3% | +5% |
+| Physical environment (shear, steering, humidity, SST) | +14% | +4% | **+2%** |
+| Current wind and pressure | 0% | 0% | **+58%** |
+| Last 12 h of motion | +10% | +15% | −1% |
+
+The track is the physics steering track plus a learned correction worth about 30% at 24 h. The intensity forecast
+leans on the storm's current wind; the shear/humidity/SST inputs built to help intensity barely move it.
+
+**Inputs the safety checks do not catch.**
+- **Garbage in, plausible out.** Random noise in place of the backbone features produced a normal-looking forecast
+  (22–45 kt, a sensible track) with **zero** check failures. There is no out-of-distribution detector.
+- **A corrupted steering prior passes straight through.** Shifting the prior by 30° moved the forecast 30° with
+  zero check failures.
+- **The consensus track is not bounds-checked** — a centre near the pole gave consensus latitudes above 90°;
+  only the scenario tracks were flagged.
+- A missing (NaN) storm centre is flagged on the track, but intensity and RI are still produced as if valid.
+- Caught correctly: a 400 kt current wind (forecast 370 kt → flagged), positions off the planet, cones wider than an
+  ocean, and the untrained satellite path (`trustworthy: false`). The dateline and Southern Hemisphere beta drift
+  are handled correctly.
+- Bug: `build_forecast` without a training record crashes on outputs that carry no ENSO field.
+
+**Logical consistency.**
+- Landfall is "probability of landfall *by* this lead", which can never fall as the lead grows. It falls in **20%**
+  of forecasts (by up to 12 points).
+- A 50 kt or 64 kt wind radius exceeds the 34/50 kt radius in **21%** of forecasts, and the radius of maximum wind
+  exceeds the 34 kt radius in **17%** — both physically impossible.
+- Consistent: the three RI thresholds are always ordered, and the two intensity heads agree to 1.5 kt on average.
+
+**The hardest case: Hurricane Otis, 2023** (East Pacific — outside the Atlantic the storm heads trained on; full
+model from raw ERA5, 5 forecasts). Otis went from 50 kt to a 130 kt Category 5 in 24 hours and struck Acapulco.
+From 24 Oct 00Z NatureV1 forecast **45 kt** — a slight weakening — and gave rapid intensification 44%, about what
+it said on the quiet days before (34–38%). Track: 104 km at 24 h (steering 156 km), but at 72 h it kept Otis at the
+same latitude while it moved 5° north. **It cannot warn of explosive intensification.**
+
+**Reproducibility gap.** The full-state rollout scales its residuals by per-channel tendency statistics measured
+from the training data; they are not shipped in this release, so reproducing the weather rollout exactly means
+re-measuring them from ERA5 2011–2015 (64 evenly spaced training windows).
+
+Still running at the time of writing: six more storms outside the Atlantic (West Pacific, Southern Hemisphere,
+East Pacific) and a 10-day rollout to test stability beyond the 72 h trained horizon. They will be added here.
+
 ## 5. Limitations
 
 - **Resolution.** 1.5° (~165 km) cannot resolve an eyewall. Intensity is expected to be the weakest output; the
@@ -306,13 +400,20 @@ compute. Intensity is the weakest output: like every 1.5° model it cannot see a
 - **Not operational.** It runs on reanalysis, which is available days after the fact. There is no real-time
   analysis feed, and the satellite input path exists but is untrained.
 - **Verification is internal.** Three held-out seasons plus the 2023 season, scored by this project's own
-  scripts; no independent party has verified it. Rapid-intensification probabilities are over-confident and
-  should be calibrated before use; radius of maximum wind has no skill; major-hurricane intensity is badly
-  underestimated.
+  scripts; no independent party has verified it.
+- **Intensity.** Biased low, by 10–18 kt for major hurricanes; misses explosive intensification entirely (Otis).
+  Rapid-intensification probabilities are far too high; radius of maximum wind has no skill.
+- **Uncertainty display.** The full scenario mixture is well calibrated, but a single scenario's cone is
+  over-confident and the `cone_radius_km_68` field is a 39% ellipse. Draw cones from the mixture.
+- **No input sanity check.** Corrupted inputs can produce plausible-looking forecasts that pass every check
+  (section 4.8). Physically impossible structure (wind radii out of order, landfall probability falling with lead)
+  is not yet caught.
 - **Surface heads are stale.** The direct multi-lead surface fields were not retrained after the rollout stage;
   use the full-state rollout for weather.
 - **Small data.** Five years of reanalysis at 1.5°, and the storm heads start memorising after about three epochs.
-- **Atlantic only** for the storm heads, 1979 onward.
+- **Atlantic only** for the storm heads, 1979 onward; other basins are out of distribution.
+- **Training cost.** About one week wall-clock on one GPU in a hosted notebook; most of the overhead was session
+  restarts. A machine that keeps its disk would cut it to three or four days.
 - **Tornadoes, hail, flash floods** are far below this resolution and out of scope.
 
 ---
@@ -373,12 +474,12 @@ engineering makes more. The backbone learns from 10¹¹ free reanalysis values; 
 parameters, learn from the labels on top of a frozen backbone, with the physics handed to them explicitly.
 
 **A forecast that cannot say "I don't know" is dangerous.** Every output carries an uncertainty, every untrained
-head is hidden, every number is bounds-checked, and the model is scored against persistence before anyone is
-allowed to believe it. The light bulb was not made in one shot; this one is instrumented so that when it fails,
+head is hidden, the physical bounds are checked, the model is scored against persistence before anyone is
+allowed to believe it, and it has been red-teamed so its failures are written down (section 4.8). The light bulb was not made in one shot; this one is instrumented so that when it fails,
 it fails visibly.
 
 ---
 
 *NatureV1, iHELIX and the training pipeline are by Nathan, Apache-2.0. This card describes the first full
-training run of version 0.10 of the pipeline. ERA5 data: Copernicus Climate Change Service; HURDAT2: NOAA
+training run of version 0.10 of the pipeline (about one week of training, completed October 2026). ERA5 data: Copernicus Climate Change Service; HURDAT2: NOAA
 National Hurricane Center.*

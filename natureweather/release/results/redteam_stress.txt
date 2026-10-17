@@ -1,0 +1,87 @@
+
+[baseline: Maria 18 Sep 2017]  trustworthy=True  guard problems=0
+  top scenario 32%: +120h at 23.0, -68.1; cone95 3039 km
+  consensus +120h at 22.0, -74.4
+  wind kt by lead [71, 71, 70, 71, 69, 69, 68, 62, 63]; RI p30 0.5366
+
+[centre at the dateline 15N 179.5E]  trustworthy=True  guard problems=0
+  top scenario 32%: +120h at 24.0, 169.5; cone95 3024 km
+  consensus +120h at 23.0, 163.1
+  wind kt by lead [71, 71, 69, 71, 69, 69, 68, 62, 63]; RI p30 0.542
+
+[centre at 88N (polar)]  trustworthy=True  guard problems=29
+  top scenario 32%: +120h at 97.0, -68.1; cone95 2448 km
+  consensus +120h at 96.0, -74.4
+  wind kt by lead [70, 71, 69, 70, 69, 69, 67, 62, 63]; RI p30 0.5354
+   guard: track latitude 90.5 is off the planet
+   guard: track latitude 92.7 is off the planet
+   guard: track latitude 95.1 is off the planet
+   guard: track latitude 97.0 is off the planet
+
+[southern hemisphere 15S 160E]  trustworthy=True  guard problems=0
+  top scenario 32%: +120h at -6.0, 150.0; cone95 3144 km
+  consensus +120h at -7.0, 143.6
+  wind kt by lead [70, 71, 69, 70, 69, 69, 68, 62, 63]; RI p30 0.5419
+
+[NaN centre]  trustworthy=True  guard problems=54
+  top scenario 32%: +120h at nan, nan; cone95 nan km
+  consensus +120h at nan, nan
+  wind kt by lead [70, 71, 69, 70, 69, 69, 68, 62, 63]; RI p30 0.5375
+   guard: track latitude nan is off the planet
+   guard: track latitude nan is off the planet
+   guard: track latitude nan is off the planet
+   guard: track latitude nan is off the planet
+
+[storm state: 400 kt current wind (raw, unscaled)]  trustworthy=True  guard problems=22
+  top scenario 45%: +120h at 35.0, -64.9; cone95 5984 km
+  consensus +120h at 28.2, -72.8
+  wind kt by lead [365, 343, 323, 326, 291, 262, 197, 161, 132]; RI p30 0.0
+   guard: +6h peak wind: maximum 370.70 kt is above 200.0 (world record sustained wind is ~190 kt)
+   guard: +12h peak wind: maximum 355.30 kt is above 200.0 (world record sustained wind is ~190 kt)
+   guard: +18h peak wind: maximum 338.40 kt is above 200.0 (world record sustained wind is ~190 kt)
+   guard: +24h peak wind: maximum 324.10 kt is above 200.0 (world record sustained wind is ~190 kt)
+
+[storm state: extreme scaled wind/pressure (+20 sd)]  trustworthy=True  guard problems=12
+  top scenario 51%: +120h at 33.2, -67.1; cone95 4422 km
+  consensus +120h at 27.2, -73.9
+  wind kt by lead [294, 275, 254, 256, 223, 199, 144, 114, 95]; RI p30 0.0002
+   guard: +6h peak wind: maximum 297.30 kt is above 200.0 (world record sustained wind is ~190 kt)
+   guard: +12h peak wind: maximum 283.30 kt is above 200.0 (world record sustained wind is ~190 kt)
+   guard: +18h peak wind: maximum 266.20 kt is above 200.0 (world record sustained wind is ~190 kt)
+   guard: +24h peak wind: maximum 250.80 kt is above 200.0 (world record sustained wind is ~190 kt)
+
+[garbage backbone features (noise x10)]  trustworthy=True  guard problems=0
+  top scenario 35%: +120h at 21.9, -72.1; cone95 4504 km
+  consensus +120h at 21.5, -76.5
+  wind kt by lead [48, 37, 53, 51, 52, 64, 75, 76, 74]; RI p30 0.0364
+
+[all-zero features]  trustworthy=True  guard problems=11
+  top scenario 43%: +120h at 25.7, -73.0; cone95 8684 km
+  consensus +120h at 23.4, -76.9
+  wind kt by lead [210, 204, 197, 182, 163, 148, 106, 87, 63]; RI p30 0.0
+   guard: +6h peak wind: maximum 207.40 kt is above 200.0 (world record sustained wind is ~190 kt)
+   guard: +6h 34kt radii: maximum 601.10 nmi is above 600.0 (the largest storms reach ~600 nmi gale radius)
+   guard: +12h peak wind: maximum 209.20 kt is above 200.0 (world record sustained wind is ~190 kt)
+   guard: +6h max wind: maximum 107.80 m/s is above 105.0 (190 kt is 98 m/s)
+
+[environment x50 (absurd shear/steering)]  trustworthy=True  guard problems=6
+  top scenario 79%: +120h at 20.5, -88.4; cone95 12021 km
+  consensus +120h at 20.7, -84.8
+  wind kt by lead [26, 34, 38, 22, 25, 27, 26, 21, 22]; RI p30 0.0101
+   guard: +120h cone is 12021 km, wider than an ocean -- the forecast carries no information
+   guard: +120h cone is 8096 km, wider than an ocean -- the forecast carries no information
+   guard: +96h cone is 11128 km, wider than an ocean -- the forecast carries no information
+   guard: +120h cone is 13044 km, wider than an ocean -- the forecast carries no information
+
+[steering prior shifted 30 degrees]  trustworthy=True  guard problems=0
+  top scenario 32%: +120h at 53.0, -38.1; cone95 2674 km
+  consensus +120h at 37.4, -59.1
+  wind kt by lead [71, 71, 70, 71, 69, 69, 68, 62, 63]; RI p30 0.5366
+
+[no training record supplied]  CRASH KeyError: 'enso_mean'
+
+[satellite input path (never trained)]  trustworthy=False  guard problems=1
+  top scenario 32%: +120h at 23.0, -68.1; cone95 3039 km
+  consensus +120h at 22.0, -74.4
+  wind kt by lead [71, 71, 70, 71, 69, 69, 68, 62, 63]; RI p30 0.5366
+   guard: the satellite input path has never been trained, so this bundle is noise shaped like a forecast. Train on that input, or forecast from the analysis the model was trained on.

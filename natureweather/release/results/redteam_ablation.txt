@@ -1,0 +1,11 @@
+what was removed                                         track 24h track 72h wind 24h wind 72h
+full model (nothing removed)                                 163km(  +0%)     735km(  +0%)   11.0kt(  +0%)   19.5kt(  +0%)
+backbone features (near storm) -> average                    186km( +14%)     790km(  +7%)   13.6kt( +24%)   21.8kt( +12%)
+backbone features (near) from a different storm              209km( +29%)     825km( +12%)   15.7kt( +43%)   22.8kt( +17%)
+far pool (1000 km) -> average                                179km( +10%)     758km(  +3%)   11.5kt(  +5%)   20.5kt(  +5%)
+ALL backbone features -> average                             211km( +30%)     834km( +13%)   13.0kt( +18%)   23.0kt( +17%)
+physical environment (shear, steering, SST) -> average       185km( +14%)     763km(  +4%)   11.2kt(  +2%)   19.8kt(  +1%)
+storm state (wind, pressure, 12h motion) -> average          174km(  +7%)     803km(  +9%)   17.8kt( +62%)   21.9kt( +12%)
+12h motion only -> zero                                      179km( +10%)     843km( +15%)   10.9kt(  -1%)   19.3kt(  -1%)
+current wind/pressure only -> average                        162km(  -0%)     737km(  +0%)   17.4kt( +58%)   22.0kt( +13%)
+steering-track prior -> zero (no physics prior)              553km(+240%)    1026km( +40%)   11.0kt(  +0%)   19.5kt(  +0%)

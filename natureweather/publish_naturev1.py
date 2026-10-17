@@ -21,9 +21,11 @@ def _publish_naturev1(hf_token: str) -> None:
     CARD = "HF_README.md"
     RESULTS = ["elnino_2023_end_to_end.txt", "heldout_landfall_ri_structure.txt",
                "heldout_per_storm_and_hindcasts.txt", "heldout_storm_scorecard_2017_2019_2021.txt",
-               "maria_2017_end_to_end.txt"]
+               "maria_2017_end_to_end.txt", "redteam_ablation.txt", "redteam_calibration.txt",
+               "redteam_consistency_and_leakage.txt", "redteam_otis_2023.txt", "redteam_stress.txt"]
     EVAL = ["README.md", "arco15.py", "e2e_compare.py", "e2e_maria.py", "elnino2023.py", "other_heads.py",
-            "per_storm.py", "score2023.py", "test_storms.py", "validate15.py"]
+            "per_storm.py", "score2023.py", "test_storms.py", "validate15.py", "stress.py", "calib.py", "ablate.py",
+            "consistency.py", "ood_run.py", "score_ood.py"]
 
     try:
         import safetensors  # noqa: F401

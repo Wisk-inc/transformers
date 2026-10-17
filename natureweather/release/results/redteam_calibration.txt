@@ -1,0 +1,36 @@
+
+=== held-out 2017/19/21 ===
+ lead     n | track: mix50% mix90% top-cone95% | wind 90% interval | wind bias kt
+   6h  1589 |           53%    92%        81%  |         93%       |   -2.9
+  12h  1530 |           53%    91%        70%  |         93%       |   -2.8
+  18h  1471 |           51%    91%        60%  |         91%       |   -3.8
+  24h  1412 |           50%    89%        62%  |         89%       |   -4.8
+  36h  1295 |           53%    89%        68%  |         89%       |   -4.8
+  48h  1187 |           52%    87%        75%  |         88%       |   -7.3
+  72h   997 |           47%    88%        81%  |         89%       |   -9.1
+  96h   826 |           47%    88%        83%  |         86%       |  -11.7
+ 120h   677 |           50%    88%        87%  |         85%       |  -10.3
+wind error by current strength (forecast minus actual, kt):
+  tropical storm (<64 kt)  24h bias  -3.3 MAE  8.2 (n 997) | 72h bias  -5.5 MAE 17.4 (n 659)
+  Cat 1-2 (64-95 kt)       24h bias  -7.2 MAE 16.5 (n 251) | 72h bias -14.6 MAE 22.5 (n 183)
+  Cat 3-5 (96+ kt)         24h bias -10.3 MAE 19.5 (n 164) | 72h bias -17.9 MAE 25.2 (n 155)
+landfall by 72h reliability: 0%-10%: said 7% got 2% (n 143); 10%-30%: said 18% got 10% (n 354); 30%-50%: said 39% got 31% (n 224); 50%-70%: said 61% got 51% (n 164); 70%-100%: said 79% got 79% (n 112)
+RI +30 kt/24h reliability: 0%-10%: said 8% got 0% (n 40); 10%-30%: said 21% got 1% (n 545); 30%-50%: said 39% got 10% (n 473); 50%-70%: said 55% got 38% (n 71)
+
+=== 2023 El Nino ===
+ lead     n | track: mix50% mix90% top-cone95% | wind 90% interval | wind bias kt
+   6h    96 |           51%    92%        74%  |         84%       |   -4.3
+  12h    95 |           46%    93%        75%  |         92%       |   -3.8
+  18h    94 |           46%    88%        61%  |         88%       |   -4.6
+  24h    89 |           46%    92%        69%  |         87%       |   -7.0
+  36h    88 |           55%    86%        74%  |         91%       |   -7.0
+  48h    82 |           45%    85%        80%  |         90%       |   -9.3
+  72h    75 |           45%    88%        88%  |         92%       |   -9.6
+  96h    68 |           32%    81%        84%  |         88%       |  -11.9
+ 120h    61 |           41%    85%        80%  |         93%       |   -9.1
+wind error by current strength (forecast minus actual, kt):
+  tropical storm (<64 kt)  24h bias  -7.0 MAE  9.7 (n 55) | 72h bias -11.2 MAE 17.5 (n 43)
+  Cat 1-2 (64-95 kt)       24h bias  -8.2 MAE 13.5 (n 27) | 72h bias  -5.5 MAE 13.1 (n 25)
+  Cat 3-5 (96+ kt)         24h bias  -2.2 MAE  7.9 (n 7) | 72h bias -14.5 MAE 14.5 (n 7)
+landfall by 72h reliability: 0%-10%: said 6% got 0% (n 22); 10%-30%: said 17% got 4% (n 28); 30%-50%: said 41% got 29% (n 17); 50%-70%: said 57% got 75% (n 8)
+RI +30 kt/24h reliability: 0%-10%: said 8% got 0% (n 2); 10%-30%: said 23% got 0% (n 40); 30%-50%: said 38% got 16% (n 19)

@@ -1,0 +1,8 @@
+storm                n | 24h km: NatV1 steer line | 72h km: NatV1 steer line | wind MAE 24h: model persist | 72h north-south: predicted vs actual
+EP_OTIS_2023         5 |   104   156    99 |   598   747   683 |        27.0    26.3 |  -0.1 vs  +5.1 deg
+   Otis, forecast wind vs actual (kt), by issue time:
+     2023-10-21T00  now  25 kt | +12h 25 vs 25 | +24h 32 vs 25 | P(RI 25/30/35 kt) 45%/38%/33%
+     2023-10-22T00  now  25 kt | +12h 29 vs 30 | +24h 32 vs 35 | P(RI 25/30/35 kt) 41%/34%/29%
+     2023-10-23T00  now  35 kt | +12h 37 vs 40 | +24h 38 vs 50 | P(RI 25/30/35 kt) 44%/37%/32%
+     2023-10-24T00  now  50 kt | +12h 44 vs 65 | +24h 45 vs 130 | P(RI 25/30/35 kt) 50%/44%/38%
+     2023-10-25T00  now 130 kt | +12h 109 vs 85 | +24h 104 vs None | P(RI 25/30/35 kt) 50%/45%/42%
