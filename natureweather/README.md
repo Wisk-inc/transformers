@@ -241,7 +241,11 @@ Intensity gains the models' own deepening (their central-pressure-deficit change
 and as a rapid-intensification predictor: held-out error down 4.8% at 24 h, 6.3% at 36 h and 7.2% at 48 h, every
 lead significant; P(RI) Brier skill +0.12, AUC 0.84; and calibrated P(≥ 64 / 96 / 113 / 137 kt) at every lead
 (Brier skill +0.65 / +0.48 / +0.36 / +0.18 at 24 h).
-<!-- PENDING readme swarm melissa -->
+
+On Melissa from 27 October, with GFS, GraphCast-GFS and the GEFS mean: 56 / 46 / 69 / 194 / 274 km at 24-96 h
+(0.13.1: 91 / 55 / 79 / 246 / 369). The intensity is still far too low (114 kt at 24 h against 155). Each world of
+the swarm now follows one model; the parish probabilities are about where 0.13.1 had them. Details and every
+caveat are in section 4.15 of the model card.
 
 ## Not trained
 

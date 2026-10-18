@@ -772,9 +772,11 @@ recurvature +0.26, stall +0.20, steady +0.14, loops unreliable.
 
 What did change: each world now follows **one model's forecast winds**, drawn with equal probability (live: the
 models read for that cycle), so the swarm's futures carry the disagreement between models the way an ensemble does.
-On the 2019 tuning season, with HRES and Pangu-Weather as the two models, see below; it is not yet scored on the
-held-out seasons.
-<!-- PENDING swarm two-model -->
+Checked on the 2019 tuning season with HRES and Pangu-Weather as the two models (120 forecasts, 33 storms with a
+full five-day truth): the two-model swarm's spread and scenario skill were the same as the one-model swarm's to
+within noise, because at 1.5 degrees those two models' layer-mean steering is nearly identical (correlation 0.999
+at 24 h). The latent only matters when models disagree, which the live set does more often (on Melissa, below,
+GraphCast-GFS and the GEFS mean parted by 300 km at 72 h). It is not yet scored on the held-out seasons.
 
 **Intensity: the models' own deepening.** The one thing the statistical intensity members cannot know is what
 a dynamical model does with the storm. 0.14 reads each model's central pressure along its own track, takes the
@@ -811,7 +813,40 @@ quantiles per lead, separately for the normal and the rapid regime). Held-out Br
 
 Skilful everywhere except Category 5 at day 5, where there were nineteen cases to score on.
 
-<!-- PENDING melissa -->
+**Melissa, replayed a third time** with only what was known at the time. The ECMWF models could not be fetched
+for October 2025 from this session's network, so the models are GFS, GraphCast-GFS and the GEFS mean.
+
+| track error (km), lead (h) | 6 | 12 | 24 | 36 | 48 | 72 | 96 | 120 |
+|---|---|---|---|---|---|---|---|---|
+| from 27 Oct 00Z, 0.13.0 | 2 | 12 | 35 | 187 | 392 | 892 | 1,834 | 3,383 |
+| from 27 Oct 00Z, 0.13.1 (GFS) | 5 | 17 | 91 | 55 | 79 | 246 | 369 | 1,011 |
+| from 27 Oct 00Z, **0.14 (three models)** | 3 | 13 | **56** | **46** | **69** | **194** | **274** | **700** |
+| the three models' mean alone | 18 | 13 | 66 | 60 | 100 | 238 | 264 | 590 |
+| from 26 Oct 00Z, 0.13.1 (GFS) | 17 | 28 | 69 | 140 | 215 | 294 | 394 | 375 |
+| from 26 Oct 00Z, **0.14 (three models)** | 14 | 23 | **44** | **85** | **150** | **261** | **362** | **271** |
+
+- From 27 October the models disagreed usefully: GraphCast-GFS had the track to 198 km at 96 h, the GEFS mean to
+  284 km at 120 h, GFS to 971 km; their mean, blended with the physics, beat each of them to 72 h. The cone sized for
+  this forecast (12 / 48 / 138 / 232 / 814 km at 6 / 24 / 48 / 72 / 120 h) contained the truth at every lead but
+  24 h, where the error was 56 km against a 48 km radius.
+- From 26 October, GraphCast-GFS alone was remarkable (25 km at 36 h, 123 km at 72 h); GFS and the GEFS mean turned
+  the storm north a day too early, and the blend landed between them.
+- **Parishes** from 27 October: 30-43% for hurricane-force wind over the western and central parishes the storm
+  crossed (St Elizabeth 43%, Manchester 41%, Westmoreland 39%), 22-25% over the eastern parishes it spared --
+  about where 0.13.1 had them, because the swarm's spread, not the consensus track, sets these probabilities.
+  Rain 153-243 mm per parish against 146-431 mm observed.
+- **Intensity is still the miss**: 114 kt at 24 h from 27 October against 155 kt observed; from 26 October the
+  rapid regime was used (P(RI) 22%) and the forecast reached 109 kt against 145. At 1.5 degrees the models deepened
+  Melissa by only 3-13 hPa, so the new deepening member had little to say here; it earns its keep on the broad
+  population of storms, not on this one.
+
+<img src="melissa_jamaica.png" alt="Melissa 2025 over Jamaica from 27 Oct 00Z: hurricane-wind probability in 0.13.0, 0.13.1 and 0.14, the best-track swath, and 0.14 rain" width="100%">
+
+**What to keep in mind.** The held-out gains were measured with the models WeatherBench 2 archives; live, the set
+is different (GFS, IFS, AIFS, GraphCast-GFS, GEFS mean), and the blend weight was fitted for one model. The cone
+regression did not see inter-model spread in training, since the tuning seasons had one model. The model-deepening
+member was fitted on HRES's pressure at 1.5 degrees; other models deepen storms differently at that resolution.
+Everything here degrades gracefully: with no model readable, the forecast is the 0.13.0 one and says so.
 
 ## 5. Limitations
 
