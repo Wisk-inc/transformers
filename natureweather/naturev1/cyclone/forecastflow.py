@@ -66,16 +66,17 @@ class ForecastFlow:
         return u, v
 
 
-def fflow_member(ctx, flow: ForecastFlow, leads, tau_h: float = 24.0) -> np.ndarray:
+def fflow_member(ctx, flow: ForecastFlow, leads, tau_h: float = 24.0, depth: float | None = 0.5) -> np.ndarray:
     """
-    The storm carried through the forecast flow at the depth its intensity implies, plus beta drift, plus the part of
-    its present motion the flow does not explain, fading with ``tau_h`` (``(L, 2)`` lat, lon).
+    The storm carried through the forecast flow, plus beta drift, plus the part of its present motion the flow does
+    not explain, fading with ``tau_h`` (``(L, 2)`` lat, lon). ``depth`` 0.5 is the 850-400 hPa layer, which beat the
+    intensity-dependent depth (``None``) and the shallow and deep layers on the tuning seasons.
     """
     from ..swarm.core import depth_for_wind
     from .trajectory import DecayingResidual, combined, integrate
 
     case = ctx.case
-    depth = depth_for_wind(case.wind_kt)
+    depth = depth_for_wind(case.wind_kt) if depth is None else float(depth)
     env = ctx.clean
     steer = lambda lat, lon, hours: flow.velocity(env, lat, lon, hours, depth)
     u0, v0 = steer(np.array([case.lat]), np.array([case.lon]), 0.0)

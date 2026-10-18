@@ -150,4 +150,34 @@ def apply_consensus(cases, forecasts: np.ndarray, weights: dict, selective_k: fl
     return from_displacements(cases, blended)
 
 
-__all__ = ["apply_consensus", "fit_consensus", "from_displacements", "project_simplex", "to_displacements"]
+def blend_with_model(case, track: np.ndarray, model_track: np.ndarray, spec: dict, leads) -> np.ndarray:
+    """
+    The consensus pulled toward a dynamical model's own track of the storm, by one weight per lead
+    (``spec["alpha"]``, fitted on past seasons: a quarter at 6 h, nine tenths by day 5, where the model knows about
+    the troughs and ridges the physics cannot see yet).
+
+    The model's track first loses its starting offset, as NHC's "interpolated" model tracks do: where the model
+    starts the storm, extrapolated back from its first two positions, is moved onto the observed position, the
+    correction fading with ``spec["offset_tau_h"]``. Where the model has lost the storm, the consensus stands.
+    """
+    hours = np.asarray(leads, np.float64)
+    alpha = np.interp(hours, spec.get("leads", hours), spec["alpha"])
+    east, north = to_local(case.lat, case.lon, track[:, 0], track[:, 1])
+    me, mn = to_local(case.lat, case.lon, model_track[:, 0], model_track[:, 1])
+    tau = spec.get("offset_tau_h")
+    if tau:
+        f = hours[0] / max(hours[1] - hours[0], 1e-9)
+        p0e, p0n = me[0] - (me[1] - me[0]) * f, mn[0] - (mn[1] - mn[0]) * f
+        decay = np.exp(-hours / float(tau))
+        me, mn = me - p0e * decay, mn - p0n * decay
+    model_ok = np.isfinite(me) & np.isfinite(mn)
+    e = np.where(model_ok, (1 - alpha) * east + alpha * me, east)
+    n = np.where(model_ok, (1 - alpha) * north + alpha * mn, north)
+    lat, lon = from_local(case.lat, case.lon, e, n)
+    out = np.stack([lat, lon], -1)
+    out[~np.isfinite(track).all(-1)] = np.nan
+    return out
+
+
+__all__ = ["apply_consensus", "blend_with_model", "fit_consensus", "from_displacements", "project_simplex",
+           "to_displacements"]

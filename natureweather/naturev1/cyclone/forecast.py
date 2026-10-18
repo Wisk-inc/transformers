@@ -57,6 +57,10 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
     nan = np.full((len(leads), 2), np.nan)
     stack = np.stack([out.get(m, nan) for m in table["members"]], 1)[None]
     track = apply_consensus([case], stack, table)[0]
+    if table.get("model_blend") is not None and model_track is not None:
+        from .consensus import blend_with_model
+
+        track = blend_with_model(case, track, np.asarray(model_track, np.float64), table["model_blend"], leads)
     result = {"leads": list(leads), "track": track, "members": out, "consensus_table": table["name"]}
     from . import coefficients
 
