@@ -59,7 +59,7 @@ pipeline_tag: other
 > **0.14** blends the consensus with the equal-weight mean of several models (live: GFS, ECMWF IFS and AIFS,
 > GraphCast-GFS, GEFS), which cuts held-out errors another 11% at 24 h and 19-23% at 48-120 h (72 h: 142 km), sizes
 > the cone per forecast, and makes the swarm's worlds each follow one model —
-> [section 4.15](#415-014-several-models-at-once-a-cone-sized-per-forecast-and-a-quieter-swarm).
+> [section 4.15](#415-014-several-models-at-once-a-cone-sized-per-forecast-and-a-swarm-on-several-models).
 
 NatureV1 is an 89-million-parameter model of the atmosphere that forecasts global weather out to five days and,
 for tropical cyclones, where a storm will go, how strong it will get, whether it will intensify rapidly, and
@@ -720,7 +720,7 @@ live. GFS has historically tracked storms somewhat less accurately than HRES, so
 larger than this table, and the cone may run slightly narrow. Without GFS's forecast, for example if NOAA's
 bucket is unreachable, the forecast falls back to the 0.13.0 consensus and cone, and the run says so.
 
-### 4.15 0.14: several models at once, a cone sized per forecast, and a quieter swarm
+### 4.15 0.14: several models at once, a cone sized per forecast, and a swarm on several models
 
 **Why the long-range errors were what they were.** After 0.13.1 the consensus had become, from 72 h on, essentially
 the one model it was blended with (HRES in the hindcasts, GFS live): 184 / 249 / 326 km at 72 / 96 / 120 h against

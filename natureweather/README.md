@@ -219,7 +219,7 @@ against 187 / 392 / 892 km before. Every parish gets a 24-47% chance of hurrican
 intensity is still far too low (118 kt at 24 h against 155 kt). The live track leans on GFS, which has
 historically erred somewhat more than HRES. Details are in section 4.14 of the model card.
 
-## 0.14: several models at once, a cone sized per forecast, a quieter swarm
+## 0.14: several models at once, a cone sized per forecast, a swarm on several models
 
 The consensus is now blended with the **equal-weight mean of several models' tracks**, not one model's. Live they
 are GFS, ECMWF IFS and AIFS (open data), GraphCast-GFS and the GEFS mean, each read by byte range from its public
