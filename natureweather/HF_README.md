@@ -1076,6 +1076,25 @@ turns a forward pass into the forecast bundle: track scenarios with cones, conse
 intensity, rapid intensification, eyewall, and a point forecast, in physical units with 90% intervals, with
 every untrained section marked unavailable.
 
+The hurricane path (0.13-0.15; the physics, the swarm, the parishes) is one call, live or replayed as it was known at
+the time:
+
+```python
+from naturev1.swarm.geography import CARIBBEAN, RegionMap
+from naturev1.swarm.landfall import format_landfall, landfall_summary
+from naturev1.swarm.live import forecast_storm
+region = RegionMap.build(CARIBBEAN)                                   # once; cached
+earlier = forecast_storm("al132025", when="2025-10-26T12", archive=True, particles=100_000, region=region)
+run = forecast_storm("al132025", when="2025-10-27T00", archive=True,  # Melissa as it was known then
+                     particles=100_000, region=region,
+                     previous={"time": "2025-10-26T12", "track": earlier["result"]["track"]})   # 0.15: its error feeds back
+print(run["impact"].table())                                          # parish-by-parish probabilities
+print(format_landfall(landfall_summary(region, run["result"], run["case"], run["impact"], "Jamaica",
+                                       analysis_time="2025-10-27T00")))  # when, where, how strong; rain if hit
+print(run["result"]["peak_probability"])                              # P(peak within 5 days >= 64/96/113/137 kt)
+print(run["result"]["intensity_if_ri"], run["result"]["ri_probability"])   # the rapid-intensification branch
+```
+
 ### Files in this repository
 ```
 model.safetensors                 the released weights (89.45 M parameters), safetensors format
