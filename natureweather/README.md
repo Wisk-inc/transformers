@@ -247,6 +247,19 @@ On Melissa from 27 October, with GFS, GraphCast-GFS and the GEFS mean: 56 / 46 /
 the swarm now follows one model; the parish probabilities are about where 0.13.1 had them. Details and every
 caveat are in section 4.15 of the model card.
 
+## 0.15: the ocean's depth, landfall parish by parish, and the benchmark table
+
+The intensity now knows how deep the warm water is: the depth of the 26 C isotherm and the heat potential from
+the World Ocean Atlas climatology (packaged), deepened or shoaled by this year's sea-surface anomaly, size the
+cold wake and enter the SHIPS and rapid-intensification predictors with the storm's observed size. Landfall is
+answered the way a parish needs it (`naturev1.swarm.landfall`): when the centre comes ashore with its 10-90%
+range and dates, which parish first, the intensity then and at peak, and each parish's peak wind, gust, rain and
+arrival times. The wind field is sized to the observed 34-kt radius, the worlds' intensities drawn from the
+forecast's own calibrated error distribution. `naturev1.swarm.observations` fits a vortex to barometer readings
+(a centre fix with uncertainty and a central pressure) and blends point winds into the map -- operators for feeds
+not yet read here. The track benchmark against every archived model is in section 4.16 of the model card.
+<!-- PENDING readme 0.15 numbers -->
+
 ## Not trained
 
 No weights here have seen real data. The architecture, losses, ingest and training loop are complete and
