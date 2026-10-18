@@ -232,10 +232,10 @@ archived models WeatherBench 2 holds (HRES, Pangu, GraphCast, FuXi, Aurora, FGN)
 | **0.14, the models' mean** | **25** | **42** | **64** | **81** | **96** | **142** | **200** | **263** |
 
 Also: a cone sized per forecast from member spread, model disagreement, speed, latitude and intensity (held-out
-rank correlation with the error 0.17-0.38, the fixed cone 0); the swarm's perturbations cut to a quarter under
-forecast steering (its spread had been three times the error, which over-forecast loops), and each world follows
-one model's forecast winds. Two ideas measured and rejected: anchoring the model track to the observed position,
-and shrinking the model's weight when it disagrees with the physics.
+rank correlation with the error 0.17-0.38, the fixed cone 0); each swarm world follows one model's forecast
+winds. Three ideas measured and rejected on the held-out seasons: anchoring the model track to the observed
+position, shrinking the model's weight when it disagrees with the physics, and a quieter swarm (its spread matched
+the error on the tuning seasons, but its scenario probabilities became over-confident on the held-out ones).
 
 Intensity gains the models' own deepening (their central-pressure-deficit change along their tracks) as a member
 and as a rapid-intensification predictor: held-out error down 4.8% at 24 h, 6.3% at 36 h and 7.2% at 48 h, every

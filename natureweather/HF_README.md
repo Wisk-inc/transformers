@@ -760,14 +760,21 @@ to 67% coverage. On the held-out seasons its radius ranks the actual errors with
 fixed cone, by construction, 0; the swarm's own spread 0.09-0.22) at 64-71% coverage, about 5-10% wider on average
 than the fixed cone it replaces. The fixed cone is still returned alongside it.
 
-**The swarm, quieter.** With forecast steering the swarm's spread had been three times the consensus's error at
-72-120 h (its cone needed scaling by 0.27-0.34), and that excess motion is what made it forecast loops three times
-too often. The steering perturbations were sized for persisted analysis winds, which err far more than a model's
-forecast winds. Cutting the steering-error and residual perturbations to a quarter brought the swarm's 67% spread
-to within 12-24% of the error at every lead on the tuning seasons and raised every scenario's skill there.
-<!-- PENDING swarm held-out -->
-Each world now also follows **one model's forecast winds**, drawn with equal probability, so the swarm's futures
-carry the disagreement between models the way an ensemble does.
+**The swarm: a tuning that did not survive the held-out test.** With forecast steering the swarm's spread had
+been three times the consensus's error at 72-120 h, and that excess motion looked like the reason it forecast loops
+three times too often. Cutting the steering-error and residual perturbations to a quarter did bring its spread to
+within 12-24% of the error on the tuning seasons and raised every scenario's skill *there*. On the held-out seasons
+it did the opposite: the quieter swarm was over-confident (where it said 72% stall, 43% stalled), stall skill fell
+from +0.20 to +0.02, steady from +0.14 to +0.06, and the loop over-forecast got worse. The spread that is right for
+the swarm's *positions* is not the spread that is right for its *scenarios*, because the swarm is re-centred on a
+consensus that is better than its own mean. So 0.14 keeps the 0.13 priors, and the 0.13.1 scenario scores stand:
+recurvature +0.26, stall +0.20, steady +0.14, loops unreliable.
+
+What did change: each world now follows **one model's forecast winds**, drawn with equal probability (live: the
+models read for that cycle), so the swarm's futures carry the disagreement between models the way an ensemble does.
+On the 2019 tuning season, with HRES and Pangu-Weather as the two models, see below; it is not yet scored on the
+held-out seasons.
+<!-- PENDING swarm two-model -->
 
 **Intensity: the models' own deepening.** The one thing the statistical intensity members cannot know is what
 a dynamical model does with the storm. 0.14 reads each model's central pressure along its own track, takes the

@@ -424,9 +424,9 @@ CONE_KM_FF = {'leads': [6, 12, 24, 36, 48, 72, 96, 120], 'radius_km': [27.0, 48.
 
 CONE_KM_BASIC_FF = {'leads': [6, 12, 24, 36, 48, 72, 96, 120], 'radius_km': [27.1, 47.9, 80.1, 109.1, 137.4, 213.6, 303.1, 410.4]}
 
-SWARM_FF = {'priors': {'fix_sigma_km': 20.0, 'static_ms': 0.3, 'growth_ms_per_sqrt_h': 0.055, 'residual_ms': 0.4},
+SWARM_FF = {'priors': {'fix_sigma_km': 20.0},
  'leads': [6, 12, 24, 36, 48, 72, 96, 120],
- 'cone_scale': [0.8839, 1.1788, 1.1245, 0.9545, 0.8633, 0.7625, 0.8094, 0.8247],
+ 'cone_scale': [0.7006, 0.7004, 0.5164, 0.4108, 0.3379, 0.2734, 0.2885, 0.3051],
  'coverage_target': 0.67}
 
 CONE_FLOW = {'leads': [6, 12, 24, 36, 48, 72, 96, 120],
@@ -485,7 +485,7 @@ INTENSITY_SPREAD = {'leads': [6, 12, 24, 36, 48, 72, 96, 120],
                          [-49.44, -36.72, -31.34, -28.01, -24.2, -20.07, -17.84, -15.91, -13.99, -12.76, -9.42, -7.54,
                           -5.63, -3.91, -1.07, 0.85, 5.71, 12.62, 17.77, 23.17, 28.28, 34.81, 41.64, 49.42, 58.7]]}}
 
-PROVENANCE = {'generated': '2026-10-18 13:41 UTC',
+PROVENANCE = {'generated': '2026-10-18 13:51 UTC',
  'CLIPER': 'IBTrACS v04r01 best tracks 1980-2014, all basins (82,816 fixes at 00/06/12/18 UTC)',
  'SHIFOR': 'IBTrACS v04r01 best tracks 1980-2014, all basins',
  'CONSENSUS': 'hindcasts of the 2016, 2017 and 2019 seasons (3,053 forecasts, NA EP WP SI SP)',
@@ -513,8 +513,8 @@ PROVENANCE = {'generated': '2026-10-18 13:41 UTC',
                      'consensus tracks',
  'SWARM_FF': "hindcasts of the 2016, 2017 and 2019 seasons with ECMWF HRES forecast steering and HRES's own storm "
              'tracks (WeatherBench 2, 1.5 degrees); blend weights fitted on leave-one-season-out consensus tracks; '
-             "perturbation amplitudes chosen so the swarm's spread matches the consensus error (the forecast winds "
-             'err less than persisted analysis winds)',
+             'the 0.13 perturbation priors kept: quieter ones matched the consensus error on the tuning seasons but '
+             'were worse-calibrated for scenarios on the held-out ones',
  'RI': 'logistic regression, P(+30 kt in 24 h), hindcasts of the 2016, 2017 and 2019 seasons; the model-deepening '
        "predictors from HRES's central pressure along its own track (WeatherBench 2, 1.5 degrees)",
  'TREND': 'hindcasts of the 2016, 2017 and 2019 seasons',

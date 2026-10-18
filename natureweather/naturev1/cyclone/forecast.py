@@ -78,16 +78,18 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
     if cone is not None:
         # The 67th percentile of the consensus's out-of-sample errors on past seasons -- NHC's cone construction --
         # widened where the physics ensemble disagrees more than usual for that lead.
-        radius = np.interp(np.asarray(leads, np.float64), cone["leads"], cone["radius_km"])
+        climatological = np.interp(np.asarray(leads, np.float64), cone["leads"], cone["radius_km"])
+        radius = climatological
         if ensemble is not None:
             radius = np.maximum(radius, 1.2 * np.nan_to_num(ensemble["spread_km"], nan=0.0))
         result["cone_km"] = radius
         flow_table = getattr(coefficients, "CONE_FLOW", None)
         if flow_table is not None and out.get("model") is not None:
             # the cone sized for this forecast: member spread, model disagreement, speed, latitude, intensity
+            # (fitted and checked without the ensemble-spread floor, so it stands on its own)
             from .multimodel import cone_predictors, flow_dependent_cone
 
-            result["cone_fixed_km"] = radius
+            result["cone_fixed_km"] = climatological
             result["cone_predictors"] = cone_predictors(case, physics_track, out, table["members"], out.get("model"),
                                                         out.get("fflow"), leads)
             result["cone_km"] = flow_dependent_cone(result["cone_predictors"], flow_table, leads)
