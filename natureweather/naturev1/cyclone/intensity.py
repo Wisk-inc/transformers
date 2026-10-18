@@ -338,6 +338,96 @@ def decay_along(case, along: dict, leads, water_kt: np.ndarray) -> np.ndarray:
     return np.interp(np.asarray(leads, float), hours, decayed, right=np.nan)
 
 
-__all__ = ["LGEM_KAPPA", "SHIFOR_PREDICTORS", "SHIPS_PREDICTORS", "decay_along", "environment_along_track",
+#: The trend member's memory (hours): how long a storm keeps intensifying (or weakening) the way it has been.
+TREND_TAU_H = 24.0
+
+
+def recent_change(case, hours: int = 24) -> float:
+    """Intensity change (kt) over the last ``hours`` from the best-track history (NaN when unknown)."""
+    from .data import HISTORY_HOURS
+
+    if -hours not in HISTORY_HOURS:
+        return float("nan")
+    past = case.history["wind"][HISTORY_HOURS.index(-hours)]
+    return float(case.wind_kt - past) if np.isfinite(past) else float("nan")
+
+
+def trend_intensity(case, along: dict, leads, tau_h: float | None = None) -> np.ndarray:
+    """
+    The storm keeps doing what it has been doing: the last 24 hours' change continued with an e-folding memory of
+    ``tau_h`` (``V0 + r tau (1 - exp(-t / tau))``), never above the potential intensity along the track, then land and
+    terrain decay. This is the member that can follow a storm through rapid intensification, which the regressions
+    (built to minimise the average error) pull back toward the mean.
+    """
+    from . import coefficients
+
+    tau = tau_h if tau_h is not None else getattr(coefficients, "TREND", {}).get("tau_h", TREND_TAU_H)
+    change = recent_change(case, 24)
+    if not np.isfinite(change):
+        change = 2.0 * recent_change(case, 12) if np.isfinite(recent_change(case, 12)) else 0.0
+    rate = change / 24.0
+    hours = along["hours"]
+    path = case.wind_kt + rate * tau * (1.0 - np.exp(-hours / tau))
+    pi = np.interp(hours, along["six_hours"], along["pi_kt"])
+    path = np.where(rate > 0, np.minimum(path, np.maximum(pi, case.wind_kt)), path)
+    path = apply_land_decay(hours, np.maximum(path, 15.0), along["land"], along["height_m"])
+    return np.interp(np.asarray(leads, float), hours, path, right=np.nan)
+
+
+#: Rapid intensification (+30 kt in 24 h): predictor names, in order.
+RI_FEATURES = ("one", "dv12", "dv24", "wind", "headroom", "shear", "rh", "sst", "lat", "land24")
+
+
+def ri_features(case, along: dict) -> np.ndarray:
+    """SHIPS-RII-style predictors over the first 24 hours along the forecast track."""
+    h = along["hours"]
+    six = along["six_hours"]
+    first = six <= 24.0 + 1e-9
+    pi = float(np.nanmean(np.asarray(along["pi_kt"])[first]))
+    dv12, dv24 = recent_change(case, 12), recent_change(case, 24)
+    return np.array([1.0, np.nan_to_num(dv12) / 10.0, np.nan_to_num(dv24) / 10.0, case.wind_kt / 50.0,
+                     (pi - case.wind_kt) / 50.0, float(np.nanmean(np.asarray(along["shear_ms"])[first])) / 10.0,
+                     float(np.nanmean(np.asarray(along["rh_mid"])[first])),
+                     (float(np.nanmean(np.asarray(along["sst_eff_k"])[h <= 24.0])) - 301.65) / 2.0,
+                     abs(case.lat) / 20.0, float(np.mean(np.asarray(along["land"])[h <= 24.0]))])
+
+
+def fit_ri(cases, alongs: list, threshold_kt: float = 30.0, l2: float = 1e-2, iterations: int = 30) -> dict:
+    """Logistic regression for P(intensity rises by >= ``threshold_kt`` in 24 h), by Newton's method."""
+    from .data import LEADS
+
+    k24 = list(LEADS).index(24)
+    x, y = [], []
+    for c, a in zip(cases, alongs):
+        if a is None or not c.truth["valid"][k24] or not np.isfinite(c.truth["wind"][k24]):
+            continue
+        f = ri_features(c, a)
+        if np.isfinite(f).all():
+            x.append(f)
+            y.append(float(c.truth["wind"][k24] - c.wind_kt >= threshold_kt))
+    x, y = np.asarray(x), np.asarray(y)
+    w = np.zeros(x.shape[1])
+    reg = l2 * len(y) * np.diag([0.0] + [1.0] * (x.shape[1] - 1))
+    for _ in range(iterations):
+        p = 1.0 / (1.0 + np.exp(-x @ w))
+        grad = x.T @ (p - y) + reg @ w
+        hess = (x * (p * (1 - p))[:, None]).T @ x + reg
+        w = w - np.linalg.solve(hess, grad)
+    return {"features": list(RI_FEATURES), "threshold_kt": threshold_kt, "weights": w.round(5).tolist(),
+            "base_rate": float(y.mean()), "cases": int(len(y))}
+
+
+def ri_probability(case, along: dict, table: dict | None = None) -> float:
+    """P(+30 kt in 24 h) for a storm on its forecast track (``coefficients.RI`` by default)."""
+    if table is None:
+        from .coefficients import RI as table
+    f = ri_features(case, along)
+    if not np.isfinite(f).all():
+        return float(table.get("base_rate", 0.05))
+    return float(1.0 / (1.0 + np.exp(-np.asarray(table["weights"]) @ f)))
+
+
+__all__ = ["LGEM_KAPPA", "RI_FEATURES", "SHIFOR_PREDICTORS", "SHIPS_PREDICTORS", "TREND_TAU_H", "decay_along",
+           "environment_along_track", "fit_ri", "recent_change", "ri_features", "ri_probability", "trend_intensity",
            "fit_lgem", "fit_shifor", "fit_ships", "lgem_batch", "lgem_intensity", "lgem_table", "potential_intensity_at", "shifor_intensity",
            "shifor_predictors", "ships_intensity", "ships_predictors"]

@@ -17,7 +17,8 @@ from .data import LEADS
 
 
 def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, intensity: bool = True,
-                     swarm: int = 0, swarm_fixes: list | None = None, swarm_device="cpu") -> dict:
+                     swarm: int = 0, swarm_fixes: list | None = None, swarm_device="cpu", forecast_flow=None,
+                     model_track=None) -> dict:
     """
     Args:
         case: a :class:`naturev1.cyclone.data.Case` (position, intensity and the last 48 hours of best track; no
@@ -32,10 +33,14 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
             flow-dependent cone under ``result["swarm"]``.
         swarm_fixes: centre fixes (:mod:`naturev1.swarm.fixes`) to filter the swarm with instead of the 6-hourly
             history -- the satellite path, minute by minute.
+        forecast_flow, model_track: a dynamical model's forecast steering
+            (:class:`naturev1.cyclone.forecastflow.ForecastFlow`) and its own track of the storm at ``leads``: they add
+            the ``fflow`` and ``model`` members (and the consensus fitted with them) and steer the swarm's worlds.
 
     Returns:
         ``{"leads", "track" (L, 2), "members": {name: (L, 2)}, "cone_km" (L,), "regime", "stall", "ridge",
-        "shear", "intensity_kt": {member: (L,)}, "intensity" (L,)}``.
+        "shear", "intensity_kt": {member: (L,)}, "intensity" (L,), "ri_probability" (P(+30 kt in 24 h)),
+        "intensity_regime" ("rapid" when the rapid-intensification weights were used)}``.
     """
     from .consensus import apply_consensus
     from .members import run_members
@@ -44,7 +49,8 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
     from .shear import shear_diagnostics
     from .stall import stall_diagnostics
 
-    out = run_members(case, env, climatology, analogs, leads=leads)
+    out = run_members(case, env, climatology, analogs, leads=leads, forecast_flow=forecast_flow,
+                      model_track=model_track)
     ctx = out.pop("_context", None)
     ensemble = out.pop("_ensemble", None)
     table = consensus_table(out)
@@ -54,7 +60,9 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
     result = {"leads": list(leads), "track": track, "members": out, "consensus_table": table["name"]}
     from . import coefficients
 
-    cone = getattr(coefficients, "CONE_KM", None)
+    # each consensus table has its own cone: the forecast-flow consensus errs less, so its cone is narrower
+    cone_name = {"CONSENSUS_FF": "CONE_KM_FF", "CONSENSUS_BASIC_FF": "CONE_KM_BASIC_FF"}.get(table["name"], "CONE_KM")
+    cone = getattr(coefficients, cone_name, None) or getattr(coefficients, "CONE_KM", None)
     if cone is not None:
         # The 67th percentile of the consensus's out-of-sample errors on past seasons -- NHC's cone construction --
         # widened where the physics ensemble disagrees more than usual for that lead.
@@ -74,7 +82,8 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
         from ..swarm.core import swarm_products
 
         result["swarm"] = swarm_products(case, ctx, track, leads, particles=int(swarm), fixes=swarm_fixes,
-                                         intensity_kt=result.get("intensity"), device=swarm_device)
+                                         intensity_kt=result.get("intensity"), device=swarm_device,
+                                         forecast_flow=forecast_flow)
     return result
 
 
@@ -82,11 +91,12 @@ def consensus_table(members: dict) -> dict:
     """
     The shipped consensus whose members are all present: the full table when a climatology and an analog
     database were given, else the basic one fitted for exactly the members that need neither -- renormalising
-    the full table over half its members would lean on combinations it was never fitted to trust.
+    the full table over half its members would lean on combinations it was never fitted to trust. With a dynamical
+    model's forecast flow and track (the ``fflow`` and ``model`` members), the tables fitted with them come first.
     """
     from . import coefficients
 
-    for name in ("CONSENSUS", "CONSENSUS_BASIC"):
+    for name in ("CONSENSUS_FF", "CONSENSUS_BASIC_FF", "CONSENSUS", "CONSENSUS_BASIC"):
         table = getattr(coefficients, name, None)
         if table is None:
             continue
@@ -97,7 +107,8 @@ def consensus_table(members: dict) -> dict:
 
 
 def _intensity(case, env, ctx, track, leads) -> dict:
-    from .intensity import decay_along, environment_along_track, lgem_intensity, shifor_intensity
+    from .intensity import (decay_along, environment_along_track, lgem_intensity, ri_probability, shifor_intensity,
+                            trend_intensity)
 
     members = {"persistence": np.full(len(leads), case.wind_kt)}
     shifor = shifor_intensity(case, leads)
@@ -113,19 +124,29 @@ def _intensity(case, env, ctx, track, leads) -> dict:
         return {"intensity_kt": members, "intensity": shifor}
     members["decay_shifor"] = decay_along(case, along, leads, np.nan_to_num(shifor, nan=case.wind_kt))
     members["lgem"] = lgem_intensity(case, along, leads)
+    members["trend"] = trend_intensity(case, along, leads)
+    extra = {}
     try:
         from .coefficients import INTENSITY_CONSENSUS
         from .intensity import ships_intensity
 
         members["ships"] = decay_along(case, along, leads, ships_intensity(case, along, leads))
-        weights = np.asarray(INTENSITY_CONSENSUS["weights"], np.float64)        # (L, members)
-        names = INTENSITY_CONSENSUS["members"]
-        stack = np.stack([members[n] for n in names], -1)
+        table = INTENSITY_CONSENSUS
+        regime = table.get("ri_regime")
+        if regime is not None:
+            # A storm primed for rapid intensification gets the weights fitted on such storms: they lean on LGEM and
+            # the trend, and correct the consensus's habit of pulling an intensifying storm back toward the mean.
+            p = ri_probability(case, along)
+            extra = {"ri_probability": p, "intensity_regime": "rapid" if p >= regime["cut"] else "normal"}
+            if p >= regime["cut"]:
+                table = {**table, "weights": regime["weights"], "bias": regime["bias"]}
+        weights = np.asarray(table["weights"], np.float64)                      # (L, members)
+        stack = np.stack([members[n] for n in table["members"]], -1)
         blended = (np.nan_to_num(stack) * weights).sum(-1) / np.maximum((np.isfinite(stack) * weights).sum(-1), 1e-9)
-        blended = blended + np.asarray(INTENSITY_CONSENSUS.get("bias", np.zeros(len(leads))), np.float64)
+        blended = blended + np.asarray(table.get("bias", np.zeros(len(leads))), np.float64)
     except ImportError:
         blended = np.nanmean(np.stack([members["decay_shifor"], members["lgem"]]), 0)
-    return {"intensity_kt": members, "intensity": np.clip(blended, 15.0, 200.0), "environment": along}
+    return {"intensity_kt": members, "intensity": np.clip(blended, 15.0, 200.0), "environment": along, **extra}
 
 
 __all__ = ["consensus_table", "physics_forecast"]

@@ -118,7 +118,7 @@ class SwarmFields:
 
     def __init__(self, lat, lon, shallow, medium, deep, before=None, climate=None, beta_gradient=None,
                  outer_ms: float = 6.0, drift_ms: float = 1.6, angle_deg: float = 40.0, device="cpu",
-                 dtype=torch.float32, modes=None) -> None:
+                 dtype=torch.float32, modes=None, forecast=None) -> None:
         self.lat = np.asarray(lat, np.float64)
         self.lon = np.asarray(lon, np.float64)
         self.device, self.dtype = torch.device(device), dtype
@@ -131,11 +131,18 @@ class SwarmFields:
         channels = [shallow[0], shallow[1], medium[0], medium[1], deep[0], deep[1],
                     (before or medium)[0], (before or medium)[1], (climate or medium)[0], (climate or medium)[1],
                     gx * 1e11, gy * 1e11, *mode_u, *mode_v]
+        self.base_channels = len(channels)
+        self.forecast_hours = None
+        if forecast is not None:
+            # a dynamical model's forecast steering (naturev1.cyclone.forecastflow.ForecastFlow): six channels per hour
+            self.forecast_hours = np.asarray(forecast.hours, np.float64)
+            channels.extend(np.asarray(forecast.data, np.float32).reshape(-1, *np.shape(medium[0])))
         stack = np.nan_to_num(np.stack(channels).astype(np.float32))
         self.grid = torch.as_tensor(stack, dtype=dtype, device=self.device)[None]          # (1, C, H, W)
+        self._base_index = torch.arange(self.base_channels, device=self.device)
 
     @classmethod
-    def from_context(cls, ctx, device="cpu", dtype=torch.float32) -> "SwarmFields":
+    def from_context(cls, ctx, device="cpu", dtype=torch.float32, forecast=None) -> "SwarmFields":
         """From a :class:`naturev1.cyclone.members.PhysicsContext` (vortex removed, flows built)."""
         f = ctx.flows
         before = (ctx.before.u, ctx.before.v) if ctx.before is not None else None
@@ -143,18 +150,33 @@ class SwarmFields:
         climate = (climate.u, climate.v) if climate is not None else None
         return cls(ctx.clean.lat, ctx.clean.lon, (f["shal"].u, f["shal"].v), (f["med"].u, f["med"].v),
                    (f["dlm"].u, f["dlm"].v), before, climate, (ctx.beta.gx, ctx.beta.gy), ctx.outer_ms,
-                   ctx.beta.drift_ms, ctx.beta.angle_deg, device, dtype)
+                   ctx.beta.drift_ms, ctx.beta.angle_deg, device, dtype, forecast=forecast)
 
     def to_box(self, lon) -> np.ndarray:
         """Longitudes in the box's continuous frame."""
         return self.lon[0] + (np.asarray(lon, np.float64) - self.lon[0]) % 360.0
 
-    def sample(self, lat: torch.Tensor, lon: torch.Tensor) -> torch.Tensor:
-        """``(C, N)`` bilinear values at the particles (outside the box: clamped to its edge)."""
+    def sample(self, lat: torch.Tensor, lon: torch.Tensor, channels: torch.Tensor | None = None) -> torch.Tensor:
+        """``(C, N)`` bilinear values at the particles (outside the box: clamped to its edge) -- the analysis
+        channels, or the given ``channels``."""
         x = 2.0 * (lon - self.lon[0]) / (self.lon[-1] - self.lon[0]) - 1.0
         y = 2.0 * (lat - self.lat[0]) / (self.lat[-1] - self.lat[0]) - 1.0
         g = torch.stack([x, y], -1).to(self.dtype)[None, None]                               # (1, 1, N, 2)
-        return F.grid_sample(self.grid, g, mode="bilinear", padding_mode="border", align_corners=True)[0, :, 0]
+        grid = self.grid[:, self._base_index if channels is None else channels]
+        return F.grid_sample(grid, g, mode="bilinear", padding_mode="border", align_corners=True)[0, :, 0]
+
+    def forecast_steering(self, lat: torch.Tensor, lon: torch.Tensor, hours: float) -> torch.Tensor | None:
+        """``(6, N)`` forecast layer winds (shal u, v, med u, v, dlm u, v) at ``hours``, or None without a forecast."""
+        if self.forecast_hours is None:
+            return None
+        fh = self.forecast_hours
+        h = float(np.clip(hours, fh[0], fh[-1]))
+        k = int(np.clip(np.searchsorted(fh, h, side="right") - 1, 0, fh.size - 2))
+        a = (h - fh[k]) / max(fh[k + 1] - fh[k], 1e-9)
+        base = self.base_channels
+        idx = torch.arange(base + 6 * k, base + 6 * k + 12, device=self.device)
+        s = self.sample(lat, lon, idx)
+        return (1.0 - a) * s[:6] + a * s[6:]
 
 
 @dataclass
@@ -359,9 +381,16 @@ class Swarm:
         w_sh = (1.0 - 2.0 * d).clamp(min=0.0)
         w_dp = (2.0 * d - 1.0).clamp(min=0.0)
         w_md = 1.0 - w_sh - w_dp
-        u = w_sh * s[0] + w_md * s[2] + w_dp * s[4]
-        v = w_sh * s[1] + w_md * s[3] + w_dp * s[5]
-        if self.fields.has_before:
+        ff = self.fields.forecast_steering(lat, lon, hours) if hours >= 0 else None
+        if ff is not None:
+            # the model's forecast winds already evolve: no tendency or climatology terms on top of them
+            ff = ff.to(self.dt)
+            u = w_sh * ff[0] + w_md * ff[2] + w_dp * ff[4]
+            v = w_sh * ff[1] + w_md * ff[3] + w_dp * ff[5]
+        else:
+            u = w_sh * s[0] + w_md * s[2] + w_dp * s[4]
+            v = w_sh * s[1] + w_md * s[3] + w_dp * s[5]
+        if ff is None and self.fields.has_before:
             if hours < 0:
                 g = torch.full_like(d, hours / 12.0)
             else:
@@ -369,7 +398,7 @@ class Swarm:
                 g = tau * (1.0 - torch.exp(-hours / tau)) / 12.0
             u = u + g * (s[2] - s[6])
             v = v + g * (s[3] - s[7])
-        if self.fields.has_climate and hours > 0:
+        if ff is None and self.fields.has_climate and hours > 0:
             m = torch.exp(-hours / prm["anom_tau"])
             u = s[8] + m * (u - s[8])
             v = s[9] + m * (v - s[9])
@@ -651,19 +680,21 @@ class Swarm:
 
 def swarm_products(case, ctx, track: np.ndarray, leads, particles: int = 20000, device="cpu", seed: int = 0,
                    grid_step_deg: float = 0.5, strike_radius_km: float = 111.0, fixes: list | None = None,
-                   micro_minutes: float = 15.0, intensity_kt=None) -> dict:
+                   micro_minutes: float = 15.0, intensity_kt=None, forecast_flow=None) -> dict:
     """
     The swarm as the probabilistic half of :func:`naturev1.cyclone.forecast.physics_forecast`: filtered on the last
     day's fixes, then re-centred on ``track`` (the consensus, which stays the best single estimate: on held-out
     seasons the swarm's own mean is worse) so that it contributes what a single track cannot -- how likely each kind
     of future is, where the centre may pass, and a cone whose size is calibrated on past seasons
-    (``coefficients.SWARM``).
+    (``coefficients.SWARM``, or ``SWARM_FF`` when the worlds are steered by a forecast flow).
     """
     from ..cyclone import coefficients
 
-    table = getattr(coefficients, "SWARM", None) or {}
+    # steered by a forecast flow, the worlds spread differently: that swarm has its own cone calibration
+    table = (getattr(coefficients, "SWARM_FF", None) if forecast_flow is not None else None) or getattr(coefficients, "SWARM", None) or {}
     pri = SwarmPriors(layer_depth=depth_for_wind(case.wind_kt), **table.get("priors", {}))
-    sw = Swarm.from_context(case, ctx, particles, priors=pri, device=device, seed=seed)
+    fields = SwarmFields.from_context(ctx, device=device, forecast=forecast_flow)
+    sw = Swarm.from_context(case, ctx, particles, priors=pri, device=device, seed=seed, fields=fields)
     if fixes:
         # the satellite path: every centre fix at its own minute, the worlds advancing in micro-segments between them
         from .fixes import assimilate

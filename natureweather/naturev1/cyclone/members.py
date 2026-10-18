@@ -139,10 +139,15 @@ def _anomaly_member(ctx: PhysicsContext, layer: str, tau: float, motion=None, le
 
 
 def run_members(case, env: Environment, climatology=None, analogs=None, cliper_table: dict | None = None,
-                names=DEFAULT_MEMBERS, leads=LEADS, ensemble_members: int = 24) -> dict:
+                names=DEFAULT_MEMBERS, leads=LEADS, ensemble_members: int = 24, forecast_flow=None,
+                model_track: np.ndarray | None = None) -> dict:
     """
     ``{member: (L, 2) lat/lon}`` for every requested member that can be computed, plus ``"_context"`` (the shared
     :class:`PhysicsContext`) and ``"_ensemble"`` (members, spread) when the ensemble ran.
+
+    With a dynamical model's forecast (:class:`naturev1.cyclone.forecastflow.ForecastFlow` and/or the model's own
+    tracked storm at ``leads``) two more members join: ``fflow``, the storm carried through the forecast steering, and
+    ``model``, the model's own track.
     """
     from .cliper import cliper_track
 
@@ -156,10 +161,16 @@ def run_members(case, env: Environment, climatology=None, analogs=None, cliper_t
         out["cliper"] = cliper_track(case, leads, cliper_table)
     if "analog" in wanted and analogs is not None:
         out["analog"] = analogs.forecast(case, 100, 1.5)
+    if model_track is not None:
+        out["model"] = np.asarray(model_track, np.float64)
     ctx = build_context(case, env, climatology)
     if ctx is None:
         return out
     out["_context"] = ctx
+    if forecast_flow is not None:
+        from .forecastflow import fflow_member
+
+        out["fflow"] = fflow_member(ctx, forecast_flow, leads)
     lat0, lon0 = case.lat, case.lon
     beta = ctx.beta_velocity()
     if "steer_med" in wanted:

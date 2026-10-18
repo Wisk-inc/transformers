@@ -10,6 +10,12 @@ skin temperature (as SST over water), precipitable water, 10 m winds, the land m
 the winds, 500 hPa height and pressure of the analysis 12 hours earlier, for the tendencies. Each field is averaged
 conservatively onto the 1.5-degree grid of the training data (the same grid the shipped coefficients were fitted on).
 
+For the turns, :meth:`GFSAnalysis.forecast_flow` also reads the GFS *forecast* winds every 12 hours to 120 hours
+(200-850 hPa) and sea-level pressure: GFS's own storm is tracked through its pressure field, removed from its winds
+at each hour, and the layer-mean environmental winds become a
+:class:`naturev1.cyclone.forecastflow.ForecastFlow` -- the steering the physics members and the swarm's worlds are
+carried through, so a trough GFS sees coming two days out bends the track the way it should.
+
 GRIB decoding needs ``eccodes`` (``pip install eccodes``; the wheel carries the library).
 """
 
@@ -25,6 +31,9 @@ from ..cyclone.data import (HALF_LAT, HALF_LON, HISTORY_HOURS, LEADS, LEVELS, PR
 from ..cyclone.fields import Environment
 
 GFS = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.{day}/{hour:02d}/atmos/gfs.t{hour:02d}z.pgrb2.0p25.f000"
+GFS_FORECAST = GFS[:-3] + "{lead:03d}"
+#: Forecast hours of the steering flow (as in the HRES hindcasts the forecast-flow coefficients were fitted on).
+FLOW_HOURS = tuple(range(0, 121, 12))
 G = 9.80665
 LAT_AXIS = np.arange(-90.0, 90.0 + 1e-9, STEP)
 LON_AXIS = np.arange(0.0, 360.0 - 1e-9, STEP)
@@ -50,6 +59,30 @@ def _get(url: str, start: int | None = None, end: int | None = None, timeout: fl
 
             time.sleep(2 ** attempt)
     raise RuntimeError(f"could not fetch {url}: {last}")
+
+
+def _index(base: str) -> dict:
+    """``{(variable, level): (first byte, last byte)}`` of a GRIB file from its ``.idx``."""
+    lines = _get(base + ".idx").decode().splitlines()
+    offsets = [int(line.split(":")[1]) for line in lines]
+    index = {}
+    for k, line in enumerate(lines):
+        parts = line.split(":")
+        index[(parts[3], parts[4])] = (offsets[k], offsets[k + 1] - 1 if k + 1 < len(lines) else None)
+    return index
+
+
+def _read(base: str, index: dict, var: str, level: str) -> np.ndarray:
+    """One GRIB message, decoded and coarsened to the 1.5-degree nodes."""
+    import eccodes
+
+    start, end = index[(var, level)]
+    gid = eccodes.codes_new_from_message(_get(base, start, end))
+    try:
+        values = eccodes.codes_get_values(gid).reshape(eccodes.codes_get(gid, "Nj"), eccodes.codes_get(gid, "Ni"))
+    finally:
+        eccodes.codes_release(gid)
+    return _coarsen(values)
 
 
 def _coarsen(field: np.ndarray) -> np.ndarray:
@@ -86,27 +119,9 @@ class GFSAnalysis:
         path = self.cache / f"gfs_{stamp}.npz"
         if path.exists():
             return dict(np.load(path))
-        import eccodes
-
-        day, hour = stamp[:8], int(stamp[8:10])
-        base = GFS.format(day=day, hour=hour)
-        lines = _get(base + ".idx").decode().splitlines()
-        offsets = [int(line.split(":")[1]) for line in lines]
-        index = {}
-        for k, line in enumerate(lines):
-            parts = line.split(":")
-            end = offsets[k + 1] - 1 if k + 1 < len(lines) else None
-            index[(parts[3], parts[4])] = (offsets[k], end)
-
-        def read(var, level):
-            start, end = index[(var, level)]
-            gid = eccodes.codes_new_from_message(_get(base, start, end))
-            try:
-                values = eccodes.codes_get_values(gid).reshape(eccodes.codes_get(gid, "Nj"), eccodes.codes_get(gid, "Ni"))
-            finally:
-                eccodes.codes_release(gid)
-            return _coarsen(values)
-
+        base = GFS.format(day=stamp[:8], hour=int(stamp[8:10]))
+        index = _index(base)
+        read = lambda var, level: _read(base, index, var, level)
         out = {}
         for key, var in _LEVEL_VARS.items():
             out[key] = np.stack([read(var, f"{p} mb") for p in LEVELS])
@@ -140,6 +155,71 @@ class GFSAnalysis:
                           previous={k: v.astype(np.float64) for k, v in previous.items()}, time=np.datetime64(when, "s"))
         env.previous_levels = PREVIOUS_LEVELS
         return env
+
+
+    def forecast_fields(self, when, lead: int) -> dict:
+        """GFS forecast from ``when`` at ``lead`` hours: ``u``, ``v`` on the 200-850 hPa levels and ``msl``."""
+        when = np.datetime64(when, "h")
+        stamp = str(when).replace("-", "").replace("T", "")[:10]
+        path = self.cache / f"gfs_{stamp}_f{int(lead):03d}.npz"
+        if path.exists():
+            return dict(np.load(path))
+        base = GFS_FORECAST.format(day=stamp[:8], hour=int(stamp[8:10]), lead=int(lead))
+        index = _index(base)
+        out = {key: np.stack([_read(base, index, _LEVEL_VARS[key], f"{p} mb") for p in PREVIOUS_LEVELS]) for key in ("u", "v")}
+        out["msl"] = _read(base, index, *_SURFACE["msl"])
+        np.savez_compressed(path, **out)
+        return out
+
+    def forecast_flow(self, when, case, leads=LEADS, hours=FLOW_HOURS):
+        """
+        GFS's forecast steering for ``case`` (initialised at ``when``) and GFS's own track of the storm.
+
+        GFS's storm is followed through its sea-level pressure (:func:`naturev1.cyclone.field_tracker.track_in_fields`,
+        seeded with the storm's observed motion); at each forecast hour its vortex is removed from the winds around
+        where GFS has it, and the 850-700, 850-400 and 850-200 hPa environmental winds are kept -- the same
+        construction as the HRES hindcast flows the coefficients were fitted on.
+
+        Returns ``(ForecastFlow, model_track (L, 2) at leads)``; a lead GFS has lost the storm at is NaN.
+        """
+        from ..cyclone.baselines import motion_back
+        from ..cyclone.field_tracker import track_in_fields
+        from ..cyclone.forecastflow import LAYERS, ForecastFlow
+        from ..cyclone.geometry import local_displacement_km
+        from ..cyclone.steering import SteeringFlow
+        from ..cyclone.vortex import remove_vortex
+
+        when = np.datetime64(when, "h")
+        need = sorted(set(int(h) for h in hours) | set(int(h) for h in leads))
+        rows, cols = int(round(2 * HALF_LAT / STEP)) + 1, int(round(2 * HALF_LON / STEP)) + 1
+        rs, cs, box_lat, box_lon = _box_indices(case.lat, case.lon, LAT_AXIS, STEP, rows, cols)
+        cut = lambda a: a[..., rs, :][..., cs]
+        fields = {h: {k: cut(v).astype(np.float64) for k, v in self.forecast_fields(when, h).items()} for h in need}
+        first = None
+        rate = motion_back(case, 6)
+        if rate is not None:
+            east, north = local_displacement_km(case.lat - rate[0] * 6, case.lon - rate[1] * 6, case.lat, case.lon)
+            first = (float(east) / 6.0, float(north) / 6.0)
+        msl = np.stack([fields[h]["msl"] for h in need])
+        tracked = track_in_fields((case.lat, case.lon), need, msl, box_lat, box_lon, first_motion_kmh=first)
+        position = {h: tuple(tracked[k]) for k, h in enumerate(need)}
+        data = np.zeros((len(hours), 2 * len(LAYERS), box_lat.size, box_lon.size), np.float32)
+        last = (case.lat, case.lon)
+        for k, h in enumerate(hours):
+            at = (case.lat, case.lon) if h == 0 else position[int(h)]
+            if np.isfinite(at[0]):
+                last = at
+            env = Environment(lat=box_lat.astype(np.float64), lon=box_lon.astype(np.float64), levels=PREVIOUS_LEVELS,
+                              fields={"u": fields[int(h)]["u"], "v": fields[int(h)]["v"]})
+            try:
+                clean = remove_vortex(env, *last).environment
+            except Exception:                        # a degenerate box: steer with the raw winds rather than fail
+                clean = env
+            for j, (_, top, bottom) in enumerate(LAYERS):
+                flow = SteeringFlow(clean, top, bottom)
+                data[k, 2 * j], data[k, 2 * j + 1] = flow.u, flow.v
+        model_track = np.array([position[int(h)] for h in leads], np.float64)
+        return ForecastFlow(box_lat, box_lon, hours, data, source=f"GFS {str(when)[:13]}Z"), model_track
 
 
 def case_from_bdeck(best: list, when, storm_id: str = "", name: str = "", basin: str = "NA") -> Case:
