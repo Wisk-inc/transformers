@@ -7,8 +7,8 @@ from __future__ import annotations
 import numpy as np
 
 from naturev1.cyclone.data import LEADS
-from naturev1.cyclone.intensity import (RI_FEATURES, RI_MODEL_FEATURES, RI_OCEAN_FEATURES, SHIPS_PREDICTORS,
-                                        ri_features, ri_probability, ships_intensity, ships_predictors)
+from naturev1.cyclone.intensity import (RI_FEATURES, RI_MODEL_FEATURES, RI_OCEAN_FEATURES, RI_SIZE_FEATURES,
+                                        SHIPS_PREDICTORS, ri_features, ri_probability, ships_intensity, ships_predictors)
 from naturev1.cyclone.ocean import OceanClimatology, effective_sst, wake_cooling_k
 from naturev1.swarm.fixes import gale_radius_km, parse_bdeck
 from naturev1.swarm.models import native_window
@@ -54,18 +54,21 @@ def test_heat_potential_is_the_last_predictor_and_old_tables_still_work():
     along["shear_mid_ms"] = np.full(along["six_hours"].size, 3.0)
     along["speed_ms"] = np.full(along["hours"].size, 5.0)
     base = ships_predictors(case, along, 24.0)
-    assert base.shape == (len(SHIPS_PREDICTORS),) and base[-1] == 0.0, "no ocean: the heat-potential predictor is 0"
+    assert base.shape == (len(SHIPS_PREDICTORS),) and base[-3] == 0.0, "no ocean: the heat-potential predictor is 0"
+    assert base[-1] == 0.0, "no reported radius: size unknown"
     along["tchp_kj_cm2"] = np.full(along["hours"].size, 100.0)
     along["d26_m"] = np.full(along["hours"].size, 120.0)
-    assert abs(ships_predictors(case, along, 24.0)[-1] - 2.0) < 1e-9
-    old_table = {"leads": [24], "weights": [[5.0] + [0.0] * (len(SHIPS_PREDICTORS) - 2)]}     # one predictor fewer
-    assert ships_intensity(case, along, [24], old_table)[0] == 85.0, "a shorter table ignores the new predictor"
+    case.r34_nmi = 150.0 / 1.852
+    x = ships_predictors(case, along, 24.0)
+    assert abs(x[-3] - 2.0) < 1e-9 and abs(x[-2] - 1.0) < 1e-9 and x[-1] == 1.0
+    old_table = {"leads": [24], "weights": [[5.0] + [0.0] * 12]}                         # the 13-predictor table of 0.14
+    assert ships_intensity(case, along, [24], old_table)[0] == 85.0, "a shorter table ignores the new predictors"
     f = ri_features(case, along)
-    assert f.shape == (len(RI_FEATURES) + len(RI_MODEL_FEATURES) + len(RI_OCEAN_FEATURES),)
-    assert abs(f[-2] - 2.0) < 1e-9 and abs(f[-1] - 2.4) < 1e-9
+    assert f.shape == (len(RI_FEATURES) + len(RI_MODEL_FEATURES) + len(RI_OCEAN_FEATURES) + len(RI_SIZE_FEATURES),)
+    assert abs(f[-4] - 2.0) < 1e-9 and abs(f[-3] - 2.4) < 1e-9 and abs(f[-2] - 1.0) < 1e-9
     old_ri = {"weights": [0.0] * len(RI_FEATURES), "base_rate": 0.1}
     assert abs(ri_probability(case, along, old_ri) - 0.5) < 1e-9
-    new_ri = {"weights": [0.0] * (len(RI_FEATURES) + 3) + [1.0, 0.0], "base_rate": 0.1}
+    new_ri = {"weights": [0.0] * (len(RI_FEATURES) + 3) + [1.0, 0.0, 0.0, 0.0], "base_rate": 0.1}
     assert ri_probability(case, along, new_ri) > 0.85, "a warm deep ocean raises P(RI) under an ocean-aware table"
 
 

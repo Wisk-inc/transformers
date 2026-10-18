@@ -848,6 +848,36 @@ regression did not see inter-model spread in training, since the tuning seasons 
 member was fitted on HRES's pressure at 1.5 degrees; other models deepen storms differently at that resolution.
 Everything here degrades gracefully: with no model readable, the forecast is the 0.13.0 one and says so.
 
+### 4.16 0.15: the ocean's depth, storm size, and the benchmark table
+
+**Track: what 0.14 beats, on each reference's own held-out cases** (2018 and 2020-2022; mean error in km,
+reference → NatureV1 0.14; * = the whole 90% storm-bootstrap interval of the improvement is above zero).
+
+| reference | n (24 h) | 12 h | 24 h | 48 h | 72 h | 120 h |
+|---|---|---|---|---|---|---|
+| extrapolation (6 h motion) | 3,559 | 71 → 41 (+42%*) | 179 → 66 (+63%*) | 440 → 100 (+77%*) | 747 → 149 (+80%*) | 1,417 → 301 (+79%*) |
+| CLIPER (rebuilt) | 3,559 | 67 → 41 (+39%*) | 163 → 66 (+59%*) | 376 → 100 (+74%*) | 587 → 149 (+75%*) | 910 → 301 (+67%*) |
+| NatureV1 0.13.0 (physics only) | 3,559 | 56 → 41 (+27%*) | 127 → 66 (+48%*) | 299 → 100 (+67%*) | 512 → 149 (+71%*) | 879 → 301 (+66%*) |
+| NatureV1 0.13.1 (one model) | 3,559 | 43 → 41 (+4%*) | 73 → 66 (+10%*) | 122 → 100 (+18%*) | 190 → 149 (+22%*) | 373 → 301 (+19%*) |
+| **ECMWF HRES** | 3,504 | 56 → 40 (+27%*) | 79 → 65 (+18%*) | 122 → 96 (+22%*) | 185 → 140 (+24%*) | 324 → 260 (+20%*) |
+| **Pangu-Weather** | 3,456 | 52 → 40 (+24%*) | 69 → 63 (+9%*) | 101 → 94 (+6%*) | 151 → 139 (+8%*) | 278 → 254 (+8%*) |
+| **GraphCast** | 1,862 | 48 → 40 (+17%*) | 67 → 65 (+4%*) | 102 → 97 (+5%*) | 162 → 143 (+11%*) | 294 → 260 (+11%*) |
+| **FuXi** | 734 | 49 → 39 (+19%*) | 69 → 64 (+7%*) | 93 → 94 (−1%) | 154 → 146 (+5%) | 295 → 279 (+6%) |
+| **Aurora** | 786 | 49 → 41 (+18%*) | 66 → 62 (+6%*) | 92 → 84 (+9%*) | 146 → 123 (+16%*) | 312 → 249 (+20%*) |
+| **FGN (WeatherNext 2)** | 787 | 47 → 41 (+13%*) | 61 → 63 (−2%) | 81 → 86 (−7%) | 111 → 118 (−7%) | 199 → 209 (−5%) |
+
+Read it plainly. NatureV1 now beats every archived model it was compared with at 12 h, beats HRES, Pangu,
+GraphCast and Aurora at every lead to day 5, and is level with FuXi past 24 h. It does **not** beat FGN, the
+model behind WeatherNext 2, past 12 h: on FGN's 787 cases (2022) FGN alone is 5-7% better than the blend from
+24 h on, which is what an equal-weight mean does when one member is clearly the best -- it is diluted by the
+others. Two caveats carry over from 4.15: the blend contains these models' own tracks, so this is a product
+comparison, not a physics-versus-model one; and live the model set is different (GFS, IFS, AIFS, GraphCast-GFS,
+GEFS), with the blend weight fitted for one model.
+
+<!-- PENDING 0.15 intensity -->
+
+<!-- PENDING 0.15 melissa -->
+
 ## 5. Limitations
 
 - **Resolution.** 1.5° (~165 km) cannot resolve an eyewall, so intensity is the weakest output. The explicit

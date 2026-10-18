@@ -299,24 +299,24 @@ def flow_and_track(fields, case, leads=LEADS, hours=FLOW_HOURS, source: str = ""
         if "msl_native" in f:
             native[h] = native_window(np.asarray(f["msl_native"], np.float64), tuple(np.asarray(f["native_grid"], float)), case.lat, case.lon)
     pmin_native = np.full(len(need), np.nan)
+    fine = np.full((len(need), 2), np.nan)
     if len(native) == len(need):
-        # on the model's own grid (0.25 or 0.5 degrees) the low is sharp where the 1.5-degree nodes smear it:
-        # the track followed there is the one reported, the smoothed one kept for the coarse-grid steering
+        # On the model's own grid (0.25 or 0.5 degrees) the low is sharp where the 1.5-degree nodes smear it. Followed
+        # there, Melissa's GFS and GraphCast-GFS tracks were no better than on the smoothed grid (the sharp minimum
+        # wobbles; the smoothed one is a steadier centroid), so the smoothed track stays the reported one and the
+        # native one travels in the extras with the model's true central pressure.
         axes = native[need[0]][1], native[need[0]][2]
         stack = np.stack([native[h][0] for h in need])
         fine = track_in_fields((case.lat, case.lon), need, stack, axes[0], axes[1], first_motion_kmh=first)
         lon2n, lat2n = np.meshgrid(axes[1], axes[0])
         for k, h in enumerate(need):
             if np.isfinite(fine[k, 0]):
-                position[h] = (float(fine[k, 0]), float(fine[k, 1]))
                 near = great_circle_km(lat2n, lon2n, fine[k, 0], fine[k, 1]) <= 150.0
                 pmin_native[k] = np.nanmin(stack[k][near]) / 100.0
-            elif h > 0:
-                position[h] = (np.nan, np.nan)
     lon2, lat2 = np.meshgrid(box_lon, box_lat)
     extras = {"msl_min_hpa": np.full(len(need), np.nan), "msl_env_hpa": np.full(len(need), np.nan),
               "spread_hpa": np.full(len(need), np.nan), "hours": np.asarray(need, float), "msl_min_native_hpa": pmin_native,
-              "native_track": len(native) == len(need)}
+              "native_track": len(native) == len(need), "native_positions": fine}
     for k, h in enumerate(need):
         at = (case.lat, case.lon) if h == 0 else position[h]
         if np.isfinite(at[0]):

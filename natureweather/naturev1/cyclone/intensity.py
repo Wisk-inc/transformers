@@ -152,10 +152,15 @@ def environment_along_track(env, env_clean, case, track: np.ndarray, leads, wind
     if ocean is not None:
         from . import coefficients
 
+        from .ocean import anomaly_adjusted_depth
+
         sampled = ocean.sample(la, lo, case.time)
         d26, tchp = sampled["d26_m"], sampled["tchp_kj_cm2"]
-        power = (getattr(coefficients, "OCEAN", None) or {}).get("d26_power")
-    sst_eff = effective_sst(sst, wind, speed, hours, d26 if ocean is not None else None, power)
+        table = getattr(coefficients, "OCEAN", None) or {}
+        power = table.get("d26_power")
+        sst_clim = sampled.get("sst_c", np.full(hours.size, np.nan))
+        d26_used = anomaly_adjusted_depth(d26, sst, sst_clim, table.get("sst_anomaly_per_c", 0.0))
+    sst_eff = effective_sst(sst, wind, speed, hours, d26_used if ocean is not None else None, power)
     sample_hours = np.arange(0.0, hours[-1] + 1e-9, 6.0)
     pick = np.searchsorted(hours, sample_hours).clip(0, len(hours) - 1)
     pi = potential_intensity_at(env, la[pick], lo[pick], sst_eff[pick]) * KT_PER_MS
@@ -174,11 +179,19 @@ def environment_along_track(env, env_clean, case, track: np.ndarray, leads, wind
     return {"hours": hours, "lat": la, "lon": lo, "land": land["land"], "height_m": land["height_m"], "speed_ms": speed,
             "sst_k": sst, "sst_eff_k": sst_eff, "six_hours": sample_hours, "pi_kt": pi, "shear_ms": np.asarray(shear_l),
             "shear_mid_ms": np.asarray(shear_m), "rh_mid": np.asarray(rh), "landfall_hour": land["landfall_hour"],
-            "d26_m": d26, "tchp_kj_cm2": tchp, "pi_warm_kt": pi_warm}
+            "d26_m": d26, "tchp_kj_cm2": tchp, "pi_warm_kt": pi_warm,
+            "sst_clim_c": sampled.get("sst_c", np.full(hours.size, np.nan)) if ocean is not None else np.full(hours.size, np.nan)}
 
 
 SHIPS_PREDICTORS = ("one", "wind", "dwind12", "potential", "potential2", "shear", "shear_mid", "rh", "sst", "land",
-                    "wind_shear", "lat", "speed", "heat_potential")
+                    "wind_shear", "lat", "speed", "heat_potential", "size", "has_size")
+
+
+def _size_features(case) -> list:
+    """The storm's observed 34-kt radius (mean quadrant, in units of 150 km) and whether it was reported: small storms
+    intensify faster, and the radius is in the best track for 2004 on (``Case.r34_nmi``, from IBTrACS or the b-deck)."""
+    r = getattr(case, "r34_nmi", float("nan"))
+    return [float(r) * 1.852 / 150.0 if np.isfinite(r) and r > 0 else 0.0, 1.0 if np.isfinite(r) and r > 0 else 0.0]
 
 
 def _heat_potential(along: dict, mask) -> float:
@@ -205,7 +218,7 @@ def ships_predictors(case, along: dict, lead: float) -> np.ndarray:
                      shear, float(np.mean(along["shear_mid_ms"][use])) / 10.0, float(np.mean(along["rh_mid"][use])),
                      (float(np.mean(along["sst_eff_k"][hourly])) - 300.15) / 2.0, float(np.mean(along["land"][hourly])),
                      wind / 100.0 * shear, abs(case.lat) / 30.0, float(np.mean(along["speed_ms"][hourly])) / 5.0,
-                     _heat_potential(along, hourly)])
+                     _heat_potential(along, hourly), *_size_features(case)])
 
 
 def _fit_length(features: np.ndarray, weights: np.ndarray) -> np.ndarray:
@@ -416,6 +429,8 @@ RI_FEATURES = ("one", "dv12", "dv24", "wind", "headroom", "shear", "rh", "sst", 
 RI_MODEL_FEATURES = ("model_dp24", "model_dp48", "has_model")
 #: With the ocean climatology: the heat potential over the first 24 hours (kJ/cm2 / 50) and the 26 C depth (m / 50).
 RI_OCEAN_FEATURES = ("heat_potential", "warm_depth")
+#: The storm's observed 34-kt radius (units of 150 km) and whether it was reported.
+RI_SIZE_FEATURES = ("size", "has_size")
 
 
 def ri_features(case, along: dict, model_dp=None) -> np.ndarray:
@@ -448,7 +463,7 @@ def ri_features(case, along: dict, model_dp=None) -> np.ndarray:
     d26 = np.asarray(along.get("d26_m", np.full(h.size, np.nan)), np.float64)
     ocean = np.array([float(np.nanmean(tchp[first_day])) / 50.0 if np.isfinite(tchp[first_day]).any() else 0.0,
                       float(np.nanmean(d26[first_day])) / 50.0 if np.isfinite(d26[first_day]).any() else 0.0])
-    return np.concatenate([base, model, ocean])
+    return np.concatenate([base, model, ocean, _size_features(case)])
 
 
 def model_deficit_change(extras: dict | list | None, leads) -> np.ndarray | None:
@@ -543,7 +558,7 @@ def fit_ri(cases, alongs: list, threshold_kt: float = 30.0, l2: float = 1e-2, it
         grad = x.T @ (p - y) + reg @ w
         hess = (x * (p * (1 - p))[:, None]).T @ x + reg
         w = w - np.linalg.solve(hess, grad)
-    names = list(RI_FEATURES) + list(RI_MODEL_FEATURES) + list(RI_OCEAN_FEATURES)
+    names = list(RI_FEATURES) + list(RI_MODEL_FEATURES) + list(RI_OCEAN_FEATURES) + list(RI_SIZE_FEATURES)
     return {"features": names[:x.shape[1]], "threshold_kt": threshold_kt, "weights": w.round(5).tolist(),
             "base_rate": float(y.mean()), "cases": int(len(y))}
 
@@ -560,7 +575,8 @@ def ri_probability(case, along: dict, table: dict | None = None, model_dp=None) 
     return float(1.0 / (1.0 + np.exp(-w @ f)))
 
 
-__all__ = ["LGEM_KAPPA", "RI_FEATURES", "RI_MODEL_FEATURES", "RI_OCEAN_FEATURES", "SHIFOR_PREDICTORS", "SHIPS_PREDICTORS",
+__all__ = ["LGEM_KAPPA", "RI_FEATURES", "RI_MODEL_FEATURES", "RI_OCEAN_FEATURES", "RI_SIZE_FEATURES", "SHIFOR_PREDICTORS",
+           "SHIPS_PREDICTORS",
            "TREND_TAU_H",
            "category_probabilities", "decay_along", "environment_along_track", "fit_ri", "model_deficit_change",
            "model_trend_intensity", "recent_change", "ri_features", "ri_probability", "trend_intensity",

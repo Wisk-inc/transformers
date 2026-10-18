@@ -88,6 +88,21 @@ def effective_sst(sst_k: np.ndarray, vmax_kt: np.ndarray, translation_ms: np.nda
     return out
 
 
+def anomaly_adjusted_depth(d26_m, sst_k, sst_clim_c, per_c: float) -> np.ndarray:
+    """
+    The climatological 26 C depth deepened (or shoaled) by this year's surface anomaly: ``D26 * (1 + per_c * dSST)``,
+    clipped to 0.5-2 times. The climatology cannot know a record-warm year; the analysis's sea-surface temperature can,
+    and a warmer surface over the same water column usually means a deeper warm layer. ``per_c`` is fitted on the
+    tuning seasons (``coefficients.OCEAN["sst_anomaly_per_c"]``); 0 leaves the climatology alone.
+    """
+    d = np.asarray(d26_m, np.float64)
+    if not per_c:
+        return d
+    anomaly = np.asarray(sst_k, np.float64) - 273.15 - np.asarray(sst_clim_c, np.float64)
+    factor = np.clip(1.0 + per_c * np.nan_to_num(anomaly, nan=0.0), 0.5, 2.0)
+    return np.where(np.isfinite(d), d * factor, d)
+
+
 class OceanClimatology:
     """
     Monthly depth of the 26 C isotherm (m) and tropical-cyclone heat potential (kJ/cm2, the heat above 26 C down to
@@ -101,9 +116,10 @@ class OceanClimatology:
 
     _default = None
 
-    def __init__(self, d26_m: np.ndarray, tchp_kj_cm2: np.ndarray, lat: np.ndarray, lon: np.ndarray) -> None:
+    def __init__(self, d26_m: np.ndarray, tchp_kj_cm2: np.ndarray, lat: np.ndarray, lon: np.ndarray, sst_c=None) -> None:
         self.d26 = np.asarray(d26_m, np.float32)                    # (12, 180, 360)
         self.tchp = np.asarray(tchp_kj_cm2, np.float32)
+        self.sst = None if sst_c is None else np.asarray(sst_c, np.float32)      # the climatology's own surface, C
         self.lat = np.asarray(lat, np.float64)
         self.lon = np.asarray(lon, np.float64)
 
@@ -116,7 +132,7 @@ class OceanClimatology:
 
                 with resources.files("naturev1.cyclone").joinpath("ocean_climatology.npz").open("rb") as handle:
                     data = np.load(handle)
-                    cls._default = cls(data["d26_m"], data["tchp_kj_cm2"], data["lat"], data["lon"])
+                    cls._default = cls(data["d26_m"], data["tchp_kj_cm2"], data["lat"], data["lon"], data.get("sst_c"))
             except Exception:
                 cls._default = False
         return cls._default or None
@@ -131,8 +147,8 @@ class OceanClimatology:
         return m0, (m0 + 1) % 12, float(pos - np.floor(pos))
 
     def sample(self, lat, lon, time) -> dict:
-        """``{"d26_m", "tchp_kj_cm2"}`` at points (degrees), bilinear in space between the two months around ``time``;
-        land points take the nearest ocean value within a degree or two (NaN beyond)."""
+        """``{"d26_m", "tchp_kj_cm2", "sst_c"}`` at points (degrees), bilinear in space between the two months around
+        ``time``; land points take the nearest ocean value within a degree or two (NaN beyond)."""
         la = np.atleast_1d(np.asarray(lat, np.float64))
         lo = (np.atleast_1d(np.asarray(lon, np.float64)) + 180.0) % 360.0 - 180.0
         m0, m1, w = self._month_weights(time)
@@ -142,7 +158,7 @@ class OceanClimatology:
         di, dj = fi - i0, fj - j0
         i1, j1 = np.minimum(i0 + 1, self.lat.size - 1), (j0 + 1) % self.lon.size
         out = {}
-        for name, grid in (("d26_m", self.d26), ("tchp_kj_cm2", self.tchp)):
+        for name, grid in (("d26_m", self.d26), ("tchp_kj_cm2", self.tchp)) + ((("sst_c", self.sst),) if self.sst is not None else ()):
             g = (1.0 - w) * grid[m0] + w * grid[m1]
             corners = np.stack([g[i0, j0], g[i0, j1], g[i1, j0], g[i1, j1]])
             weights = np.stack([(1 - di) * (1 - dj), (1 - di) * dj, di * (1 - dj), di * dj])
@@ -160,5 +176,5 @@ class OceanClimatology:
         return out
 
 
-__all__ = ["COOLING_K", "D26_POWER", "D26_REFERENCE_M", "OceanClimatology", "RESIDENCE_H", "core_share", "effective_sst",
-           "wake_cooling_k"]
+__all__ = ["COOLING_K", "D26_POWER", "D26_REFERENCE_M", "OceanClimatology", "RESIDENCE_H", "anomaly_adjusted_depth", "core_share",
+           "effective_sst", "wake_cooling_k"]

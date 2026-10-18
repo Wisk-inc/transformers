@@ -217,8 +217,12 @@ def case_from_bdeck(best: list, when, storm_id: str = "", name: str = "", basin:
         truth["wind"].append(wi)
         truth["pressure"].append(np.nan)
         truth["valid"].append(bool(np.isfinite(la)))
+    from .fixes import gale_radius_km
+
+    at = [f for f in best if f.time == when]
+    r34 = gale_radius_km(at[0]) / 1.852 if at else float("nan")                 # km -> nautical miles, as IBTrACS has it
     return Case(storm_id, name, basin, np.datetime64(when, "s"), float(now[0]), float(now[1]), float(now[2]), float("nan"),
-                "HU" if now[2] >= 64 else "TS", {k: np.asarray(v, float) for k, v in hist.items()},
+                "HU" if now[2] >= 64 else "TS", {k: np.asarray(v, float) for k, v in hist.items()}, r34_nmi=float(r34),
                 truth={k: np.asarray(v, bool if k == "valid" else float) for k, v in truth.items()})
 
 
