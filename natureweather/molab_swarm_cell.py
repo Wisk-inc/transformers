@@ -102,6 +102,15 @@ for storm_id, name in storms:
     intensity = "  ".join(f"{h} h {v:.0f} kt" for h, v in zip(result["leads"], result["intensity"]) if np.isfinite(v))
     p_ri = result.get("ri_probability")
     ri = f"  \n**Rapid intensification (+30 kt in 24 h):** {p_ri:.0%} ({result.get('intensity_regime')} weights)" if p_ri is not None else ""
+    cats = result.get("category_probability")
+    if cats:
+        names = {64: "hurricane", 96: "major", 113: "Cat 4", 137: "Cat 5"}
+        ri += "  \n**P(at least ...):** " + "; ".join(
+            f"{names.get(int(t), f'{t:.0f} kt')} " + " ".join(f"{h}h {p:.0%}" for h, p in zip(result["leads"], cats["probability"][:, j]) if np.isfinite(p))
+            for j, t in enumerate(cats["thresholds_kt"]))
+    deep = result.get("model_deepening_hpa")
+    if deep is not None and np.isfinite(deep).any():
+        ri += "  \n**Models' deepening (hPa, central-pressure deficit):** " + "  ".join(f"{h}h {d:+.0f}" for h, d in zip(result["leads"], deep) if np.isfinite(d))
     used = run.get("models", {})
     gfs = run.get("model_track")
     gfs_text = ((f"  \n**Models read:** {', '.join(m['title'] for m in used.values())}; their mean track: "

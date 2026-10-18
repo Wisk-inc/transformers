@@ -769,7 +769,40 @@ to within 12-24% of the error at every lead on the tuning seasons and raised eve
 Each world now also follows **one model's forecast winds**, drawn with equal probability, so the swarm's futures
 carry the disagreement between models the way an ensemble does.
 
-<!-- PENDING intensity -->
+**Intensity: the models' own deepening.** The one thing the statistical intensity members cannot know is what
+a dynamical model does with the storm. 0.14 reads each model's central pressure along its own track, takes the
+change in its pressure deficit (central minus environmental pressure) from the analysis, and uses the models' mean
+deepening twice: as a sixth intensity member (``V0`` plus 0.7 kt per hPa at 6 h rising to 2.4 kt per hPa at 48 h,
+fitted on the tuning seasons, capped at the potential intensity and decayed over land) and as three more
+predictors of the rapid-intensification probability. In the hindcasts the model is HRES at 1.5 degrees; live it is
+the mean over the models read.
+
+Held-out seasons, mean absolute intensity error (kt), the 0.13.1 regime consensus against the same with the
+model member (every lead significant):
+
+| lead (h) | 6 | 12 | 24 | 36 | 48 | 72 | 96 | 120 |
+|---|---|---|---|---|---|---|---|---|
+| 0.13.1 | 4.1 | 6.4 | 10.6 | 14.0 | 16.7 | 20.3 | 21.4 | 22.5 |
+| **0.14** | **4.1** | **6.3** | **10.1** | **13.1** | **15.5** | **19.1** | **20.6** | **21.8** |
+| gain | 0.9% | 1.8% | 4.8% | 6.3% | 7.2% | 5.9% | 3.5% | 3.1% |
+
+The rapid-intensification probability improves from Brier skill +0.096 / AUC 0.813 to **+0.123 / AUC 0.840**. Where it
+says 30% or more (98 held-out forecasts), 39% intensified rapidly; above 50% (23 forecasts) only 26% did, so the top
+of the scale is over-confident. On those 98 forecasts the point forecast itself is no better than 0.13.1's: the
+member helps on the broad population of storms, not yet on the extreme ones.
+
+**Category probabilities.** `physics_forecast` now returns P(≥ 64 / 96 / 113 / 137 kt) at every lead, from the
+forecast plus the empirical distribution of the consensus's out-of-sample errors on the tuning seasons (25
+quantiles per lead, separately for the normal and the rapid regime). Held-out Brier skill over climatology:
+
+| threshold | 24 h | 48 h | 72 h | 120 h |
+|---|---|---|---|---|
+| hurricane (≥ 64 kt) | +0.65 | +0.45 | +0.38 | +0.36 |
+| major (≥ 96 kt) | +0.48 | +0.30 | +0.26 | +0.17 |
+| Category 4 (≥ 113 kt) | +0.36 | +0.23 | +0.17 | +0.10 |
+| Category 5 (≥ 137 kt) | +0.18 | +0.10 | +0.11 | −0.01 (19 cases) |
+
+Skilful everywhere except Category 5 at day 5, where there were nineteen cases to score on.
 
 <!-- PENDING melissa -->
 

@@ -236,7 +236,12 @@ rank correlation with the error 0.17-0.38, the fixed cone 0); the swarm's pertur
 forecast steering (its spread had been three times the error, which over-forecast loops), and each world follows
 one model's forecast winds. Two ideas measured and rejected: anchoring the model track to the observed position,
 and shrinking the model's weight when it disagrees with the physics.
-<!-- PENDING readme 0.14 -->
+
+Intensity gains the models' own deepening (their central-pressure-deficit change along their tracks) as a member
+and as a rapid-intensification predictor: held-out error down 4.8% at 24 h, 6.3% at 36 h and 7.2% at 48 h, every
+lead significant; P(RI) Brier skill +0.12, AUC 0.84; and calibrated P(≥ 64 / 96 / 113 / 137 kt) at every lead
+(Brier skill +0.65 / +0.48 / +0.36 / +0.18 at 24 h).
+<!-- PENDING readme swarm melissa -->
 
 ## Not trained
 
