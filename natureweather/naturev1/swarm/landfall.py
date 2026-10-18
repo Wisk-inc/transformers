@@ -118,6 +118,17 @@ def landfall_summary(region, result: dict, case, impact=None, where="Jamaica", a
         cons = {"hour": float(hh[k]), "time": stamp(hh[k]), "unit": region.label(cunit[k]), "lat": round(float(clat[k]), 2),
                 "lon": round(float(clon[k]), 2), "intensity_kt": round(ikt(hh[k]), 0), "intensity_band_kt": band_at(hh[k])}
     out["consensus"] = cons
+    if result.get("peak_probability"):
+        out["peak_probability"] = result["peak_probability"]
+    if_ri = result.get("intensity_if_ri")
+    p_ri = result.get("ri_probability")
+    if if_ri is not None and p_ri is not None and cin.any() and np.isfinite(if_ri).any():
+        kk = int(np.argmax(cin))
+        g2 = np.isfinite(if_ri)
+        at = float(np.interp(hh[kk], np.concatenate([[0.0], leads[g2]]), np.concatenate([[case.wind_kt], np.asarray(if_ri)[g2]])))
+        j = int(np.nanargmax(if_ri))
+        out["if_rapid"] = {"probability": float(p_ri), "landfall_kt": round(at, 0), "peak_kt": round(float(np.nanmax(if_ri)), 0),
+                           "peak_time": stamp(leads[j])}
     if good.any():
         kk = int(np.nanargmax(np.concatenate([[case.wind_kt], kt[good]])))
         ph = np.concatenate([[0.0], leads[good]])[kk]
@@ -151,6 +162,14 @@ def format_landfall(summary: dict, top: int = 14) -> str:
         band = c.get("intensity_band_kt")
         lines.append(f"  consensus track: {c['time']} near {c['unit'].split(',')[0]} ({c['lat']}N {abs(c['lon']):.2f}W), "
                      f"{c['intensity_kt']:.0f} kt" + (f" (10-90%: {band[0]:.0f}-{band[1]:.0f} kt)" if band else ""))
+    r = s.get("if_rapid")
+    if r:
+        lines.append(f"  if it intensifies rapidly (probability {r['probability']:.0%}): landfall at {r['landfall_kt']:.0f} kt, "
+                     f"peak {r['peak_kt']:.0f} kt at {r['peak_time']}")
+    pp = s.get("peak_probability")
+    if pp:
+        names = {64: "hurricane", 96: "major (96 kt)", 113: "category 4 (113 kt)", 137: "category 5 (137 kt)"}
+        lines.append("  chance the storm peaks at or above: " + ", ".join(f"{names.get(int(t), f'{t:.0f} kt')} {p:.0%}" for t, p in zip(pp["thresholds_kt"], pp["probability"])))
     p = s.get("peak")
     if p and p.get("strengthens", True):
         band = p.get("band_kt")
@@ -159,14 +178,15 @@ def format_landfall(summary: dict, top: int = 14) -> str:
         lines.append(f"  peak intensity: the storm is at its forecast peak now ({p['intensity_kt']:.0f} kt); the forecast does not strengthen it "
                      f"(forecast maximum {p['forecast_max_kt']:.0f} kt at {p['forecast_max_time']})")
     if s.get("units"):
-        head = (f"  {'parish':22s} {'P(HU)':>6s} {'peak kt if hit':>14s} {'p90 kt':>7s} {'gust kt if hit':>14s} {'rain mm':>8s} "
+        head = (f"  {'parish':22s} {'P(HU)':>6s} {'peak kt if hit':>14s} {'p90 kt':>7s} {'gust kt if hit':>14s} {'rain if hit':>11s} {'max mm':>7s} "
                 f"{'TS arrives (UTC)':>17s} {'HU arrives (UTC)':>17s} {'peak at (UTC)':>14s}")
         lines += ["", head, "  " + "-" * (len(head) - 2)]
         for r in s["units"][:top]:
             lines.append(f"  {r['label'].split(',')[0][:22]:22s} {r['p64']:6.0%} {r.get('peak_kt_if_hit', r['peak_kt']):14.0f} {r.get('peak_kt_p90', float('nan')):7.0f} "
-                         f"{r.get('gust_kt_if_hit', r.get('peak_gust_kt', float('nan'))):14.0f} {r['rain_mm']:8.0f} {r.get('arrival_time', '-')[5:16]:>17s} "
+                         f"{r.get('gust_kt_if_hit', r.get('peak_gust_kt', float('nan'))):14.0f} {r.get('rain_mm_if_hit', r['rain_mm']):11.0f} {r.get('rain_max_mm_if_hit', float('nan')):7.0f} {r.get('arrival_time', '-')[5:16]:>17s} "
                          f"{r.get('hu_arrival_time', '-')[5:16]:>17s} {r.get('peak_time', '-')[5:16]:>14s}")
-        lines.append("  'if hit' = over the worlds that bring at least tropical-storm force to the parish; p90 = 90th percentile over all worlds")
+        lines.append("  'if hit' = over the worlds that bring at least tropical-storm force to the parish; p90 = 90th percentile over all worlds; "
+                     "rain = parish area mean, max = its wettest cell (what a gauge reports)")
     return "\n".join(lines)
 
 

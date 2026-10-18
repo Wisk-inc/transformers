@@ -111,6 +111,10 @@ for storm_id, name in storms:
     intensity = "  ".join(f"{h} h {v:.0f} kt" for h, v in zip(result["leads"], result["intensity"]) if np.isfinite(v))
     p_ri = result.get("ri_probability")
     ri = f"  \n**Rapid intensification (+30 kt in 24 h):** {p_ri:.0%} ({result.get('intensity_regime')} weights)" if p_ri is not None else ""
+    pk = result.get("peak_probability")
+    if pk:
+        names = {64: "hurricane", 96: "major", 113: "Cat 4", 137: "Cat 5"}
+        ri += "  \n**Chance the storm peaks at or above (next 5 days):** " + "; ".join(f"{names.get(int(t), f'{t:.0f} kt')} {p:.0%}" for t, p in zip(pk["thresholds_kt"], pk["probability"]))
     cats = result.get("category_probability")
     if cats:
         names = {64: "hurricane", 96: "major", 113: "Cat 4", 137: "Cat 5"}

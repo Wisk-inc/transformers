@@ -42,7 +42,7 @@ def _gfs_available(gfs: GFSAnalysis, when: np.datetime64) -> bool:
 def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: int = 100_000, device="cpu",
                    region=None, climatology=None, analogs=None, impact_particles: int = 20_000,
                    cache: str | Path = "~/.cache/naturev1", name: str = "", forecast_flow: bool = True,
-                   models=None, log=print) -> dict:
+                   models=None, previous=None, log=print) -> dict:
     """
     Args:
         storm_id: NHC id, e.g. ``"al132025"`` (Melissa) or ``"ep212026"``.
@@ -53,6 +53,8 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
             members and the swarm's steering; a model that cannot be read is skipped, and with none the forecast
             goes ahead on the analysis alone.
         models: which models (:data:`naturev1.swarm.models.DEFAULT_MODELS` by default).
+        previous: the previous cycle's ``result`` with its analysis time, ``{"time": ..., "track": ...}``: its error
+            for the time now analysed is fed back into the new track (small, 12-48 h; see ``apply_track_feedback``).
 
     Returns:
         ``{"case", "result" (physics_forecast output, swarm included), "impact", "fixes_before", "fixes_after",
@@ -95,7 +97,7 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
             log("no model forecast could be read; going ahead on the analysis alone")
     result = physics_forecast(case, env, climatology, analogs, swarm=particles, swarm_fixes=before or None,
                               swarm_device=device, forecast_flow=flows, model_track=tracks,
-                              model_extras={k: v["extras"] for k, v in read.items()} or None)
+                              model_extras={k: v["extras"] for k, v in read.items()} or None, previous=previous)
     model_track = model_mean(case, tracks, result["leads"]) if tracks else None
     after, ess_after = [], None
     if not archive and fdeck:

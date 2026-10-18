@@ -904,7 +904,107 @@ the 349 forecasts over water more than 1 C warmer than the climatology. A monthl
 the water under one storm well enough to improve on the surface temperature the analysis already has. The depth
 term is in the code with its exponent set to zero by the fitted coefficients; the heat potential and the size are
 scored below as predictors.
-<!-- PENDING 0.15 intensity table -->
+**Intensity: each release's shipped tables on the same held-out cases** (2018 and 2020-2022, 4,215 forecasts of
+407 storms at 6 h; mean absolute error in kt; skill = % lower error than the row above it, * = the whole 90%
+storm-bootstrap interval above zero).
+
+| | 6 h | 12 h | 24 h | 36 h | 48 h | 72 h | 96 h | 120 h |
+|---|---|---|---|---|---|---|---|---|
+| persistence | 4.4 | 8.1 | 14.3 | 18.9 | 23.0 | 28.3 | 30.9 | 32.2 |
+| SHIFOR (climatology + persistence) | 4.0 | 6.9 | 11.7 | 15.5 | 18.3 | 21.2 | 22.3 | 22.8 |
+| NatureV1 0.13.1 (5-member regime consensus) | 3.8 | 6.4 | 10.8 | 14.3 | 17.0 | 20.1 | 21.3 | 22.3 |
+| NatureV1 0.14 (+ model deepening) | 3.7 | 6.2 | 10.1 | 13.1 | 15.5 | 18.9 | 20.6 | 21.8 |
+| **NatureV1 0.15** (+ ocean heat content, size, basin bias) | **3.7** | **6.1** | **9.9** | **13.0** | **15.5** | 18.9 | 20.6 | 21.7 |
+| 0.15 vs 0.14 | +0.9%* | +1.3%* | +1.3%* | +0.8% | +0.4% | −0.4% | +0.0% | +0.3% |
+| 0.15 vs SHIFOR | +6.6%* | +10.7%* | +15.5%* | +16.1%* | +15.1%* | +10.9%* | +7.7%* | +4.7%* |
+| 0.15 vs persistence | +16.2%* | +24.8%* | +30.7%* | +32.5%* | +32.7%* | +33.2%* | +33.4%* | +32.6%* |
+
+Where the ocean and the size earned their place is the rapid-intensification probability, not the mean: held-out
+Brier skill 0.094 (0.13.1) → 0.122 (0.14) → **0.154** (0.15), AUC 0.813 → 0.840 → **0.864**; of the 107 forecasts
+that put P(RI) at 30% or more, 46% verified (39% in 0.14). On the held-out forecasts over the warmest, deepest water
+(slow storms over more than 80 kJ/cm², 54 cases) the mean error fell 4-9% at 6-36 h. The per-basin bias was fitted on
+the tuning seasons and then **shrunk to zero wherever the three seasons did not agree on its sign**: what survives is
++0.6 to +3.7 kt in the Atlantic and −0.5 to −2.4 kt in the west Pacific at 6-48 h. Honest footnote: the unshrunk
+Atlantic bias (up to +4.2 kt) made the held-out Atlantic *worse* (−0.2 to −3.5% at 36-72 h) -- the under-forecast of
+the tuning seasons' Atlantic was situational, not a constant -- and the unshrunk table would have scored +1.7%* and
++2.7%* at 96 and 120 h overall on the strength of a south Indian Ocean term the seasons disagreed on. The shrunk
+version is what ships.
+
+**Why it under-forecasts the wind, measured.** The complaint about Melissa -- the consensus held 103-124 kt while
+the storm went to 160 -- is not a bias. Over all held-out cases the 0.15 forecast is 0 to +3 kt *high* in the
+Atlantic. It is conditional (bias = forecast − truth, kt, at 12 / 24 / 36 / 48 h):
+
+| the storm then... | n | 12 h | 24 h | 36 h | 48 h |
+|---|---|---|---|---|---|
+| intensified ≥ 30 kt in 24 h (rapid) | 272 | −10.9 | −25.5 | −26.4 | −21.3 |
+| intensified 20-30 kt | 332 | −5.2 | −10.9 | −13.4 | −13.5 |
+| held steady (±5 kt) | 891 | +0.7 | +3.5 | +5.7 | +7.3 |
+| weakened ≥ 20 kt | 328 | +7.8 | +14.2 | +17.4 | +17.9 |
+
+The forecast maximum over the next five days sits 30 kt under the true maximum for the 620 held-out forecasts of
+storms that went on to reach 113 kt. A consensus that minimises the mean error regresses toward the middle; no
+weighting fixes that, and every attempt to move the mean toward the rapid intensifiers' path in proportion to
+P(RI) came back with a weight of zero on the tuning seasons (and would have cost the 4,173 held-out cases that did
+not intensify rapidly 2-3 times their error). Two things do help, and both ship:
+
+* **The rapid-intensification path as a scenario** (`intensity_if_ri`, `coefficients.RI_PATH`): the mean change of
+  the 217 tuning-season storms that did intensify rapidly (+9/+19/+40/+44/+37 kt at 6/12/24/36/48 h), capped at the
+  potential intensity along the track and decayed over land. On the 272 held-out forecasts of storms that did go
+  rapid it beats the consensus by 21%, 35%, 60%, 37% and 8% at 6-48 h; on the ones that did not it is 2-3 times
+  worse. It is therefore issued *beside* the consensus with its probability, never blended into it. Mixing it into
+  the category probabilities was tried and switched off: better at ≥96 and ≥113 kt at 24 h, worse at ≥137 kt and at
+  every threshold from 48 h on.
+* **The peak-intensity probability** (`peak_probability`, `coefficients.PEAK`): P(the storm's peak within the next
+  120 h reaches 64 / 96 / 113 / 137 kt), a logistic on the analysis intensity, the consensus's rise and maximum, the
+  warm-ocean headroom, heat content, shear, humidity, P(RI), the model's deepening and the land ahead. Held-out, for
+  storms below each threshold at analysis time (Brier skill against climatology; the second number is the best a
+  user had before, the maximum over leads of the per-lead category probability):
+
+  | threshold | n | base rate | peak logistic | per-lead maximum | reliability (forecast → observed) |
+  |---|---|---|---|---|---|
+  | ≥ 64 kt (hurricane) | 1,969 | 0.41 | **0.32** | 0.26 | 0.15→0.13, 0.40→0.31, 0.60→0.56, 0.84→0.84 |
+  | ≥ 96 kt (major) | 2,472 | 0.22 | **0.31** | 0.22 | 0.15→0.09, 0.39→0.37, 0.59→0.60, 0.82→0.80 |
+  | ≥ 113 kt (category 4) | 2,616 | 0.16 | **0.28** | 0.15 | 0.14→0.15, 0.25→0.25, 0.39→0.41, 0.59→0.53, 0.83→0.82 |
+  | ≥ 137 kt (category 5) | 2,785 | 0.05 | **0.28** | 0.16 | 0.07→0.06, 0.14→0.15, 0.24→0.34, 0.40→0.54 |
+
+  The landfall report now opens with it ("chance the storm peaks at or above: hurricane 100%, major 62%, category 4
+  31%, category 5 8%"), which is the sentence a parish needs when the point forecast says 107 kt.
+
+**The track, fed its own recent error.** A model track's error persists from one cycle to the next: the previous
+cycle's forecast for the time now being analysed, minus the analysis, is known at analysis time, and a fitted share
+of it is subtracted from the new blended track (`apply_track_feedback`, `coefficients.TRACK_FEEDBACK`; pass the
+previous cycle's result as `previous=`). Fitted on the tuning seasons' HRES blends, the share is 0.25-0.34 at
+24-48 h for a 24 h gap and zero beyond 48 h, where it did harm. Held-out, on the multi-model blend: +0.2%*, +1.1%*,
++1.2%*, +0.4% and +0.2% at 6-48 h. Small and significant, and the honest size of what "learning from the storm's own
+behaviour" is worth once the blend already removes the initial-position offset (on the raw HRES track the same idea
+is worth 5-11% at 6-24 h, which is that offset).
+
+**Rain, calibrated against radar.** R-CLIPER (Tuleya et al. 2007) was run along the *observed* track of 24 US
+landfalls -- so track and intensity error are removed and only the rain model is tested -- against NOAA MRMS
+gauge-corrected radar storm totals on 0.05°, over land within 300 km of the track: 8 tuning storms (Hermine, Matthew,
+Harvey, Irma, Nate, Barry, Imelda, Dorian; 137,177 cells) and 16 held-out (Gordon, Florence, Michael, Hanna, Isaias,
+Laura, Sally, Delta, Claudette, Elsa, Fred, Henri, Ida, Nicholas, Ian, Nicole; 329,416 cells; Zeta lost a radar day).
+As published, R-CLIPER delivers about **half** the observed rain: the tuning storms' observed/forecast ratio is 1.91
+(per storm 0.9-2.8), the area over 100 mm is a third of the observed, the area over 250 mm a sixth. The multiplier
+is set so the tuning storms' total is unbiased, **×1.95** (`coefficients.RAIN_SCALE`, `ImpactSettings.rain_scale`).
+Held-out:
+
+| | cell MAE (mm) | bias (mm) | area ≥ 100 mm, forecast ÷ observed | area ≥ 250 mm | 99.5th pct | CSI ≥ 100 mm | CSI ≥ 250 mm | MAE where ≥ 100 mm fell |
+|---|---|---|---|---|---|---|---|---|
+| as published (×1.0) | 31.3 | −15.3 | 0.39 | 0.15 | 0.58 | 0.204 | 0.115 | 97 |
+| MAE-optimal on tuning (×1.2) | 31.3 | −9.4 | 0.55 | 0.36 | 0.70 | 0.239 | 0.180 | 88 |
+| **shipped (×1.95)** | 38.4 | +13.1 | 1.41 | 1.87 | 1.10 | **0.285** | **0.291** | **72** |
+
+So the heavy rain is found far more often (the threat score for 100 mm rises from 0.20 to 0.29, for 250 mm from
+0.12 to 0.29, in 13 of the 16 held-out storms) and the error where 100 mm or more actually fell drops by a quarter,
+at the price of too much rain in the light-rain cells (the held-out storms were less under-forecast than the tuning
+storms: ratio about 1.5 against 1.9), which is where the overall MAE and the +13 mm bias come from. A multiplier
+cannot fix R-CLIPER's shape -- too concentrated near the core, nothing for the outer bands and the remnant low -- and
+that is the next thing to build. The parish numbers also changed form: the swarm-mean rain is diluted by every world
+that misses, so the landfall report now gives the rain **if the parish is hit**, its 90th percentile over the worlds,
+and the parish's wettest cell if hit (the number a rain gauge reports), next to the mean. Satellite rain was checked
+as a reference and rejected: CHIRPS put Melissa's 27-29 October total over Jamaica at a maximum of 158 mm against 817 mm
+in the gauges.
 
 <!-- PENDING 0.15 melissa -->
 

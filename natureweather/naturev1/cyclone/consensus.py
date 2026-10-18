@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import geometry
+
 from .geometry import from_local, to_local
 
 
@@ -180,5 +182,47 @@ def blend_with_model(case, track: np.ndarray, model_track: np.ndarray, spec: dic
     return out
 
 
-__all__ = ["apply_consensus", "blend_with_model", "fit_consensus", "from_displacements", "project_simplex",
+
+def apply_track_feedback(case, track, previous_track, previous_time, leads, table: dict | None = None):
+    """
+    Error feedback from the storm's own previous cycle (``coefficients.TRACK_FEEDBACK``): the previous forecast's
+    position for the time now being analysed, minus the analysis, is an error known at analysis time; a fitted share
+    of it per lead is subtracted from the new track at leads up to ``max_lead_h``. Model track errors persist from
+    cycle to cycle (a ridge too strong is still too strong six hours later); fitted on the HRES blends of the tuning
+    seasons, worth about 1% on the held-out multi-model blend at 12-36 h -- small, and nothing beyond 48 h, which
+    is why it stops there.
+
+    Args:
+        track: the new blended track ``(L, 2)``.
+        previous_track: the previous cycle's blended track ``(L, 2)`` at the same ``leads``.
+        previous_time: the previous cycle's analysis time (numpy datetime64 or ISO string).
+    Returns the corrected track; the input unchanged when the previous cycle is not usable.
+    """
+    if table is None:
+        from . import coefficients
+
+        table = getattr(coefficients, "TRACK_FEEDBACK", None)
+    if not table or previous_track is None or previous_time is None:
+        return track
+    gap_h = float((np.datetime64(case.time, "m") - np.datetime64(previous_time, "m")) / np.timedelta64(60, "m"))
+    leads = np.asarray(leads, np.float64)
+    prev = np.asarray(previous_track, np.float64)
+    if gap_h <= 0 or gap_h > 48 or not np.isfinite(prev[:, 0]).any():
+        return track
+    pl = np.interp(gap_h, leads[np.isfinite(prev[:, 0])], prev[np.isfinite(prev[:, 0]), 0])
+    po = np.degrees(np.interp(gap_h, leads[np.isfinite(prev[:, 0])], np.unwrap(np.radians(prev[np.isfinite(prev[:, 0]), 1]))))
+    e_prev, n_prev = geometry.local_displacement_km(case.lat, case.lon, pl, po)              # the previous error, km
+    keys = sorted(table["beta"], key=lambda k: abs(float(k) - gap_h))
+    beta = np.interp(leads, table["leads"], table["beta"][keys[0]])
+    beta = np.where(leads <= table.get("max_lead_h", 48), beta, 0.0)
+    if gap_h < 9:                                                                                  # a 6 h gap: the 12 h share, scaled
+        beta = beta * gap_h / 12.0
+    out = np.asarray(track, np.float64).copy()
+    ok = np.isfinite(out[:, 0])
+    e, n = geometry.local_displacement_km(case.lat, case.lon, out[ok, 0], out[ok, 1])
+    lat, lon = geometry.move(case.lat, case.lon, e - beta[ok] * e_prev, n - beta[ok] * n_prev)
+    out[ok, 0], out[ok, 1] = lat, lon
+    return out
+
+__all__ = ["apply_track_feedback", "apply_consensus", "blend_with_model", "fit_consensus", "from_displacements", "project_simplex",
            "to_displacements"]

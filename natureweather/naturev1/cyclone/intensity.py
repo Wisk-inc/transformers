@@ -511,7 +511,52 @@ def model_trend_intensity(case, along: dict, leads, model_dp, table: dict | None
     return np.where(np.isfinite(water), np.interp(np.asarray(leads, float), hours, path), np.nan)
 
 
-def category_probabilities(intensity: np.ndarray, regime: str, table: dict | None = None) -> dict:
+def fit_ri_path(cases, alongs: list, leads, threshold_kt: float = 30.0) -> dict:
+    """
+    The intensity path of the storms that *did* intensify rapidly: the mean and 75th percentile of their change from
+    the analysis at each lead (kt), over the tuning seasons' cases whose 24-hour change reached ``threshold_kt``.
+    """
+    from .data import LEADS
+
+    k24 = list(LEADS).index(24)
+    rows = []
+    for c, a in zip(cases, alongs):
+        if a is None or not c.truth["valid"][k24] or not np.isfinite(c.truth["wind"][k24]) or not np.isfinite(c.wind_kt):
+            continue
+        if c.truth["wind"][k24] - c.wind_kt >= threshold_kt:
+            rows.append(np.where(c.truth["valid"], c.truth["wind"], np.nan) - c.wind_kt)
+    rows = np.asarray(rows)
+    return {"leads": [int(h) for h in leads], "threshold_kt": threshold_kt, "cases": int(rows.shape[0]),
+            "mean_change_kt": [round(float(np.nanmean(rows[:, k])), 2) for k in range(len(leads))],
+            "p75_change_kt": [round(float(np.nanquantile(rows[:, k], 0.75)), 2) for k in range(len(leads))]}
+
+
+def ri_scenario_intensity(case, along: dict, leads, table: dict | None = None, which: str = "mean_change_kt") -> np.ndarray:
+    """
+    The intensity *if the storm intensifies rapidly*: the analysis plus the rapid intensifiers' mean change at each
+    lead (``coefficients.RI_PATH``), capped at the potential intensity along the track, then land and terrain decay.
+    Issued beside the consensus with its probability (``ri_probability``): the consensus is the expected value, this
+    is the branch a parish cannot afford to ignore when the probability is real.
+    """
+    if table is None:
+        from . import coefficients
+
+        table = getattr(coefficients, "RI_PATH", None)
+        if table is None:
+            return np.full(len(leads), np.nan)
+    hours = along["hours"]
+    change = np.interp(np.asarray(leads, float), table["leads"], table[which])
+    water = case.wind_kt + change
+    pi = np.interp(np.asarray(leads, float), along["six_hours"], along["pi_kt"])
+    water = np.minimum(water, np.maximum(pi, case.wind_kt))
+    knots = np.concatenate([[0.0], np.asarray(leads, float)])
+    path = np.interp(hours, knots, np.concatenate([[case.wind_kt], water]))
+    path = apply_land_decay(hours, np.maximum(path, 15.0), along["land"], along["height_m"])
+    return np.interp(np.asarray(leads, float), hours, path)
+
+
+def category_probabilities(intensity: np.ndarray, regime: str, table: dict | None = None, ri_probability: float | None = None,
+                           ri_intensity: np.ndarray | None = None) -> dict:
     """
     ``{"thresholds_kt": [...], "probability": (L, T)}`` -- P(intensity >= each threshold) at each lead, from the
     forecast plus the empirical distribution of the consensus's out-of-sample errors on the tuning seasons
@@ -528,8 +573,17 @@ def category_probabilities(intensity: np.ndarray, regime: str, table: dict | Non
     v = np.asarray(intensity, np.float64)
     samples = v[:, None] + q                                                                        # (L, 25)
     prob = np.stack([(samples >= t).mean(1) for t in thresholds], -1)
+    mixed = table.get("ri_mixture") and ri_probability is not None and ri_intensity is not None and np.isfinite(ri_intensity).any()
+    if mixed:
+        # the rapid-intensification branch: with probability P(RI) the storm follows the rapid intensifiers' path,
+        # spread by the rapid regime's own error quantiles (switched on by the table only where it scored better)
+        qr = np.asarray(table["quantiles"]["rapid"], np.float64)
+        branch = np.asarray(ri_intensity, np.float64)[:, None] + qr
+        prob_ri = np.stack([(branch >= t).mean(1) for t in thresholds], -1)
+        p = float(np.clip(ri_probability, 0.0, 1.0))
+        prob = (1.0 - p) * prob + p * np.where(np.isfinite(prob_ri), prob_ri, prob)
     prob[~np.isfinite(v)] = np.nan
-    return {"thresholds_kt": thresholds.tolist(), "probability": prob}
+    return {"thresholds_kt": thresholds.tolist(), "probability": prob, "ri_mixture": bool(mixed)}
 
 
 def fit_ri(cases, alongs: list, threshold_kt: float = 30.0, l2: float = 1e-2, iterations: int = 30,
@@ -575,10 +629,66 @@ def ri_probability(case, along: dict, table: dict | None = None, model_dp=None) 
     return float(1.0 / (1.0 + np.exp(-w @ f)))
 
 
-__all__ = ["LGEM_KAPPA", "RI_FEATURES", "RI_MODEL_FEATURES", "RI_OCEAN_FEATURES", "RI_SIZE_FEATURES", "SHIFOR_PREDICTORS",
+
+#: Predictors of the peak-intensity logistic (``coefficients.PEAK``), after the intercept: the analysis intensity, the
+#: consensus's rise and maximum, the warm-ocean potential-intensity headroom over 72 h, mean ocean heat content, shear
+#: and mid-level humidity over 48 h, P(RI) and its logit, the model's 24 h deepening and whether there is one, the
+#: share of the first 72 h over land, latitude.
+PEAK_FEATURES = ("one", "v0", "cons_rise", "cons_max", "headroom72", "tchp48", "shear48", "rh48", "p_ri", "logit_p", "dp24", "has_dp",
+                 "land72", "abslat")
+
+
+def _series_upto(along: dict, key: str, upto_h: float) -> np.ndarray:
+    v = np.asarray(along[key], np.float64)
+    t = np.asarray(along["six_hours"] if v.size == len(along["six_hours"]) else along["hours"], np.float64)
+    return v[t <= upto_h]
+
+
+def peak_features(case, along: dict, consensus_kt, ri_probability: float, model_dp=None) -> np.ndarray:
+    """The :data:`PEAK_FEATURES` row for one case (raw, before the table's standardisation)."""
+    from .data import LEADS
+
+    cv = np.asarray(consensus_kt, np.float64)
+    p = float(np.clip(ri_probability if ri_probability is not None and np.isfinite(ri_probability) else 0.05, 1e-3, 1 - 1e-3))
+    pi = _series_upto(along, "pi_warm_kt" if "pi_warm_kt" in along else "pi_kt", 72.0)
+    k24 = list(LEADS).index(24)
+    dp = np.asarray(model_dp, np.float64) if model_dp is not None else np.full(len(LEADS), np.nan)
+    has_dp = bool(dp.size > k24 and np.isfinite(dp[k24]))
+    tchp = _series_upto(along, "tchp_kj_cm2", 48.0) if "tchp_kj_cm2" in along else np.array([np.nan])
+    with np.errstate(all="ignore"):
+        row = [1.0, case.wind_kt, np.nanmax(cv) - case.wind_kt, np.nanmax(cv), np.nanmax(pi) - case.wind_kt, np.nanmean(tchp),
+               np.nanmean(_series_upto(along, "shear_ms", 48.0)), np.nanmean(_series_upto(along, "rh_mid", 48.0)), p, np.log(p / (1 - p)),
+               dp[k24] if has_dp else 0.0, float(has_dp), np.nanmean(_series_upto(along, "land", 72.0)), abs(case.lat)]
+    return np.nan_to_num(np.asarray(row, np.float64))
+
+
+def peak_probability(case, along: dict, consensus_kt, ri_probability: float, model_dp=None, table: dict | None = None) -> dict:
+    """
+    ``{"thresholds_kt": [64, 96, 113, 137], "probability": [...]}`` -- the probability that the storm's **peak**
+    intensity within the forecast window reaches each threshold (hurricane, major, category 4, category 5): a logistic
+    on :data:`PEAK_FEATURES` fitted on the tuning seasons (``coefficients.PEAK``). This is the question a point
+    forecast cannot answer: the consensus is the expected intensity, and for the storms that do explode it sits
+    30 kt under their peak; this says how likely the explosion is. 1 where the storm is already at the threshold.
+    """
+    if table is None:
+        from . import coefficients
+
+        table = getattr(coefficients, "PEAK", None)
+    if not table:
+        return {}
+    x = peak_features(case, along, consensus_kt, ri_probability, model_dp)
+    mu, sd = np.asarray(table["mean"], np.float64), np.asarray(table["std"], np.float64)
+    z = np.concatenate([x[:1], (x[1:] - mu) / np.where(sd > 1e-9, sd, 1.0)])
+    out = []
+    for thr in table["thresholds_kt"]:
+        w = np.asarray(table["weights"][str(int(thr))], np.float64)
+        out.append(1.0 if case.wind_kt >= thr else float(1.0 / (1.0 + np.exp(-float(z @ w)))))
+    return {"thresholds_kt": [float(t) for t in table["thresholds_kt"]], "probability": out}
+
+__all__ = ["LGEM_KAPPA", "PEAK_FEATURES", "RI_FEATURES", "RI_MODEL_FEATURES", "RI_OCEAN_FEATURES", "RI_SIZE_FEATURES", "SHIFOR_PREDICTORS",
            "SHIPS_PREDICTORS",
            "TREND_TAU_H",
-           "category_probabilities", "decay_along", "environment_along_track", "fit_ri", "model_deficit_change",
-           "model_trend_intensity", "recent_change", "ri_features", "ri_probability", "trend_intensity",
+           "category_probabilities", "decay_along", "environment_along_track", "fit_ri", "fit_ri_path", "model_deficit_change",
+           "model_trend_intensity", "peak_features", "peak_probability", "recent_change", "ri_features", "ri_probability", "ri_scenario_intensity", "trend_intensity",
            "fit_lgem", "fit_shifor", "fit_ships", "lgem_batch", "lgem_intensity", "lgem_table", "potential_intensity_at", "shifor_intensity",
            "shifor_predictors", "ships_intensity", "ships_predictors"]

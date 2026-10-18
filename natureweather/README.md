@@ -258,7 +258,22 @@ arrival times. The wind field is sized to the observed 34-kt radius, the worlds'
 forecast's own calibrated error distribution. `naturev1.swarm.observations` fits a vortex to barometer readings
 (a centre fix with uncertainty and a central pressure) and blends point winds into the map -- operators for feeds
 not yet read here. The track benchmark against every archived model is in section 4.16 of the model card.
-<!-- PENDING readme 0.15 numbers -->
+**Measured on the held-out seasons (2018, 2020-2022), none of it tuned there.** Intensity: 0.15's tables lower the
+error 0.9-1.3% at 6-24 h over 0.14 (16-33% over persistence, 5-16% over SHIFOR at every lead), and lift the
+rapid-intensification Brier skill from 0.122 to 0.154 (AUC 0.840 → 0.864). The under-forecast of the wind is conditional,
+not a bias: −25 kt at 24 h on the storms that intensify rapidly, +14 kt on those that weaken fast, and the forecast
+peak sits 30 kt under the true peak of the storms that reach 113 kt. Two products answer that: the rapid-intensification
+path issued beside the consensus with its probability (60% better than the consensus at 24 h on the storms that did go
+rapid, 2-3 times worse on those that did not, hence never blended), and a peak-intensity probability -- P(peak within
+5 days ≥ 64 / 96 / 113 / 137 kt) -- with held-out Brier skill 0.32 / 0.31 / 0.28 / 0.28 against 0.26 / 0.22 / 0.15 / 0.16
+for the best per-lead category probability. Track: the previous cycle's error fed back into the new blend is worth
++1.1-1.2% at 12-24 h (significant) and nothing past 48 h. Rain: R-CLIPER along the observed track of 24 US landfalls
+against gauge-corrected radar delivered half the observed rain; a ×1.95 multiplier set on 8 tuning storms raises the
+held-out threat score for 100 mm from 0.20 to 0.29 and for 250 mm from 0.12 to 0.29, at the cost of a +13 mm bias in
+the light-rain cells. Parish rain is now reported *if the parish is hit* and as its wettest cell, not only as the
+swarm mean that every missing world dilutes. Full tables in the model card, section 4.16.
+
+<!-- PENDING readme 0.15 melissa -->
 
 ## Not trained
 

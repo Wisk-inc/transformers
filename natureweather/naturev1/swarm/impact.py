@@ -46,6 +46,20 @@ WIND_KT = (34.0, 50.0, 64.0)
 RAIN_MM = (100.0, 250.0)
 
 
+def _rain_scale_default() -> float:
+    """The R-CLIPER multiplier calibrated against gauge-corrected radar (``coefficients.RAIN_SCALE``), 1 when absent."""
+    try:
+        from ..cyclone import coefficients
+
+        return float(getattr(coefficients, "RAIN_SCALE", {}).get("multiplier", 1.0))
+    except Exception:
+        return 1.0
+
+
+#: R-CLIPER rain rates are multiplied by this (see :data:`naturev1.cyclone.coefficients.RAIN_SCALE`).
+RAIN_SCALE = _rain_scale_default()
+
+
 @dataclass
 class ImpactSettings:
     intensity_sd0: float = 0.08
@@ -55,6 +69,8 @@ class ImpactSettings:
     area_share: float = AREA_SHARE
     orographic_per_ms: float = OROGRAPHIC_PER_MS
     orographic_cap: float = OROGRAPHIC_CAP
+    #: multiplier on the R-CLIPER rain rate (calibrated against radar for US landfalls; 1 = Tuleya et al. as published)
+    rain_scale: float = RAIN_SCALE
     steep_slope: float = STEEP_SLOPE
     land_decay: bool = True              # False when the intensities already include it (a best track)
     cell_stride: int = 1                 # paint every n-th cell in each direction (2 on a CPU: 4x faster)
@@ -268,7 +284,7 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
                     g = g * factor
                 rate = rcliper_rate_mm_h(r, vk.to(dt32).view(-1, 1)).masked_fill(far, 0.0)
                 ascent = (wf["u_ms"] * sx[idx] + wf["v_ms"] * sy[idx]).clamp_min(0.0)
-                rate = rate * (1.0 + st.orographic_per_ms * ascent).clamp(max=st.orographic_cap)
+                rate = rate * (1.0 + st.orographic_per_ms * ascent).clamp(max=st.orographic_cap) * float(st.rain_scale)
                 rows, cols = ix.view(-1, 1), idx.view(1, -1)
                 stronger = speed > peak[rows, cols]
                 peak_hour[rows, cols] = torch.where(stronger, torch.full_like(speed, float(h[k])), peak_hour[rows, cols])
@@ -340,6 +356,14 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
     cum = torch.cumsum(torch.gather(wk[:, None].expand(-1, n_units), 0, order), dim=0)
     at90 = (cum >= 0.9).to(torch.int64).argmax(dim=0)
     unit_acc["peak_p90"] = torch.gather(sorted_peak, 0, at90.view(1, -1))[0]
+    # rain the same way: the area mean given the parish is hit, its 90th percentile over the worlds, and the parish's
+    # wettest cell (what a rain gauge reports) given it is hit -- the swarm mean is diluted by the worlds that miss
+    unit_acc["rain_hit"] = (wk[:, None] * torch.where(windy, urain, torch.zeros_like(urain))).sum(0)
+    order_r = torch.argsort(urain, dim=0)
+    cum_r = torch.cumsum(torch.gather(wk[:, None].expand(-1, n_units), 0, order_r), dim=0)
+    unit_acc["rain_p90"] = torch.gather(torch.gather(urain, 0, order_r), 0, (cum_r >= 0.9).to(torch.int64).argmax(dim=0).view(1, -1))[0]
+    urain_max = torch.zeros(n, n_units, dtype=dt32, device=dev).scatter_reduce(1, unit.expand(n, -1), rain, reduce="amax", include_self=True)
+    unit_acc["rain_max_hit"] = (wk[:, None] * torch.where(windy, urain_max, torch.zeros_like(urain_max))).sum(0)
     cells = {k: (v[keep] if isinstance(v, np.ndarray) else v) for k, v in cells.items()}
 
     shape = region.unit.shape
@@ -373,7 +397,10 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
                       "peak_kt_if_hit": ua["peak_hit"][u] / ua["hour_w"][u] if ua["hour_w"][u] > 0.05 else float("nan"),
                       "gust_kt_if_hit": ua["gust_hit"][u] / ua["hour_w"][u] if ua["hour_w"][u] > 0.05 else float("nan"),
                       "peak_hour": ua["hour_sum"][u] / ua["hour_w"][u] if ua["hour_w"][u] > 0.05 else float("nan"),
-                      "hu_arrival_h": ua["hu_sum"][u] / ua["hu_w"][u] if ua["hu_w"][u] > 0.05 else float("nan")})
+                      "hu_arrival_h": ua["hu_sum"][u] / ua["hu_w"][u] if ua["hu_w"][u] > 0.05 else float("nan"),
+                      "rain_mm_if_hit": ua["rain_hit"][u] / ua["hour_w"][u] if ua["hour_w"][u] > 0.05 else float("nan"),
+                      "rain_mm_p90": ua["rain_p90"][u],
+                      "rain_max_mm_if_hit": ua["rain_max_hit"][u] / ua["hour_w"][u] if ua["hour_w"][u] > 0.05 else float("nan")})
     units.sort(key=lambda d: (-d["p64"], -d["p_gust64"], -d["p34"], -d["rain_mm"]))
     return ImpactResult(region, units, maps, n, h, {"area_share": st.area_share})
 
@@ -416,4 +443,4 @@ def impact_from_forecast(region: RegionMap, result: dict, case, particles: int |
     return paint(region, tracks, hours, f_kt, f_hours, weights, settings, device, seed=seed)
 
 
-__all__ = ["AREA_SHARE", "ImpactResult", "ImpactSettings", "hourly", "impact_from_forecast", "paint", "world_intensity"]
+__all__ = ["AREA_SHARE", "RAIN_SCALE", "ImpactResult", "ImpactSettings", "hourly", "impact_from_forecast", "paint", "world_intensity"]
