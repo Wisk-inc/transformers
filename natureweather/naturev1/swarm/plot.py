@@ -47,11 +47,17 @@ def impact_figure(run: dict, worldlines: int = 300, scene=None, extent=None):
                 ax.plot(fc.track[p, :, 1], fc.track[p, :, 0], lw=0.4, alpha=0.25,
                         color=plt.cm.viridis(float(np.nanmean(depth[i]))))
         ax.plot(track[:, 1], track[:, 0], "-o", color="black", ms=3, lw=1.6, label="NatureV1 consensus")
+        for j, (name, m) in enumerate(run.get("models", {}).items()):
+            t = np.asarray(m["track"])
+            if np.isfinite(t[:, 0]).any():
+                ok = np.isfinite(t[:, 0])
+                path = np.vstack([[case.lat, case.lon], t[ok]])
+                ax.plot(path[:, 1], path[:, 0], "-", color=plt.cm.tab10(j % 10), lw=0.8, alpha=0.8, label=m.get("title", name))
         model = run.get("model_track")
         if model is not None and np.isfinite(model).any():
             ok = np.isfinite(model[:, 0])
             path = np.vstack([[case.lat, case.lon], model[ok]])
-            ax.plot(path[:, 1], path[:, 0], "--", color="dimgray", lw=1.0, label="GFS (member)")
+            ax.plot(path[:, 1], path[:, 0], "--", color="dimgray", lw=1.2, label="models' mean")
         cone = result["swarm"].get("cone_km")
         if cone is not None and k == 0:
             for (la, lo), r in zip(result["track"], cone):

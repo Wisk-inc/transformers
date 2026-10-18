@@ -9,6 +9,8 @@ core            the swarm: every world a 4D worldline (longitude, latitude, stee
 fixes           the satellite path: NHC best-track and fix decks (Dvorak, microwave, scatterometer, recon, radar),
                 each fix with its own uncertainty, streamed into the swarm minute by minute
 analysis        GFS analyses (live, or any time since 2021) cut into the storm-centred box of the hindcasts
+models          the live models -- GFS, ECMWF IFS and AIFS (open data), GraphCast-GFS, the GEFS mean -- each read by
+                byte range into forecast steering and the model's own storm track; the swarm's worlds each follow one
 geography       every Caribbean country and territory as a raster of its parishes / provinces / districts, with
                 terrain
 impact          each world's wind and rain painted onto that raster: per-parish probabilities of tropical-storm and

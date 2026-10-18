@@ -3,9 +3,10 @@
 One call from an NHC storm id to a Caribbean impact report: best track and fixes from NHC, the GFS analysis, the
 NatureV1 physics consensus with the satellite-filtered swarm around it, and the parish-by-parish impacts.
 
-GFS's forecast from the same time supplies the steering the members and the swarm's worlds are carried through and
-GFS's own track as a member (:meth:`naturev1.swarm.analysis.GFSAnalysis.forecast_flow`) -- the turns a trough or a
-ridge will force, which the analysis alone cannot see coming.
+The models' forecasts from the same cycle -- GFS, ECMWF IFS and AIFS, GraphCast-GFS and the GEFS mean
+(:mod:`naturev1.swarm.models`) -- supply the steering the members and the swarm's worlds are carried through and
+their own tracks, averaged with equal weight (:mod:`naturev1.cyclone.multimodel`): the turns a trough or a ridge will
+force, which the analysis alone cannot see coming, and the error-cancelling of several independent models.
 
 * **Live** (``when=None``): the newest synoptic time that has both a best-track fix and a GFS analysis; the swarm is
   filtered on the 24 hours of centre fixes before it, launched, and then re-weighted by every fix that has arrived
@@ -41,19 +42,22 @@ def _gfs_available(gfs: GFSAnalysis, when: np.datetime64) -> bool:
 def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: int = 100_000, device="cpu",
                    region=None, climatology=None, analogs=None, impact_particles: int = 20_000,
                    cache: str | Path = "~/.cache/naturev1", name: str = "", forecast_flow: bool = True,
-                   log=print) -> dict:
+                   models=None, log=print) -> dict:
     """
     Args:
         storm_id: NHC id, e.g. ``"al132025"`` (Melissa) or ``"ep212026"``.
         when: analysis time for a replay (None: live).
         region: a :class:`naturev1.swarm.geography.RegionMap` for impacts (None: track only).
         climatology, analogs: for the full 13-member consensus (without them the basic consensus is used).
-        forecast_flow: also read GFS's forecast (about 150 MB, cached) for the forecast-flow and model members and
-            the swarm's steering; if it cannot be read, the forecast goes ahead without it.
+        forecast_flow: also read the models' forecasts (about 150 MB each, cached) for the forecast-flow and model
+            members and the swarm's steering; a model that cannot be read is skipped, and with none the forecast
+            goes ahead on the analysis alone.
+        models: which models (:data:`naturev1.swarm.models.DEFAULT_MODELS` by default).
 
     Returns:
         ``{"case", "result" (physics_forecast output, swarm included), "impact", "fixes_before", "fixes_after",
-        "best", "analysis_time", "ess_after", "model_track" (GFS's track at the leads, or None)}``.
+        "best", "analysis_time", "ess_after", "model_track" (the models' mean track at the leads, or None),
+        "models" ({name: {"title", "track", "extras"}} for every model read)}``.
     """
     from ..cyclone.forecast import physics_forecast
     from .impact import impact_from_forecast
@@ -77,14 +81,21 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
     case = case_from_bdeck(best, when, storm_id.upper(), name, BASINS.get(storm_id[:2].lower(), "NA"))
     env = gfs.environment(when, case.lat, case.lon)
     before = merge(window(fdeck, when - np.timedelta64(24, "h"), when))
-    flow = model_track = None
+    flows = tracks = None
+    read = {}
     if forecast_flow:
-        try:
-            flow, model_track = gfs.forecast_flow(when, case)
-        except Exception as error:                   # a missing forecast file must not stop the forecast
-            log(f"GFS forecast flow unavailable ({type(error).__name__}: {error}); going ahead without it")
+        from ..cyclone.multimodel import model_mean
+        from .models import DEFAULT_MODELS, fetch_models
+
+        read = fetch_models(case, when, models or DEFAULT_MODELS, cache / "models", log=log)
+        if read:
+            flows = {k: v["flow"] for k, v in read.items()}
+            tracks = {k: v["track"] for k, v in read.items()}
+        else:
+            log("no model forecast could be read; going ahead on the analysis alone")
     result = physics_forecast(case, env, climatology, analogs, swarm=particles, swarm_fixes=before or None,
-                              swarm_device=device, forecast_flow=flow, model_track=model_track)
+                              swarm_device=device, forecast_flow=flows, model_track=tracks)
+    model_track = model_mean(case, tracks, result["leads"]) if tracks else None
     after, ess_after = [], None
     if not archive and fdeck:
         now = np.datetime64(dt.datetime.now(dt.timezone.utc).replace(tzinfo=None), "m")
@@ -93,7 +104,8 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
             ess_after = reweight_forecast(result["swarm"]["forecast"], after, when)
     impact = impact_from_forecast(region, result, case, particles=impact_particles, device=device) if region is not None else None
     return {"case": case, "result": result, "impact": impact, "fixes_before": before, "fixes_after": after,
-            "best": best, "analysis_time": when, "ess_after": ess_after, "model_track": model_track}
+            "best": best, "analysis_time": when, "ess_after": ess_after, "model_track": model_track,
+            "models": {k: {"title": v["title"], "track": v["track"], "extras": v["extras"]} for k, v in read.items()}}
 
 
 def goes_scene(lat: float, lon: float, directory: str | Path = "~/.cache/naturev1/goes", half_deg: float = 8.0,

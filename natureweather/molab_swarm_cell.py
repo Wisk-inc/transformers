@@ -1,15 +1,17 @@
-# NatureV1 0.13.1 -- the satellite path, the swarm sandbox and Caribbean impacts, in ONE marimo cell (molab, 1 GPU).
+# NatureV1 0.14 -- the satellite path, the swarm sandbox and Caribbean impacts, in ONE marimo cell (molab, 1 GPU).
 #
 # Paste this whole file into one marimo cell and run it. What it does:
-#   1. installs naturev1 0.13.1 with the swarm extras (GRIB decoder, terrain tiles, maps)
+#   1. installs naturev1 0.14 with the swarm extras (GRIB decoder, terrain tiles, maps)
 #   2. builds the map of the whole Caribbean -- every parish / province / district of every country and territory,
 #      with terrain -- and the full-consensus inputs (climatology + analog database), once, cached under DATA
 #   3. for every active NHC storm (or a replay, e.g. Melissa 2025): best track + every satellite / recon / radar
-#      centre fix from NHC, the GFS analysis AND GFS's forecast steering (the turns: a trough two days out bends the
-#      track), the NatureV1 consensus with the forecast-flow and GFS members, the intensity consensus that switches
-#      to its rapid-intensification weights when P(RI) is high, the swarm steered by the forecast flow, filtered
-#      minute by minute on the fixes and re-weighted by every fix since, and each world's wind and rain painted onto
-#      the parishes
+#      centre fix from NHC, the GFS analysis AND the forecasts of five models -- GFS, ECMWF IFS, ECMWF AIFS,
+#      GraphCast-GFS, the GEFS mean -- read from their public buckets (the turns: a trough two days out bends the
+#      track; several models: their errors partly cancel), the NatureV1 consensus blended with the models' mean
+#      track, a cone sized for this forecast, the intensity consensus that switches to its rapid-intensification
+#      weights when P(RI) is high, the swarm whose worlds each follow one model's forecast winds, filtered minute by
+#      minute on the fixes and re-weighted by every fix since, and each world's wind and rain painted onto the
+#      parishes
 #   4. shows the map, the 4D worldlines, the latest GOES infrared image and the parish-by-parish impact table
 #   5. optionally (TRAIN_SATELLITE) trains the satellite networks of the 0.12 satellite path on this GPU
 #
@@ -20,7 +22,7 @@ import os
 import subprocess
 import sys
 
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "naturev1[swarm]>=0.13.1", "ihelix>=0.6.0"],
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "naturev1[swarm]>=0.14.0", "ihelix>=0.6.0"],
                check=True)
 
 from pathlib import Path
@@ -37,7 +39,8 @@ PARTICLES = 1_000_000 if GPU else 50_000          # worlds in the swarm
 IMPACT_WORLDS = 40_000 if GPU else 2_000          # worlds painted onto the map (the map is the costly part)
 FULL_CONSENSUS = True          # 13-member consensus: builds a 2.5 GB climatology + analog database once (~20-30 min)
 SHOW_GOES = True               # the newest GOES-19 / GOES-18 infrared image around each live storm
-FORECAST_FLOW = True           # GFS forecast steering + GFS track as members (~150 MB per storm, cached)
+FORECAST_FLOW = True           # the models' forecast steering + their tracks as members (~150 MB per model, cached)
+MODELS = ("gfs", "ifs", "aifs", "graphcastgfs", "gefs")   # any that is not yet published for the cycle is skipped
 TRAIN_SATELLITE = False        # the 0.12 satellite networks on this GPU (needs ~1 TB disk for the staged GridSat)
 HF_REPO, HF_TOKEN = "CorxLabs/NatureV1-500", ""   # only for TRAIN_SATELLITE pushes; paste a token, clear it after
 DATA = Path(os.environ.get("NATUREV1_DATA", "/data/naturev1" if Path("/data").exists() else Path.home() / "naturev1"))
@@ -76,7 +79,8 @@ for storm_id, name in storms:
     try:
         run = forecast_storm(storm_id, when=REPLAY_TIME, archive=REPLAY_TIME is not None, particles=PARTICLES,
                              device=DEVICE, region=region, climatology=climatology, analogs=analogs,
-                             impact_particles=IMPACT_WORLDS, cache=DATA, name=name, forecast_flow=FORECAST_FLOW)
+                             impact_particles=IMPACT_WORLDS, cache=DATA, name=name, forecast_flow=FORECAST_FLOW,
+                             models=MODELS)
     except Exception as error:                       # one storm failing must not hide the others
         panels.append(mo.md(f"**{name} ({storm_id})**: no forecast -- {type(error).__name__}: {error}"))
         continue
@@ -98,14 +102,22 @@ for storm_id, name in storms:
     intensity = "  ".join(f"{h} h {v:.0f} kt" for h, v in zip(result["leads"], result["intensity"]) if np.isfinite(v))
     p_ri = result.get("ri_probability")
     ri = f"  \n**Rapid intensification (+30 kt in 24 h):** {p_ri:.0%} ({result.get('intensity_regime')} weights)" if p_ri is not None else ""
+    used = run.get("models", {})
     gfs = run.get("model_track")
-    gfs_text = ("  \n**GFS track (member):** " + "  ".join(f"{h} h {la:.1f}N {abs(lo):.1f}{'W' if lo < 0 else 'E'}"
-                for h, (la, lo) in zip(result["leads"], gfs) if np.isfinite(la))) if gfs is not None else ""
+    gfs_text = ((f"  \n**Models read:** {', '.join(m['title'] for m in used.values())}; their mean track: "
+                 + "  ".join(f"{h} h {la:.1f}N {abs(lo):.1f}{'W' if lo < 0 else 'E'}" for h, (la, lo) in zip(result["leads"], gfs) if np.isfinite(la)))
+                if gfs is not None else "  \n**Models:** none read for this cycle (analysis-only forecast)")
+    spread = result.get("model_spread_km")
+    if spread is not None and np.isfinite(spread).any():
+        gfs_text += "  \n**Models' disagreement (km):** " + "  ".join(f"{h} h {d:.0f}" for h, d in zip(result["leads"], spread) if np.isfinite(d))
+    cone = result.get("cone_km")
+    cone_text = ("  \n**Cone for this forecast (km, 67%):** " + "  ".join(f"{h} h {r:.0f}" for h, r in zip(result["leads"], cone))
+                 + (" (climatological cone " + "/".join(f"{r:.0f}" for r in result["cone_fixed_km"]) + ")" if "cone_fixed_km" in result else "")) if cone is not None else ""
     panels.append(mo.vstack([
         mo.md(f"## {name} ({storm_id}) -- analysis {str(run['analysis_time'])[:16]}Z, {case.wind_kt:.0f} kt\n"
               f"**Satellite path:** {len(filt)} fixes filtered the swarm ({', '.join(sources[:6])}){ess_after}.  \n"
               f"**Swarm:** {PARTICLES:,} worlds; scenarios: {scen}.  \n"
-              f"**Track** ({result['consensus_table']}): {track}{gfs_text}  \n**Intensity:** {intensity}{ri}"),
+              f"**Track** ({result['consensus_table']}): {track}{gfs_text}{cone_text}  \n**Intensity:** {intensity}{ri}"),
         fig,
         mo.plain_text(impact.table(top=30)),
         mo.md(f"<sub>{region.attribution} Research model, not an operational forecast.</sub>"),

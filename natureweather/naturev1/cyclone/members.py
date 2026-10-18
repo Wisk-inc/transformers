@@ -145,9 +145,10 @@ def run_members(case, env: Environment, climatology=None, analogs=None, cliper_t
     ``{member: (L, 2) lat/lon}`` for every requested member that can be computed, plus ``"_context"`` (the shared
     :class:`PhysicsContext`) and ``"_ensemble"`` (members, spread) when the ensemble ran.
 
-    With a dynamical model's forecast (:class:`naturev1.cyclone.forecastflow.ForecastFlow` and/or the model's own
-    tracked storm at ``leads``) two more members join: ``fflow``, the storm carried through the forecast steering, and
-    ``model``, the model's own track.
+    With dynamical models' forecasts (:class:`naturev1.cyclone.forecastflow.ForecastFlow`, one or ``{name: flow}``,
+    and/or the models' own tracked storms at ``leads``, one or ``{name: (L, 2)}``) more members join: ``fflow``, the
+    storm carried through the forecast steering (the equal-weight mean over the models, each also as
+    ``fflow_<name>``), and ``model``, the models' mean track (each also as ``model_<name>``).
     """
     from .cliper import cliper_track
 
@@ -161,8 +162,17 @@ def run_members(case, env: Environment, climatology=None, analogs=None, cliper_t
         out["cliper"] = cliper_track(case, leads, cliper_table)
     if "analog" in wanted and analogs is not None:
         out["analog"] = analogs.forecast(case, 100, 1.5)
+    from .multimodel import model_mean
+
     if model_track is not None:
-        out["model"] = np.asarray(model_track, np.float64)
+        # one model's track, or several ({name: (L, 2)}): each is a member, and their equal-weight mean is ``model``
+        tracks = model_track if isinstance(model_track, dict) else {"model": np.asarray(model_track, np.float64)}
+        for name, t in tracks.items():
+            if t is not None and name != "model":
+                out[f"model_{name}"] = np.asarray(t, np.float64)
+        mean = model_mean(case, tracks, leads)
+        if mean is not None:
+            out["model"] = mean
     ctx = build_context(case, env, climatology)
     if ctx is None:
         return out
@@ -170,7 +180,21 @@ def run_members(case, env: Environment, climatology=None, analogs=None, cliper_t
     if forecast_flow is not None:
         from .forecastflow import fflow_member
 
-        out["fflow"] = fflow_member(ctx, forecast_flow, leads)
+        flows = (forecast_flow if isinstance(forecast_flow, dict)
+                 else {str(i): f for i, f in enumerate(forecast_flow)} if isinstance(forecast_flow, (list, tuple))
+                 else {"fflow": forecast_flow})
+        per = {}
+        for name, flow in flows.items():
+            try:
+                per[name] = fflow_member(ctx, flow, leads)
+            except Exception:                        # one unreadable model's flow must not drop the member
+                continue
+        if len(per) > 1:
+            for name, t in per.items():
+                out[f"fflow_{name}"] = t
+        mean = model_mean(case, per, leads)
+        if mean is not None:
+            out["fflow"] = mean
     lat0, lon0 = case.lat, case.lon
     beta = ctx.beta_velocity()
     if "steer_med" in wanted:

@@ -44,12 +44,13 @@ _SURFACE = {"msl": ("PRMSL", "mean sea level"), "skin": ("TMP", "surface"),
             "land": ("LAND", "surface"), "orog": ("HGT", "surface")}
 
 
-def _get(url: str, start: int | None = None, end: int | None = None, timeout: float = 120.0) -> bytes:
+def _get(url: str, start: int | None = None, end: int | None = None, timeout: float = 120.0, attempts: int = 6) -> bytes:
+    """One HTTP(S) GET, optionally a byte range, with exponential back-off (public buckets throttle bursts)."""
     request = urllib.request.Request(url)
     if start is not None:
         request.add_header("Range", f"bytes={start}-{'' if end is None else end}")
     last = None
-    for attempt in range(4):
+    for attempt in range(attempts):
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return response.read()
@@ -173,53 +174,15 @@ class GFSAnalysis:
 
     def forecast_flow(self, when, case, leads=LEADS, hours=FLOW_HOURS):
         """
-        GFS's forecast steering for ``case`` (initialised at ``when``) and GFS's own track of the storm.
-
-        GFS's storm is followed through its sea-level pressure (:func:`naturev1.cyclone.field_tracker.track_in_fields`,
-        seeded with the storm's observed motion); at each forecast hour its vortex is removed from the winds around
-        where GFS has it, and the 850-700, 850-400 and 850-200 hPa environmental winds are kept -- the same
-        construction as the HRES hindcast flows the coefficients were fitted on.
-
-        Returns ``(ForecastFlow, model_track (L, 2) at leads)``; a lead GFS has lost the storm at is NaN.
+        GFS's forecast steering for ``case`` (initialised at ``when``) and GFS's own track of the storm:
+        ``(ForecastFlow, model_track (L, 2))`` -- :func:`naturev1.swarm.models.flow_and_track` on the GFS forecast files
+        (:mod:`naturev1.swarm.models` reads the other models the same way).
         """
-        from ..cyclone.baselines import motion_back
-        from ..cyclone.field_tracker import track_in_fields
-        from ..cyclone.forecastflow import LAYERS, ForecastFlow
-        from ..cyclone.geometry import local_displacement_km
-        from ..cyclone.steering import SteeringFlow
-        from ..cyclone.vortex import remove_vortex
+        from .models import flow_and_track
 
-        when = np.datetime64(when, "h")
-        need = sorted(set(int(h) for h in hours) | set(int(h) for h in leads))
-        rows, cols = int(round(2 * HALF_LAT / STEP)) + 1, int(round(2 * HALF_LON / STEP)) + 1
-        rs, cs, box_lat, box_lon = _box_indices(case.lat, case.lon, LAT_AXIS, STEP, rows, cols)
-        cut = lambda a: a[..., rs, :][..., cs]
-        fields = {h: {k: cut(v).astype(np.float64) for k, v in self.forecast_fields(when, h).items()} for h in need}
-        first = None
-        rate = motion_back(case, 6)
-        if rate is not None:
-            east, north = local_displacement_km(case.lat - rate[0] * 6, case.lon - rate[1] * 6, case.lat, case.lon)
-            first = (float(east) / 6.0, float(north) / 6.0)
-        msl = np.stack([fields[h]["msl"] for h in need])
-        tracked = track_in_fields((case.lat, case.lon), need, msl, box_lat, box_lon, first_motion_kmh=first)
-        position = {h: tuple(tracked[k]) for k, h in enumerate(need)}
-        data = np.zeros((len(hours), 2 * len(LAYERS), box_lat.size, box_lon.size), np.float32)
-        last = (case.lat, case.lon)
-        for k, h in enumerate(hours):
-            at = (case.lat, case.lon) if h == 0 else position[int(h)]
-            if np.isfinite(at[0]):
-                last = at
-            env = Environment(lat=box_lat.astype(np.float64), lon=box_lon.astype(np.float64), levels=PREVIOUS_LEVELS,
-                              fields={"u": fields[int(h)]["u"], "v": fields[int(h)]["v"]})
-            try:
-                clean = remove_vortex(env, *last).environment
-            except Exception:                        # a degenerate box: steer with the raw winds rather than fail
-                clean = env
-            for j, (_, top, bottom) in enumerate(LAYERS):
-                flow = SteeringFlow(clean, top, bottom)
-                data[k, 2 * j], data[k, 2 * j + 1] = flow.u, flow.v
-        model_track = np.array([position[int(h)] for h in leads], np.float64)
-        return ForecastFlow(box_lat, box_lon, hours, data, source=f"GFS {str(when)[:13]}Z"), model_track
+        flow, track, _ = flow_and_track(lambda lead: self.forecast_fields(when, lead), case, leads, hours,
+                                        source=f"GFS {str(np.datetime64(when, 'h'))[:13]}Z", levels=PREVIOUS_LEVELS)
+        return flow, track
 
 
 def case_from_bdeck(best: list, when, storm_id: str = "", name: str = "", basin: str = "NA") -> Case:

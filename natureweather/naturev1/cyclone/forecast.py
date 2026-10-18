@@ -33,14 +33,18 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
             flow-dependent cone under ``result["swarm"]``.
         swarm_fixes: centre fixes (:mod:`naturev1.swarm.fixes`) to filter the swarm with instead of the 6-hourly
             history -- the satellite path, minute by minute.
-        forecast_flow, model_track: a dynamical model's forecast steering
-            (:class:`naturev1.cyclone.forecastflow.ForecastFlow`) and its own track of the storm at ``leads``: they add
-            the ``fflow`` and ``model`` members (and the consensus fitted with them) and steer the swarm's worlds.
+        forecast_flow, model_track: dynamical models' forecast steering
+            (:class:`naturev1.cyclone.forecastflow.ForecastFlow`, one or ``{name: flow}``) and their own tracks of the
+            storm at ``leads`` (one ``(L, 2)`` or ``{name: track}``): they add the ``fflow`` and ``model`` members
+            (equal-weight means over the models; the consensus fitted with them is blended with the models' mean
+            track) and steer the swarm's worlds, each world following one model.
 
     Returns:
         ``{"leads", "track" (L, 2), "members": {name: (L, 2)}, "cone_km" (L,), "regime", "stall", "ridge",
         "shear", "intensity_kt": {member: (L,)}, "intensity" (L,), "ri_probability" (P(+30 kt in 24 h)),
-        "intensity_regime" ("rapid" when the rapid-intensification weights were used)}``.
+        "intensity_regime" ("rapid" when the rapid-intensification weights were used), "cone_fixed_km" and
+        "model_spread_km" (with models: the climatological cone behind the flow-dependent one, and the models'
+        disagreement)}``.
     """
     from .consensus import apply_consensus
     from .members import run_members
@@ -56,11 +60,12 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
     table = consensus_table(out)
     nan = np.full((len(leads), 2), np.nan)
     stack = np.stack([out.get(m, nan) for m in table["members"]], 1)[None]
-    track = apply_consensus([case], stack, table)[0]
-    if table.get("model_blend") is not None and model_track is not None:
+    physics_track = apply_consensus([case], stack, table)[0]
+    track = physics_track
+    if table.get("model_blend") is not None and out.get("model") is not None:
         from .consensus import blend_with_model
 
-        track = blend_with_model(case, track, np.asarray(model_track, np.float64), table["model_blend"], leads)
+        track = blend_with_model(case, physics_track, np.asarray(out["model"], np.float64), table["model_blend"], leads)
     result = {"leads": list(leads), "track": track, "members": out, "consensus_table": table["name"]}
     from . import coefficients
 
@@ -74,6 +79,19 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
         if ensemble is not None:
             radius = np.maximum(radius, 1.2 * np.nan_to_num(ensemble["spread_km"], nan=0.0))
         result["cone_km"] = radius
+        flow_table = getattr(coefficients, "CONE_FLOW", None)
+        if flow_table is not None and out.get("model") is not None:
+            # the cone sized for this forecast: member spread, model disagreement, speed, latitude, intensity
+            from .multimodel import cone_predictors, flow_dependent_cone
+
+            result["cone_fixed_km"] = radius
+            result["cone_predictors"] = cone_predictors(case, physics_track, out, table["members"], out.get("model"),
+                                                        out.get("fflow"), leads)
+            result["cone_km"] = flow_dependent_cone(result["cone_predictors"], flow_table, leads)
+    if isinstance(model_track, dict):
+        from .multimodel import model_spread_km
+
+        result["model_spread_km"] = model_spread_km(case, model_track)
     if ctx is not None:
         stall = stall_diagnostics(ctx.flows["med"], np.where(np.isfinite(track), track, case.lat), leads, case.lat, case.lon)
         ridge = ridge_diagnostics(ctx.clean, case.lat, case.lon)

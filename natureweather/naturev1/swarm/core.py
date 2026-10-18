@@ -113,6 +113,9 @@ def _modes(lat: np.ndarray, lon: np.ndarray, rows: int = 4, cols: int = 6, radiu
     return u / scale, v / scale
 
 
+_LAYER_NAMES = (("shal", 700, 850), ("med", 400, 850), ("dlm", 200, 850))
+
+
 class SwarmFields:
     """Every gridded field the swarm samples, stacked for one ``grid_sample`` per evaluation."""
 
@@ -132,11 +135,21 @@ class SwarmFields:
                     (before or medium)[0], (before or medium)[1], (climate or medium)[0], (climate or medium)[1],
                     gx * 1e11, gy * 1e11, *mode_u, *mode_v]
         self.base_channels = len(channels)
-        self.forecast_hours = None
+        self.forecast_hours, self.n_sources, self.source_names = None, 0, []
         if forecast is not None:
-            # a dynamical model's forecast steering (naturev1.cyclone.forecastflow.ForecastFlow): six channels per hour
-            self.forecast_hours = np.asarray(forecast.hours, np.float64)
-            channels.extend(np.asarray(forecast.data, np.float32).reshape(-1, *np.shape(medium[0])))
+            # dynamical models' forecast steering (naturev1.cyclone.forecastflow.ForecastFlow, one or several): six
+            # channels per forecast hour per model; every world follows one model, drawn with equal prior probability
+            flows = list(forecast.values()) if isinstance(forecast, dict) else (list(forecast) if isinstance(forecast, (list, tuple)) else [forecast])
+            self.source_names = list(forecast.keys()) if isinstance(forecast, dict) else [getattr(f, "source", str(i)) for i, f in enumerate(flows)]
+            self.forecast_hours = np.asarray(flows[0].hours, np.float64)
+            self.n_sources = len(flows)
+            for flow in flows:
+                data = np.asarray(flow.data, np.float32)
+                if data.shape[0] != self.forecast_hours.size or not np.allclose(flow.hours, self.forecast_hours):
+                    # a model on other forecast hours: interpolated onto the first model's
+                    data = np.stack([np.concatenate([np.stack(flow.field(h, name)) for name, _, _ in _LAYER_NAMES])
+                                     for h in self.forecast_hours]).astype(np.float32)
+                channels.extend(data.reshape(-1, *np.shape(medium[0])))
         stack = np.nan_to_num(np.stack(channels).astype(np.float32))
         self.grid = torch.as_tensor(stack, dtype=dtype, device=self.device)[None]          # (1, C, H, W)
         self._base_index = torch.arange(self.base_channels, device=self.device)
@@ -165,17 +178,27 @@ class SwarmFields:
         grid = self.grid[:, self._base_index if channels is None else channels]
         return F.grid_sample(grid, g, mode="bilinear", padding_mode="border", align_corners=True)[0, :, 0]
 
-    def forecast_steering(self, lat: torch.Tensor, lon: torch.Tensor, hours: float) -> torch.Tensor | None:
-        """``(6, N)`` forecast layer winds (shal u, v, med u, v, dlm u, v) at ``hours``, or None without a forecast."""
+    def forecast_steering(self, lat: torch.Tensor, lon: torch.Tensor, hours: float,
+                          source: torch.Tensor | None = None) -> torch.Tensor | None:
+        """``(6, N)`` forecast layer winds (shal u, v, med u, v, dlm u, v) at ``hours`` -- each particle's from the
+        model ``source`` ``(N,)`` it follows -- or None without a forecast."""
         if self.forecast_hours is None:
             return None
         fh = self.forecast_hours
         h = float(np.clip(hours, fh[0], fh[-1]))
         k = int(np.clip(np.searchsorted(fh, h, side="right") - 1, 0, fh.size - 2))
         a = (h - fh[k]) / max(fh[k + 1] - fh[k], 1e-9)
-        base = self.base_channels
-        idx = torch.arange(base + 6 * k, base + 6 * k + 12, device=self.device)
-        s = self.sample(lat, lon, idx)
+        per_source = 6 * fh.size
+        if self.n_sources == 1 or source is None:
+            base = self.base_channels
+            idx = torch.arange(base + 6 * k, base + 6 * k + 12, device=self.device)
+            s = self.sample(lat, lon, idx)
+            return (1.0 - a) * s[:6] + a * s[6:]
+        idx = torch.cat([torch.arange(self.base_channels + j * per_source + 6 * k, self.base_channels + j * per_source + 6 * k + 12,
+                                      device=self.device) for j in range(self.n_sources)])
+        s = self.sample(lat, lon, idx).reshape(self.n_sources, 12, -1)                       # (S, 12, N)
+        pick = source.to(torch.long).clamp(0, self.n_sources - 1)
+        s = s[pick, :, torch.arange(s.shape[-1], device=self.device)].T                      # (12, N)
         return (1.0 - a) * s[:6] + a * s[6:]
 
 
@@ -363,6 +386,9 @@ class Swarm:
             "res_v": p.residual_ms * self._randn(n),
             "res_tau": rlo + (rhi - rlo) * self._rand(n),
             "walk": torch.zeros(n, k, dtype=self.dt, device=self.dev),
+            # which model's forecast winds this world follows (several models: equal prior, the multi-model idea)
+            "source": torch.randint(0, max(self.fields.n_sources, 1), (n,), generator=self.gen).to(self.dev)
+            if self.fields.n_sources > 1 else torch.zeros(n, dtype=torch.long, device=self.dev),
         }
 
     def _launch(self, lat: float, lon_box: float, n: int):
@@ -381,7 +407,7 @@ class Swarm:
         w_sh = (1.0 - 2.0 * d).clamp(min=0.0)
         w_dp = (2.0 * d - 1.0).clamp(min=0.0)
         w_md = 1.0 - w_sh - w_dp
-        ff = self.fields.forecast_steering(lat, lon, hours) if hours >= 0 else None
+        ff = self.fields.forecast_steering(lat, lon, hours, prm.get("source")) if hours >= 0 else None
         if ff is not None:
             # the model's forecast winds already evolve: no tendency or climatology terms on top of them
             ff = ff.to(self.dt)

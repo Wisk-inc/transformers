@@ -421,12 +421,26 @@ CONE_KM_FF = {'leads': [6, 12, 24, 36, 48, 72, 96, 120], 'radius_km': [27.0, 48.
 
 CONE_KM_BASIC_FF = {'leads': [6, 12, 24, 36, 48, 72, 96, 120], 'radius_km': [27.1, 47.9, 80.1, 109.1, 137.4, 213.6, 303.1, 410.4]}
 
-SWARM_FF = {'priors': {'fix_sigma_km': 20.0},
+SWARM_FF = {'priors': {'fix_sigma_km': 20.0, 'static_ms': 0.3, 'growth_ms_per_sqrt_h': 0.055, 'residual_ms': 0.4},
  'leads': [6, 12, 24, 36, 48, 72, 96, 120],
- 'cone_scale': [0.7006, 0.7004, 0.5164, 0.4108, 0.3379, 0.2734, 0.2885, 0.3051],
+ 'cone_scale': [0.8839, 1.1788, 1.1245, 0.9545, 0.8633, 0.7625, 0.8094, 0.8247],
  'coverage_target': 0.67}
 
-PROVENANCE = {'generated': '2026-10-18 03:41 UTC',
+CONE_FLOW = {'leads': [6, 12, 24, 36, 48, 72, 96, 120],
+ 'predictors': ['one', 'member_spread_km', 'model_consensus_km', 'fflow_model_km', 'speed_kmh', 'abs_lat', 'wind_kt'],
+ 'coef': [[2.96823, 0.59342, 0.00565, 0.12792, 0.23186, 0.10118, -0.0204],
+          [14.95615, 0.22804, 0.21996, 0.06738, 0.00608, 0.07014, -0.0616],
+          [39.00611, -0.00096, 0.39293, 0.03688, -0.25629, -0.59159, -0.0671],
+          [66.14719, 0.06061, 0.3074, -0.03535, -0.20376, -0.62383, -0.15522],
+          [101.59234, 0.11243, 0.14908, -0.03998, -0.38773, -0.38886, -0.27248],
+          [106.22439, 0.1211, 0.12004, 0.00269, -0.20855, 1.44964, -0.494],
+          [89.42837, 0.20677, 0.16346, -0.07412, -0.34735, 4.60663, -0.84788],
+          [110.41666, 0.33869, 0.03837, -0.0704, -2.76008, 6.45517, -0.70091]],
+ 'scale': [1.1696, 1.1781, 1.2718, 1.1672, 1.1014, 1.0922, 1.083, 1.1142],
+ 'medians': [1.0, 204.81, 157.665, 161.497, 16.417, 18.1, 45.0],
+ 'coverage_target': 0.67}
+
+PROVENANCE = {'generated': '2026-10-18 13:24 UTC',
  'CLIPER': 'IBTrACS v04r01 best tracks 1980-2014, all basins (82,816 fixes at 00/06/12/18 UTC)',
  'SHIFOR': 'IBTrACS v04r01 best tracks 1980-2014, all basins',
  'CONSENSUS': 'hindcasts of the 2016, 2017 and 2019 seasons (3,053 forecasts, NA EP WP SI SP)',
@@ -452,6 +466,12 @@ PROVENANCE = {'generated': '2026-10-18 03:41 UTC',
                      'storm tracks (WeatherBench 2, 1.5 degrees); blend weights fitted on leave-one-season-out '
                      'consensus tracks',
  'SWARM_FF': "hindcasts of the 2016, 2017 and 2019 seasons with ECMWF HRES forecast steering and HRES's own storm "
-             'tracks (WeatherBench 2, 1.5 degrees); blend weights fitted on leave-one-season-out consensus tracks',
+             'tracks (WeatherBench 2, 1.5 degrees); blend weights fitted on leave-one-season-out consensus tracks; '
+             "perturbation amplitudes chosen so the swarm's spread matches the consensus error (the forecast winds "
+             'err less than persisted analysis winds)',
  'RI': 'logistic regression, P(+30 kt in 24 h), hindcasts of the 2016, 2017 and 2019 seasons',
- 'TREND': 'hindcasts of the 2016, 2017 and 2019 seasons'}
+ 'TREND': 'hindcasts of the 2016, 2017 and 2019 seasons',
+ 'CONE_FLOW': "hindcasts of the 2016, 2017 and 2019 seasons with ECMWF HRES forecast steering and HRES's own storm "
+              'tracks (WeatherBench 2, 1.5 degrees); blend weights fitted on leave-one-season-out consensus tracks; '
+              'Goerss-style regression of the blended consensus error on member spread, model disagreement, speed, '
+              'latitude and intensity'}
