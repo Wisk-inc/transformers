@@ -44,6 +44,8 @@ class Fix:
     sigma_km: float
     source: str
     wind_kt: float = float("nan")
+    #: best track only: ``{34: [NE, SE, SW, NW], 50: [...], 64: [...]}`` wind radii in km (quadrants without one are NaN)
+    radii_km: dict | None = None
 
 
 def _get(url: str, timeout: float = 60.0) -> bytes:
@@ -95,21 +97,37 @@ def _time(text: str) -> np.datetime64:
 
 
 def parse_bdeck(text: str) -> list[Fix]:
-    """Best-track positions (one per time; the wind-radii repeats are folded)."""
-    seen, out = set(), []
+    """Best-track positions, one per time, with the 34 / 50 / 64 kt wind radii (the per-threshold repeats of each
+    time are folded into one fix; radii given as 0 or missing are NaN)."""
+    by_time, out = {}, []
     for line in text.splitlines():
         f = [x.strip() for x in line.split(",")]
         if len(f) < 9 or not f[2].isdigit():
             continue
         t = _time(f[2])
-        if t in seen:
-            continue
-        lat, lon = _coord(f[6], True), _coord(f[7], True)
-        if not np.isfinite(lat):
-            continue
-        seen.add(t)
-        out.append(Fix(t, lat, lon, FIX_SIGMA_KM["BEST"], "BEST", float(f[8]) if f[8].isdigit() else float("nan")))
+        fix = by_time.get(t)
+        if fix is None:
+            lat, lon = _coord(f[6], True), _coord(f[7], True)
+            if not np.isfinite(lat):
+                continue
+            fix = Fix(t, lat, lon, FIX_SIGMA_KM["BEST"], "BEST", float(f[8]) if f[8].isdigit() else float("nan"), {})
+            by_time[t] = fix
+            out.append(fix)
+        if len(f) >= 17 and f[11].isdigit() and int(f[11]) in (34, 50, 64):
+            quad = [float(x) * 1.852 if x.isdigit() and int(x) > 0 else float("nan") for x in f[13:17]]
+            fix.radii_km[int(f[11])] = quad
+    for fix in out:
+        if not fix.radii_km:
+            fix.radii_km = None
     return sorted(out, key=lambda x: x.time)
+
+
+def gale_radius_km(fix: Fix) -> float:
+    """The best track's mean 34-kt radius (km) at a fix, NaN when it has none."""
+    if not fix.radii_km or 34 not in fix.radii_km:
+        return float("nan")
+    q = np.asarray(fix.radii_km[34], np.float64)
+    return float(np.nanmean(q)) if np.isfinite(q).any() else float("nan")
 
 
 def parse_fdeck(text: str) -> list[Fix]:
@@ -211,5 +229,5 @@ def reweight_forecast(forecast, fixes: list[Fix], analysis_time, sigma_floor_km:
     return float(1.0 / np.sum(w * w)) / w.size
 
 
-__all__ = ["CONFIDENCE_FACTOR", "FIX_SIGMA_KM", "Fix", "active_storms", "assimilate", "fetch_deck", "merge",
+__all__ = ["CONFIDENCE_FACTOR", "FIX_SIGMA_KM", "Fix", "active_storms", "assimilate", "fetch_deck", "gale_radius_km", "merge",
            "parse_bdeck", "parse_fdeck", "reweight_forecast", "window"]

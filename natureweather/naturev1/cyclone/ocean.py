@@ -32,12 +32,27 @@ SPEED_POWER = 0.8
 RESIDENCE_H = 18.0
 
 
-def wake_cooling_k(vmax_kt, translation_ms, sst_k) -> np.ndarray:
-    """Peak cooling of the wake, K: rises with intensity^1.5, falls with translation speed and warm water."""
+#: Depth of the 26 C isotherm the cooling constants refer to (m), and how cooling falls with a deeper warm layer.
+D26_REFERENCE_M = 50.0
+D26_POWER = 0.5
+
+
+def wake_cooling_k(vmax_kt, translation_ms, sst_k, d26_m=None, d26_power: float | None = None) -> np.ndarray:
+    """
+    Peak cooling of the wake, K: rises with intensity^1.5, falls with translation speed and warm water -- and, when the
+    depth of the 26 C isotherm ``d26_m`` is known, with the depth of warm water (there is more of it to stir before
+    the cold arrives: a storm over 100 m of warm water cools its surface about 0.7 times what it would over 50 m).
+    Without ``d26_m`` the surface temperature stands in for it, as before.
+    """
     v = np.clip(np.asarray(vmax_kt, np.float64), 0.0, 200.0) / 100.0
     u = np.maximum(np.asarray(translation_ms, np.float64), 0.3)
     speed = np.clip((SPEED_SCALE_MS / u) ** SPEED_POWER, 0.4, 4.0)
-    warm = np.clip(1.0 - 0.25 * (np.asarray(sst_k, np.float64) - 273.15 - 28.5), 0.5, 1.3)
+    if d26_m is None:
+        warm = np.clip(1.0 - 0.25 * (np.asarray(sst_k, np.float64) - 273.15 - 28.5), 0.5, 1.3)
+    else:
+        depth = np.where(np.isfinite(d26_m), np.asarray(d26_m, np.float64), D26_REFERENCE_M)
+        power = D26_POWER if d26_power is None else float(d26_power)
+        warm = np.clip((D26_REFERENCE_M / np.maximum(depth, 5.0)) ** power, 0.35, 1.8)
     return COOLING_K * v ** 1.5 * speed * warm
 
 
@@ -47,12 +62,16 @@ def core_share(translation_ms) -> np.ndarray:
     return 1.0 / (1.0 + u / 2.3)
 
 
-def effective_sst(sst_k: np.ndarray, vmax_kt: np.ndarray, translation_ms: np.ndarray, hours: np.ndarray) -> np.ndarray:
+def effective_sst(sst_k: np.ndarray, vmax_kt: np.ndarray, translation_ms: np.ndarray, hours: np.ndarray,
+                  d26_m: np.ndarray | None = None, d26_power: float | None = None) -> np.ndarray:
     """
     Sea-surface temperature under the core along a forecast, K.
 
     All arguments are ``(T,)`` along the forecast (``hours`` from now). Slow stretches accumulate cooling with
-    :data:`RESIDENCE_H`; moving off resets the residence (the storm reaches new water).
+    :data:`RESIDENCE_H`; moving off resets the residence (the storm reaches new water). With ``d26_m`` (the depth of
+    the 26 C isotherm along the track, from :class:`OceanClimatology`) the cooling knows how deep the warm water is:
+    Melissa crawled over the central Caribbean, where the 26 C water runs 100 m deep in October, and intensified --
+    a surface-temperature-only wake would have had her cooling her own ocean.
     """
     sst_k = np.asarray(sst_k, np.float64)
     out = sst_k.copy()
@@ -63,9 +82,83 @@ def effective_sst(sst_k: np.ndarray, vmax_kt: np.ndarray, translation_ms: np.nda
         slow = translation_ms[k] < 3.0
         residence = residence + dt if slow else max(residence - 2.0 * dt, 0.0)
         build = 1.0 - np.exp(-(residence + 6.0) / RESIDENCE_H)
-        cooling = wake_cooling_k(vmax_kt[k], translation_ms[k], sst_k[k]) * core_share(translation_ms[k]) * build
+        depth = None if d26_m is None else d26_m[k]
+        cooling = wake_cooling_k(vmax_kt[k], translation_ms[k], sst_k[k], depth, d26_power) * core_share(translation_ms[k]) * build
         out[k] = sst_k[k] - cooling
     return out
 
 
-__all__ = ["COOLING_K", "RESIDENCE_H", "core_share", "effective_sst", "wake_cooling_k"]
+class OceanClimatology:
+    """
+    Monthly depth of the 26 C isotherm (m) and tropical-cyclone heat potential (kJ/cm2, the heat above 26 C down to
+    that depth) on a 1-degree grid, computed from the World Ocean Atlas 2023 decadal-average temperature analysis
+    (0-1500 m, 57 levels). ``ocean_climatology.npz`` ships with the package; :meth:`default` loads it once.
+
+    Heat potential is what the SHIPS rapid-intensification index uses in place of surface temperature where it
+    can, because a storm's fuel is the warm *layer*, not the skin: 28.5 C over 30 m of warm water and 28.5 C over
+    120 m are different oceans to a hurricane sitting on them for a day.
+    """
+
+    _default = None
+
+    def __init__(self, d26_m: np.ndarray, tchp_kj_cm2: np.ndarray, lat: np.ndarray, lon: np.ndarray) -> None:
+        self.d26 = np.asarray(d26_m, np.float32)                    # (12, 180, 360)
+        self.tchp = np.asarray(tchp_kj_cm2, np.float32)
+        self.lat = np.asarray(lat, np.float64)
+        self.lon = np.asarray(lon, np.float64)
+
+    @classmethod
+    def default(cls) -> "OceanClimatology | None":
+        """The packaged climatology (None when the package was installed without it)."""
+        if cls._default is None:
+            try:
+                from importlib import resources
+
+                with resources.files("naturev1.cyclone").joinpath("ocean_climatology.npz").open("rb") as handle:
+                    data = np.load(handle)
+                    cls._default = cls(data["d26_m"], data["tchp_kj_cm2"], data["lat"], data["lon"])
+            except Exception:
+                cls._default = False
+        return cls._default or None
+
+    def _month_weights(self, time) -> tuple[int, int, float]:
+        """The two months around ``time`` and the weight of the second (monthly means sit mid-month)."""
+        t = np.datetime64(time, "s")
+        year = t.astype("datetime64[Y]").astype(int) + 1970
+        day_of_year = (t - np.datetime64(f"{year}-01-01", "s")) / np.timedelta64(1, "D")
+        pos = day_of_year / 365.25 * 12.0 - 0.5                     # 0 at mid-January
+        m0 = int(np.floor(pos)) % 12
+        return m0, (m0 + 1) % 12, float(pos - np.floor(pos))
+
+    def sample(self, lat, lon, time) -> dict:
+        """``{"d26_m", "tchp_kj_cm2"}`` at points (degrees), bilinear in space between the two months around ``time``;
+        land points take the nearest ocean value within a degree or two (NaN beyond)."""
+        la = np.atleast_1d(np.asarray(lat, np.float64))
+        lo = (np.atleast_1d(np.asarray(lon, np.float64)) + 180.0) % 360.0 - 180.0
+        m0, m1, w = self._month_weights(time)
+        fi = np.clip((la - self.lat[0]) / (self.lat[1] - self.lat[0]), 0, self.lat.size - 1.001)
+        fj = ((lo - self.lon[0]) / (self.lon[1] - self.lon[0])) % self.lon.size
+        i0, j0 = np.floor(fi).astype(int), np.floor(fj).astype(int) % self.lon.size
+        di, dj = fi - i0, fj - j0
+        i1, j1 = np.minimum(i0 + 1, self.lat.size - 1), (j0 + 1) % self.lon.size
+        out = {}
+        for name, grid in (("d26_m", self.d26), ("tchp_kj_cm2", self.tchp)):
+            g = (1.0 - w) * grid[m0] + w * grid[m1]
+            corners = np.stack([g[i0, j0], g[i0, j1], g[i1, j0], g[i1, j1]])
+            weights = np.stack([(1 - di) * (1 - dj), (1 - di) * dj, di * (1 - dj), di * dj])
+            ok = np.isfinite(corners)
+            total = (weights * ok).sum(0)
+            value = np.where(total > 0, (np.where(ok, corners, 0.0) * weights).sum(0) / np.maximum(total, 1e-9), np.nan)
+            missing = ~np.isfinite(value)
+            if missing.any():                                        # coastal points: the nearest ocean cell within 2 degrees
+                for k in np.nonzero(missing)[0]:
+                    ii = slice(max(i0[k] - 2, 0), min(i0[k] + 3, self.lat.size))
+                    jj = np.arange(j0[k] - 2, j0[k] + 3) % self.lon.size
+                    patch = g[ii][:, jj]
+                    value[k] = np.nanmean(patch) if np.isfinite(patch).any() else np.nan
+            out[name] = value
+        return out
+
+
+__all__ = ["COOLING_K", "D26_POWER", "D26_REFERENCE_M", "OceanClimatology", "RESIDENCE_H", "core_share", "effective_sst",
+           "wake_cooling_k"]

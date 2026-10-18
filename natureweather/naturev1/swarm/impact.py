@@ -58,6 +58,12 @@ class ImpactSettings:
     steep_slope: float = STEEP_SLOPE
     land_decay: bool = True              # False when the intensities already include it (a best track)
     cell_stride: int = 1                 # paint every n-th cell in each direction (2 on a CPU: 4x faster)
+    #: the forecast's own error distribution instead of the lognormal: ``{"hours": (L,), "quantiles": (L, Q) kt}``
+    #: residual quantiles (coefficients.INTENSITY_SPREAD for the storm's regime); each world draws one quantile level
+    intensity_quantiles: dict | None = None
+    #: the observed mean 34-kt radius (km) at the analysis: the wind field's size is anchored to it (with
+    #: ``size_log_sd`` spread around it, halved) instead of the climatological B
+    r34_km: float | None = None
 
 
 @dataclass
@@ -107,9 +113,22 @@ def world_intensity(region: RegionMap, track_h: np.ndarray, hours: np.ndarray, f
     """``(N, T)`` peak wind (kt) of every world: the forecast with its own growing error, decayed over land."""
     n, t = track_h.shape[:2]
     water = np.interp(hours, forecast_hours, forecast_kt)
-    z = torch.randn(n, generator=generator, dtype=torch.float64).numpy()
-    sd = settings.intensity_sd0 + settings.intensity_sd_per_h * hours
-    world = water[None, :] * np.exp(sd[None, :] * z[:, None])
+    if settings.intensity_quantiles is not None:
+        # each world keeps one quantile level of the consensus's own out-of-sample error distribution for the
+        # storm's regime, interpolated in time: a calibrated spread, skewed upward in the rapid regime
+        q = np.asarray(settings.intensity_quantiles["quantiles"], np.float64)              # (L, Q)
+        qh = np.asarray(settings.intensity_quantiles["hours"], np.float64)
+        level = torch.rand(n, generator=generator, dtype=torch.float64).numpy() * (q.shape[1] - 1)
+        lo = np.floor(level).astype(int)
+        frac = level - lo
+        hi = np.minimum(lo + 1, q.shape[1] - 1)
+        at = np.stack([np.interp(hours, np.concatenate([[0.0], qh]), np.concatenate([[0.0], q[:, j]])) for j in range(q.shape[1])])  # (Q, T)
+        resid = at[lo] * (1 - frac)[:, None] + at[hi] * frac[:, None]
+        world = np.maximum(water[None, :] + resid, 15.0)
+    else:
+        z = torch.randn(n, generator=generator, dtype=torch.float64).numpy()
+        sd = settings.intensity_sd0 + settings.intensity_sd_per_h * hours
+        world = water[None, :] * np.exp(sd[None, :] * z[:, None])
     land = region.unit_of(track_h[..., 0], track_h[..., 1]) >= 0
     if not settings.land_decay:
         return np.maximum(world, 15.0)
@@ -153,7 +172,8 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
     n = track_h.shape[0]
     w = np.full(n, 1.0 / n) if weights is None else np.asarray(weights, np.float64) / np.sum(weights)
     vmax = world_intensity(region, track_h, h, np.asarray(forecast_kt, np.float64), np.asarray(forecast_hours, np.float64), st, gen)
-    size = torch.exp(st.size_log_sd * torch.randn(n, generator=gen, dtype=torch.float64)).numpy()
+    size_sd = st.size_log_sd * (0.5 if st.r34_km is not None and np.isfinite(st.r34_km) else 1.0)
+    size = torch.exp(size_sd * torch.randn(n, generator=gen, dtype=torch.float64)).numpy()
     motion = np.zeros_like(track_h)
     d_north = np.gradient(track_h[..., 0], h, axis=1) * 111195.0 / 3600.0
     d_east = (np.gradient(np.unwrap(np.radians(track_h[..., 1]), axis=1), h, axis=1) * 6371008.8 / 3600.0
@@ -220,7 +240,11 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
                 rmw = rmw_climatology_km(vk * KT, la) * size_t[ix]
                 pl, po = c_lat32[idx], c_lon32[idx]
                 la32, lo32 = la.to(dt32), lo.to(dt32)
-                wf = wind_field(pl, po, la32, lo32, vk.to(dt32), rmw_km=rmw.to(dt32), motion_ms=motion_t[ix, k].to(dt32),
+                r34 = None
+                if st.r34_km is not None and np.isfinite(st.r34_km):
+                    # the observed gale radius anchors the outer wind field (the profile's B is fitted to it)
+                    r34 = (float(st.r34_km) * size_t[ix]).to(dt32)
+                wf = wind_field(pl, po, la32, lo32, vk.to(dt32), rmw_km=rmw.to(dt32), r34_km=r34, motion_ms=motion_t[ix, k].to(dt32),
                                 land=torch.ones(idx.numel(), dtype=dt32, device=dev), dtype=dt32)
                 north, east = _local_frame(pl.view(1, -1), po.view(1, -1), la32.view(-1, 1), lo32.view(-1, 1))
                 r = torch.sqrt(north ** 2 + east ** 2)
@@ -302,11 +326,28 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
 
 
 def impact_from_forecast(region: RegionMap, result: dict, case, particles: int | None = None, device="cpu",
-                         settings: ImpactSettings | None = None, seed: int = 0) -> ImpactResult:
+                         settings: ImpactSettings | None = None, seed: int = 0, r34_km: float | None = None) -> ImpactResult:
     """
     The impact report for a :func:`naturev1.cyclone.forecast.physics_forecast` result that carries a swarm
-    (``swarm=N``): its worlds, re-centred on the consensus track, carry the NatureV1 intensity forecast.
+    (``swarm=N``): its worlds, re-centred on the consensus track, carry the NatureV1 intensity forecast, spread by the
+    forecast's own calibrated error distribution for the storm's regime when the result has one
+    (``category_probability``), and the wind field sized by the observed 34-kt radius ``r34_km`` when given.
     """
+    import dataclasses
+
+    st = settings or ImpactSettings()
+    if st.intensity_quantiles is None and result.get("intensity_regime") is not None:
+        try:
+            from ..cyclone import coefficients
+
+            table = coefficients.INTENSITY_SPREAD
+            st = dataclasses.replace(st, intensity_quantiles={"hours": np.asarray(table["leads"], float),
+                                                              "quantiles": np.asarray(table["quantiles"][result["intensity_regime"]], float)})
+        except Exception:
+            pass
+    if r34_km is not None and np.isfinite(r34_km) and st.r34_km is None:
+        st = dataclasses.replace(st, r34_km=float(r34_km))
+    settings = st
     fc = result["swarm"]["forecast"]
     tracks, hours = fc.track, fc.track_hours
     weights = fc.weights

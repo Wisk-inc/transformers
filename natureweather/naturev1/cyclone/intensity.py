@@ -129,10 +129,13 @@ def potential_intensity_at(env, lat, lon, sst_k) -> np.ndarray:
     return np.nan_to_num(out["vmax_ms"].numpy(), nan=0.0)
 
 
-def environment_along_track(env, env_clean, case, track: np.ndarray, leads, wind_guess_kt: np.ndarray | None = None) -> dict:
+def environment_along_track(env, env_clean, case, track: np.ndarray, leads, wind_guess_kt: np.ndarray | None = None,
+                            ocean=None) -> dict:
     """
     Hourly environment along the forecast track: effective SST (cold wake), potential intensity, shear (850-200
-    and 850-500, annulus 200-800 km), 700-500 hPa humidity, land and terrain, translation speed.
+    and 850-500, annulus 200-800 km), 700-500 hPa humidity, land and terrain, translation speed -- and, with an
+    :class:`naturev1.cyclone.ocean.OceanClimatology` (``ocean``), the depth of the 26 C isotherm and the heat potential
+    along the track, with the cold wake sized by that depth.
     """
     from .shear import annulus_profile
 
@@ -144,10 +147,20 @@ def environment_along_track(env, env_clean, case, track: np.ndarray, leads, wind
     sst = env.sample(np.nan_to_num(env.fields["sst"], nan=float(np.nanmean(env.fields["sst"]))), la, lo)
     wind = np.interp(hours, np.concatenate([[0.0], np.asarray(leads, float)]),
                      np.concatenate([[case.wind_kt], wind_guess_kt if wind_guess_kt is not None else np.full(len(leads), case.wind_kt)]))
-    sst_eff = effective_sst(sst, wind, speed, hours)
+    d26 = tchp = np.full(hours.size, np.nan)
+    power = None
+    if ocean is not None:
+        from . import coefficients
+
+        sampled = ocean.sample(la, lo, case.time)
+        d26, tchp = sampled["d26_m"], sampled["tchp_kj_cm2"]
+        power = (getattr(coefficients, "OCEAN", None) or {}).get("d26_power")
+    sst_eff = effective_sst(sst, wind, speed, hours, d26 if ocean is not None else None, power)
     sample_hours = np.arange(0.0, hours[-1] + 1e-9, 6.0)
     pick = np.searchsorted(hours, sample_hours).clip(0, len(hours) - 1)
     pi = potential_intensity_at(env, la[pick], lo[pick], sst_eff[pick]) * KT_PER_MS
+    # the potential intensity over the uncooled sea as well, so a different wake can be priced without the profiles
+    pi_warm = potential_intensity_at(env, la[pick], lo[pick], sst[pick]) * KT_PER_MS if ocean is not None else pi
     shear_l, shear_m, rh = [], [], []
     for j in pick:
         prof = annulus_profile(env_clean, la[j], lo[j])
@@ -160,15 +173,26 @@ def environment_along_track(env, env_clean, case, track: np.ndarray, leads, wind
         rh.append(np.mean(rhs))
     return {"hours": hours, "lat": la, "lon": lo, "land": land["land"], "height_m": land["height_m"], "speed_ms": speed,
             "sst_k": sst, "sst_eff_k": sst_eff, "six_hours": sample_hours, "pi_kt": pi, "shear_ms": np.asarray(shear_l),
-            "shear_mid_ms": np.asarray(shear_m), "rh_mid": np.asarray(rh), "landfall_hour": land["landfall_hour"]}
+            "shear_mid_ms": np.asarray(shear_m), "rh_mid": np.asarray(rh), "landfall_hour": land["landfall_hour"],
+            "d26_m": d26, "tchp_kj_cm2": tchp, "pi_warm_kt": pi_warm}
 
 
 SHIPS_PREDICTORS = ("one", "wind", "dwind12", "potential", "potential2", "shear", "shear_mid", "rh", "sst", "land",
-                    "wind_shear", "lat", "speed")
+                    "wind_shear", "lat", "speed", "heat_potential")
+
+
+def _heat_potential(along: dict, mask) -> float:
+    """Mean tropical-cyclone heat potential along the track (kJ/cm2) scaled to ~1 at 50, NaN -> 0 (unknown)."""
+    tchp = np.asarray(along.get("tchp_kj_cm2", np.full(np.count_nonzero(mask), np.nan)), np.float64)
+    if tchp.size != np.size(mask):
+        return 0.0
+    v = tchp[mask]
+    return float(np.nanmean(v)) / 50.0 if np.isfinite(v).any() else 0.0
 
 
 def ships_predictors(case, along: dict, lead: float) -> np.ndarray:
-    """Predictors averaged along the track from now to ``lead``."""
+    """Predictors averaged along the track from now to ``lead`` (the heat potential last: a table fitted without the
+    ocean climatology simply ignores it)."""
     six = along["six_hours"]
     use = six <= lead + 1e-9
     hourly = along["hours"] <= lead + 1e-9
@@ -180,7 +204,17 @@ def ships_predictors(case, along: dict, lead: float) -> np.ndarray:
     return np.array([1.0, wind / 100.0, ((wind - w12) / 10.0) if np.isfinite(w12) else 0.0, room, room * abs(room),
                      shear, float(np.mean(along["shear_mid_ms"][use])) / 10.0, float(np.mean(along["rh_mid"][use])),
                      (float(np.mean(along["sst_eff_k"][hourly])) - 300.15) / 2.0, float(np.mean(along["land"][hourly])),
-                     wind / 100.0 * shear, abs(case.lat) / 30.0, float(np.mean(along["speed_ms"][hourly])) / 5.0])
+                     wind / 100.0 * shear, abs(case.lat) / 30.0, float(np.mean(along["speed_ms"][hourly])) / 5.0,
+                     _heat_potential(along, hourly)])
+
+
+def _fit_length(features: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """Features cut or zero-padded to a table's length: newer predictors are always appended last."""
+    if features.size == weights.size:
+        return features
+    if features.size > weights.size:
+        return features[:weights.size]
+    return np.concatenate([features, np.zeros(weights.size - features.size)])
 
 
 def fit_ships(cases, alongs: list, leads, ridge: float = 3e-2) -> dict:
@@ -210,7 +244,7 @@ def ships_intensity(case, along: dict, leads, table: dict | None = None) -> np.n
     for k, lead in enumerate(leads):
         if lead in stored and along is not None:
             w = np.asarray(table["weights"][stored.index(lead)], np.float64)
-            out[k] = max(case.wind_kt + float(w @ ships_predictors(case, along, lead)), 15.0)
+            out[k] = max(case.wind_kt + float(w @ _fit_length(ships_predictors(case, along, lead), w)), 15.0)
     return out
 
 
@@ -380,6 +414,8 @@ RI_FEATURES = ("one", "dv12", "dv24", "wind", "headroom", "shear", "rh", "sst", 
 
 #: With a dynamical model's forecast: its central-pressure deficit change by 24 and 48 h, and whether it was there.
 RI_MODEL_FEATURES = ("model_dp24", "model_dp48", "has_model")
+#: With the ocean climatology: the heat potential over the first 24 hours (kJ/cm2 / 50) and the 26 C depth (m / 50).
+RI_OCEAN_FEATURES = ("heat_potential", "warm_depth")
 
 
 def ri_features(case, along: dict, model_dp=None) -> np.ndarray:
@@ -398,14 +434,21 @@ def ri_features(case, along: dict, model_dp=None) -> np.ndarray:
                      float(np.nanmean(np.asarray(along["rh_mid"])[first])),
                      (float(np.nanmean(np.asarray(along["sst_eff_k"])[h <= 24.0])) - 301.65) / 2.0,
                      abs(case.lat) / 20.0, float(np.mean(np.asarray(along["land"])[h <= 24.0]))])
-    if model_dp is None:
-        return base
     from .data import LEADS
 
-    dp = np.asarray(model_dp, np.float64)
-    k24, k48 = list(LEADS).index(24), list(LEADS).index(48)
-    have = np.isfinite(dp[k24])
-    return np.concatenate([base, [np.nan_to_num(-dp[k24]) / 10.0 if have else 0.0, np.nan_to_num(-dp[k48]) / 20.0 if have else 0.0, float(have)]])
+    if model_dp is None:
+        model = np.zeros(3)
+    else:
+        dp = np.asarray(model_dp, np.float64)
+        k24, k48 = list(LEADS).index(24), list(LEADS).index(48)
+        have = np.isfinite(dp[k24])
+        model = np.array([np.nan_to_num(-dp[k24]) / 10.0 if have else 0.0, np.nan_to_num(-dp[k48]) / 20.0 if have else 0.0, float(have)])
+    first_day = h <= 24.0
+    tchp = np.asarray(along.get("tchp_kj_cm2", np.full(h.size, np.nan)), np.float64)
+    d26 = np.asarray(along.get("d26_m", np.full(h.size, np.nan)), np.float64)
+    ocean = np.array([float(np.nanmean(tchp[first_day])) / 50.0 if np.isfinite(tchp[first_day]).any() else 0.0,
+                      float(np.nanmean(d26[first_day])) / 50.0 if np.isfinite(d26[first_day]).any() else 0.0])
+    return np.concatenate([base, model, ocean])
 
 
 def model_deficit_change(extras: dict | list | None, leads) -> np.ndarray | None:
@@ -474,8 +517,11 @@ def category_probabilities(intensity: np.ndarray, regime: str, table: dict | Non
     return {"thresholds_kt": thresholds.tolist(), "probability": prob}
 
 
-def fit_ri(cases, alongs: list, threshold_kt: float = 30.0, l2: float = 1e-2, iterations: int = 30) -> dict:
-    """Logistic regression for P(intensity rises by >= ``threshold_kt`` in 24 h), by Newton's method."""
+def fit_ri(cases, alongs: list, threshold_kt: float = 30.0, l2: float = 1e-2, iterations: int = 30,
+           model_dp: dict | None = None, n_features: int | None = None) -> dict:
+    """Logistic regression for P(intensity rises by >= ``threshold_kt`` in 24 h), by Newton's method, on
+    :func:`ri_features` (``model_dp``: ``{case.key: (L,) deficit change}`` when the models' deepening is a predictor;
+    ``n_features`` cuts the predictor list, e.g. 10 for the environment alone)."""
     from .data import LEADS
 
     k24 = list(LEADS).index(24)
@@ -483,7 +529,9 @@ def fit_ri(cases, alongs: list, threshold_kt: float = 30.0, l2: float = 1e-2, it
     for c, a in zip(cases, alongs):
         if a is None or not c.truth["valid"][k24] or not np.isfinite(c.truth["wind"][k24]):
             continue
-        f = ri_features(c, a)
+        f = ri_features(c, a, None if model_dp is None else model_dp.get(c.key))
+        if n_features is not None:
+            f = _fit_length(f, np.zeros(n_features))
         if np.isfinite(f).all():
             x.append(f)
             y.append(float(c.truth["wind"][k24] - c.wind_kt >= threshold_kt))
@@ -495,7 +543,8 @@ def fit_ri(cases, alongs: list, threshold_kt: float = 30.0, l2: float = 1e-2, it
         grad = x.T @ (p - y) + reg @ w
         hess = (x * (p * (1 - p))[:, None]).T @ x + reg
         w = w - np.linalg.solve(hess, grad)
-    return {"features": list(RI_FEATURES), "threshold_kt": threshold_kt, "weights": w.round(5).tolist(),
+    names = list(RI_FEATURES) + list(RI_MODEL_FEATURES) + list(RI_OCEAN_FEATURES)
+    return {"features": names[:x.shape[1]], "threshold_kt": threshold_kt, "weights": w.round(5).tolist(),
             "base_rate": float(y.mean()), "cases": int(len(y))}
 
 
@@ -505,15 +554,14 @@ def ri_probability(case, along: dict, table: dict | None = None, model_dp=None) 
     if table is None:
         from .coefficients import RI as table
     w = np.asarray(table["weights"], np.float64)
-    f = ri_features(case, along, model_dp if w.size > len(RI_FEATURES) else None)
-    if w.size > f.size:                                     # a table with model predictors, no model here
-        f = np.concatenate([f, np.zeros(w.size - f.size)])
+    f = _fit_length(ri_features(case, along, model_dp), w)    # a table fitted with fewer predictors ignores the rest
     if not np.isfinite(f).all():
         return float(table.get("base_rate", 0.05))
     return float(1.0 / (1.0 + np.exp(-w @ f)))
 
 
-__all__ = ["LGEM_KAPPA", "RI_FEATURES", "RI_MODEL_FEATURES", "SHIFOR_PREDICTORS", "SHIPS_PREDICTORS", "TREND_TAU_H",
+__all__ = ["LGEM_KAPPA", "RI_FEATURES", "RI_MODEL_FEATURES", "RI_OCEAN_FEATURES", "SHIFOR_PREDICTORS", "SHIPS_PREDICTORS",
+           "TREND_TAU_H",
            "category_probabilities", "decay_along", "environment_along_track", "fit_ri", "model_deficit_change",
            "model_trend_intensity", "recent_change", "ri_features", "ri_probability", "trend_intensity",
            "fit_lgem", "fit_shifor", "fit_ships", "lgem_batch", "lgem_intensity", "lgem_table", "potential_intensity_at", "shifor_intensity",

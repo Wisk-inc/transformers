@@ -140,6 +140,7 @@ def consensus_table(members: dict) -> dict:
 
 
 def _intensity(case, env, ctx, track, leads, model_extras=None) -> dict:
+    from . import coefficients
     from .intensity import (category_probabilities, decay_along, environment_along_track, lgem_intensity,
                             model_deficit_change, model_trend_intensity, ri_probability, shifor_intensity,
                             trend_intensity)
@@ -152,8 +153,13 @@ def _intensity(case, env, ctx, track, leads, model_extras=None) -> dict:
     filled = track.copy()
     good = np.isfinite(filled[:, 0])
     filled[~good] = filled[np.nonzero(good)[0][-1]]
+    ocean = None
+    if getattr(coefficients, "OCEAN", None):                 # the tables were fitted with the ocean climatology
+        from .ocean import OceanClimatology
+
+        ocean = OceanClimatology.default()
     try:
-        along = environment_along_track(env, ctx.clean, case, filled, leads, np.nan_to_num(shifor, nan=case.wind_kt))
+        along = environment_along_track(env, ctx.clean, case, filled, leads, np.nan_to_num(shifor, nan=case.wind_kt), ocean=ocean)
     except Exception:                                       # missing fields in a live analysis: degrade, don't fail
         return {"intensity_kt": members, "intensity": shifor}
     members["decay_shifor"] = decay_along(case, along, leads, np.nan_to_num(shifor, nan=case.wind_kt))

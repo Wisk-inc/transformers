@@ -103,9 +103,14 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
         after = merge(window(fdeck, when + np.timedelta64(1, "m"), now))
         if after:
             ess_after = reweight_forecast(result["swarm"]["forecast"], after, when)
-    impact = impact_from_forecast(region, result, case, particles=impact_particles, device=device) if region is not None else None
+    from .fixes import gale_radius_km
+
+    at_analysis = [f for f in best if f.time == when]
+    r34 = gale_radius_km(at_analysis[0]) if at_analysis else float("nan")
+    impact = (impact_from_forecast(region, result, case, particles=impact_particles, device=device, r34_km=r34)
+              if region is not None else None)
     return {"case": case, "result": result, "impact": impact, "fixes_before": before, "fixes_after": after,
-            "best": best, "analysis_time": when, "ess_after": ess_after, "model_track": model_track,
+            "best": best, "analysis_time": when, "ess_after": ess_after, "model_track": model_track, "r34_km": r34,
             "models": {k: {"title": v["title"], "track": v["track"], "extras": v["extras"]} for k, v in read.items()}}
 
 

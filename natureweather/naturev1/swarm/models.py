@@ -127,8 +127,9 @@ def coarsen_to_nodes(values: np.ndarray, lat_first: float, dlat: float, lon_firs
         return np.where(den > 0, num / den, np.nan)
 
 
-def decode_grib(message: bytes) -> np.ndarray:
-    """One GRIB message (any regular grid, either row order, longitudes from -180 or 0) onto the 1.5-degree nodes."""
+def decode_grib_native(message: bytes) -> tuple[np.ndarray, tuple[float, float, float, float]]:
+    """One GRIB message on its own grid: ``(values (rows north to south, columns east from the first longitude >= 0),
+    (lat_first, dlat, lon_first, dlon))``."""
     import eccodes
 
     gid = eccodes.codes_new_from_message(message)
@@ -149,7 +150,31 @@ def decode_grib(message: bytes) -> np.ndarray:
     lon = (lon0 + dlon * np.arange(ni)) % 360.0
     shift = int(np.argmin(lon))                                   # start the columns at the first longitude >= 0
     values = np.roll(values, -shift, axis=1)
-    return coarsen_to_nodes(values, lat0, dlat, float(lon[shift]), dlon)
+    return values, (lat0, dlat, float(lon[shift]), dlon)
+
+
+def decode_grib(message: bytes) -> np.ndarray:
+    """One GRIB message (any regular grid, either row order, longitudes from -180 or 0) onto the 1.5-degree nodes."""
+    values, (lat0, dlat, lon0, dlon) = decode_grib_native(message)
+    return coarsen_to_nodes(values, lat0, dlat, lon0, dlon)
+
+
+def native_window(values: np.ndarray, grid: tuple, lat0: float, lon0: float, half_lat: float = 25.0,
+                  half_lon: float = 35.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(field, lat_axis, lon_axis)`` of a native-grid field within a box around ``(lat0, lon0)``, longitudes
+    continuous across the dateline."""
+    lat_first, dlat, lon_first, dlon = grid
+    nj, ni = values.shape
+    rows = np.arange(nj)
+    lat_axis = lat_first - dlat * rows
+    keep = (lat_axis >= lat0 - half_lat) & (lat_axis <= lat0 + half_lat)
+    j0 = int(round(((lon0 - lon_first) % 360.0) / dlon))
+    half = int(round(half_lon / dlon))
+    cols = (j0 + np.arange(-half, half + 1)) % ni
+    lon_axis = lon_first + dlon * (j0 + np.arange(-half, half + 1))
+    lon_axis = lon_axis - 360.0 * np.round((lon_axis - lon0) / 360.0)        # continuous around the storm
+    field = values[keep][:, cols]
+    return field[::-1], lat_axis[keep][::-1], lon_axis                           # latitude ascending for the tracker
 
 
 # ---------------------------------------------------------------------------------------------- the models --
@@ -209,9 +234,13 @@ class LiveModel:
         if path.exists():
             return dict(np.load(path))
         base, index = self._index(self.spec.urls, when, lead)
+        start, end = index[self._keys("msl")[0]]
+        msl_native, grid = decode_grib_native(_get(base, start, end))
         out = {"u": np.stack([self._read(base, index, k) for k in self._keys("u")]),
                "v": np.stack([self._read(base, index, k) for k in self._keys("v")]),
-               "msl": self._read(base, index, self._keys("msl")[0]), "levels": np.asarray(self.spec.levels, np.float64)}
+               "msl": coarsen_to_nodes(msl_native, *grid), "levels": np.asarray(self.spec.levels, np.float64),
+               # the pressure on the model's own grid as well: the storm is followed there, not on the smoothed nodes
+               "msl_native": msl_native.astype(np.float32), "native_grid": np.asarray(grid, np.float64)}
         if self.spec.spread_urls:
             try:
                 sbase, sindex = self._index(self.spec.spread_urls, when, lead)
@@ -264,9 +293,30 @@ def flow_and_track(fields, case, leads=LEADS, hours=FLOW_HOURS, source: str = ""
     msl = np.stack([got[h]["msl"] for h in need])
     tracked = track_in_fields((case.lat, case.lon), need, msl, box_lat, box_lon, first_motion_kmh=first)
     position = {h: tuple(tracked[k]) for k, h in enumerate(need)}
+    native = {}
+    for h in need:
+        f = fields(h)
+        if "msl_native" in f:
+            native[h] = native_window(np.asarray(f["msl_native"], np.float64), tuple(np.asarray(f["native_grid"], float)), case.lat, case.lon)
+    pmin_native = np.full(len(need), np.nan)
+    if len(native) == len(need):
+        # on the model's own grid (0.25 or 0.5 degrees) the low is sharp where the 1.5-degree nodes smear it:
+        # the track followed there is the one reported, the smoothed one kept for the coarse-grid steering
+        axes = native[need[0]][1], native[need[0]][2]
+        stack = np.stack([native[h][0] for h in need])
+        fine = track_in_fields((case.lat, case.lon), need, stack, axes[0], axes[1], first_motion_kmh=first)
+        lon2n, lat2n = np.meshgrid(axes[1], axes[0])
+        for k, h in enumerate(need):
+            if np.isfinite(fine[k, 0]):
+                position[h] = (float(fine[k, 0]), float(fine[k, 1]))
+                near = great_circle_km(lat2n, lon2n, fine[k, 0], fine[k, 1]) <= 150.0
+                pmin_native[k] = np.nanmin(stack[k][near]) / 100.0
+            elif h > 0:
+                position[h] = (np.nan, np.nan)
     lon2, lat2 = np.meshgrid(box_lon, box_lat)
     extras = {"msl_min_hpa": np.full(len(need), np.nan), "msl_env_hpa": np.full(len(need), np.nan),
-              "spread_hpa": np.full(len(need), np.nan), "hours": np.asarray(need, float)}
+              "spread_hpa": np.full(len(need), np.nan), "hours": np.asarray(need, float), "msl_min_native_hpa": pmin_native,
+              "native_track": len(native) == len(need)}
     for k, h in enumerate(need):
         at = (case.lat, case.lon) if h == 0 else position[h]
         if np.isfinite(at[0]):
@@ -314,5 +364,5 @@ def fetch_models(case, when, names=DEFAULT_MODELS, cache: str | Path = "~/.cache
     return out
 
 
-__all__ = ["DEFAULT_MODELS", "MODELS", "LiveModel", "ModelSpec", "coarsen_to_nodes", "decode_grib", "fetch_models",
-           "flow_and_track"]
+__all__ = ["DEFAULT_MODELS", "MODELS", "LiveModel", "ModelSpec", "coarsen_to_nodes", "decode_grib", "decode_grib_native",
+           "fetch_models", "flow_and_track", "native_window"]

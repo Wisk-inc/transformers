@@ -1,7 +1,7 @@
-# NatureV1 0.14 -- the satellite path, the swarm sandbox and Caribbean impacts, in ONE marimo cell (molab, 1 GPU).
+# NatureV1 0.15 -- the satellite path, the swarm sandbox and Caribbean impacts, in ONE marimo cell (molab, 1 GPU).
 #
 # Paste this whole file into one marimo cell and run it. What it does:
-#   1. installs naturev1 0.14 with the swarm extras (GRIB decoder, terrain tiles, maps)
+#   1. installs naturev1 0.15 with the swarm extras (GRIB decoder, terrain tiles, maps)
 #   2. builds the map of the whole Caribbean -- every parish / province / district of every country and territory,
 #      with terrain -- and the full-consensus inputs (climatology + analog database), once, cached under DATA
 #   3. for every active NHC storm (or a replay, e.g. Melissa 2025): best track + every satellite / recon / radar
@@ -22,7 +22,7 @@ import os
 import subprocess
 import sys
 
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "naturev1[swarm]>=0.14.0", "ihelix>=0.6.0"],
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "naturev1[swarm]>=0.15.0", "ihelix>=0.6.0"],
                check=True)
 
 from pathlib import Path
@@ -108,6 +108,13 @@ for storm_id, name in storms:
         ri += "  \n**P(at least ...):** " + "; ".join(
             f"{names.get(int(t), f'{t:.0f} kt')} " + " ".join(f"{h}h {p:.0%}" for h, p in zip(result["leads"], cats["probability"][:, j]) if np.isfinite(p))
             for j, t in enumerate(cats["thresholds_kt"]))
+    envt = result.get("environment") or {}
+    if "tchp_kj_cm2" in envt and np.isfinite(envt["tchp_kj_cm2"][:49]).any():
+        ri += (f"  \n**Ocean under the first 48 h:** 26 C water {np.nanmean(envt['d26_m'][:49]):.0f} m deep, heat potential "
+               f"{np.nanmean(envt['tchp_kj_cm2'][:49]):.0f} kJ/cm2, sea surface {np.nanmean(envt['sst_k'][:49]) - 273.15:.1f} C "
+               f"(effective {np.nanmean(envt['sst_eff_k'][:49]) - 273.15:.1f} C under the core)")
+    if run.get("r34_km") is not None and np.isfinite(run["r34_km"]):
+        ri += f"  \n**Observed 34-kt radius:** {run['r34_km']:.0f} km (the wind field is sized to it)"
     deep = result.get("model_deepening_hpa")
     if deep is not None and np.isfinite(deep).any():
         ri += "  \n**Models' deepening (hPa, central-pressure deficit):** " + "  ".join(f"{h}h {d:+.0f}" for h, d in zip(result["leads"], deep) if np.isfinite(d))
