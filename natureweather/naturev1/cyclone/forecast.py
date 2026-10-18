@@ -68,8 +68,12 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
     if table.get("model_blend") is not None and out.get("model") is not None:
         from .consensus import blend_with_model
 
-        track = blend_with_model(case, physics_track, np.asarray(out["model"], np.float64), table["model_blend"], leads)
-    result = {"leads": list(leads), "track": track, "members": out, "consensus_table": table["name"]}
+        n_models = (sum(1 for t in model_track.values() if t is not None and np.isfinite(np.asarray(t)[:, 0]).any())
+                    if isinstance(model_track, dict) else 1)
+        track = blend_with_model(case, physics_track, np.asarray(out["model"], np.float64), table["model_blend"], leads, n_models)
+        result_models = n_models
+    result = {"leads": list(leads), "track": track, "members": out, "consensus_table": table["name"],
+              "n_models": locals().get("result_models", 0)}
     from . import coefficients
 
     # each consensus table has its own cone: the forecast-flow consensus errs less, so its cone is narrower

@@ -15,8 +15,12 @@ geography       every Caribbean country and territory as a raster of its parishe
                 terrain
 impact          each world's wind and rain painted onto that raster: per-parish probabilities of tropical-storm and
                 hurricane-force wind and gusts, rain with orographic enhancement, flash-flood signal, arrival times
+landfall        when the centre comes ashore (median and 10-90%), where first, how strong then and at peak, and each
+                parish's peak wind, gust, rain and arrival times, with dates
+observations    barometer readings fitted to a vortex (a centre fix with uncertainty and a central pressure) and point
+                winds blended into the painted map -- operators for feeds that do not yet exist here
 live            one call from an NHC storm id to an impact report (live, or a replay of what was known at the time)
-plot            maps of the swarm, its worldlines and its impacts
+plot            maps of the swarm, its worldlines and its impacts; the parish-by-parish landfall figure
 ==============  ======================================================================================================
 
 It works with :func:`naturev1.cyclone.physics_forecast` (``swarm=N``): the physics consensus stays the best single

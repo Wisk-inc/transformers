@@ -150,18 +150,19 @@ def apply_consensus(cases, forecasts: np.ndarray, weights: dict, selective_k: fl
     return from_displacements(cases, blended)
 
 
-def blend_with_model(case, track: np.ndarray, model_track: np.ndarray, spec: dict, leads) -> np.ndarray:
+def blend_with_model(case, track: np.ndarray, model_track: np.ndarray, spec: dict, leads, n_models: int = 1) -> np.ndarray:
     """
-    The consensus pulled toward a dynamical model's own track of the storm, by one weight per lead
-    (``spec["alpha"]``, fitted on past seasons: a quarter at 6 h, nine tenths by day 5, where the model knows about
-    the troughs and ridges the physics cannot see yet).
+    The consensus pulled toward a dynamical model's own track of the storm (or several models' mean), by one weight
+    per lead (``spec["alpha"]``, fitted on past seasons: a fifth at 6 h, nine tenths by day 3, where the model knows
+    about the troughs and ridges the physics cannot see yet). With two or more models the mean deserves more
+    (``spec["alpha_multi"]``, fitted where two models existed: 0.78 at 24 h, 0.95 from 48 h; held-out gain 1-3%).
 
-    The model's track first loses its starting offset, as NHC's "interpolated" model tracks do: where the model
-    starts the storm, extrapolated back from its first two positions, is moved onto the observed position, the
-    correction fading with ``spec["offset_tau_h"]``. Where the model has lost the storm, the consensus stands.
+    The model's track may first lose its starting offset (``spec["offset_tau_h"]``; None, as shipped: measured, it
+    made the blend worse). Where the model has lost the storm, the consensus stands.
     """
     hours = np.asarray(leads, np.float64)
-    alpha = np.interp(hours, spec.get("leads", hours), spec["alpha"])
+    weights = spec.get("alpha_multi") if n_models >= 2 and spec.get("alpha_multi") is not None else spec["alpha"]
+    alpha = np.interp(hours, spec.get("leads", hours), weights)
     east, north = to_local(case.lat, case.lon, track[:, 0], track[:, 1])
     me, mn = to_local(case.lat, case.lon, model_track[:, 0], model_track[:, 1])
     tau = spec.get("offset_tau_h")

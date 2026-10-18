@@ -64,6 +64,10 @@ class ImpactSettings:
     #: the observed mean 34-kt radius (km) at the analysis: the wind field's size is anchored to it (with
     #: ``size_log_sd`` spread around it, halved) instead of the climatological B
     r34_km: float | None = None
+    #: boundary-layer terrain effect per unit of slope along the wind: wind speeds up on a windward slope and is
+    #: sheltered in the lee (Jackson-Hunt: a fractional speed-up of about twice the slope on a crest). 0 (default)
+    #: leaves it out: it is physics, not something verified against station winds here. 1.0 is a plausible value.
+    terrain_speedup_per_slope: float = 0.0
 
 
 @dataclass
@@ -71,6 +75,7 @@ class ImpactResult:
     region: RegionMap
     units: list                          # one dict per affected unit, sorted by hurricane-wind probability
     cell_maps: dict                      # (H, W) grids: p34, p50, p64, p_gust64, mean_rain_mm, p_rain250, arrival_h
+    #: each unit dict also carries peak_gust_kt, peak_kt_p90 (90th percentile over worlds), peak_hour, hu_arrival_h
     particles: int
     hours: np.ndarray
     meta: dict = field(default_factory=dict)
@@ -216,6 +221,8 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
     gust = torch.zeros_like(peak)
     rain = torch.zeros_like(peak)
     arrival = torch.full_like(peak, float("inf"))
+    peak_hour = torch.zeros_like(peak)                     # when each cell saw its strongest wind
+    hu_arrival = torch.full_like(peak, float("inf"))       # when hurricane force first arrived
     vmax_t = torch.as_tensor(vmax, dtype=torch.float64, device=dev)
     size_t = torch.as_tensor(size, dtype=torch.float64, device=dev)
     motion_t = torch.as_tensor(motion, dtype=torch.float64, device=dev)
@@ -251,21 +258,34 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
                 far = r > st.reach_km
                 speed = wf["speed_kt"].masked_fill(far, 0.0)
                 g = wf["gust_kt"].masked_fill(far, 0.0)
+                if st.terrain_speedup_per_slope:
+                    # slope along the wind (dimensionless): positive upslope -> speed-up, negative (lee) -> sheltering
+                    wind_speed = torch.sqrt(wf["u_ms"] ** 2 + wf["v_ms"] ** 2).clamp_min(1e-3)
+                    along_slope = (wf["u_ms"] * sx[idx] + wf["v_ms"] * sy[idx]) / wind_speed
+                    factor = (1.0 + st.terrain_speedup_per_slope * along_slope).clamp(0.7, 1.5)
+                    speed = speed * factor
+                    g = g * factor
                 rate = rcliper_rate_mm_h(r, vk.to(dt32).view(-1, 1)).masked_fill(far, 0.0)
                 ascent = (wf["u_ms"] * sx[idx] + wf["v_ms"] * sy[idx]).clamp_min(0.0)
                 rate = rate * (1.0 + st.orographic_per_ms * ascent).clamp(max=st.orographic_cap)
                 rows, cols = ix.view(-1, 1), idx.view(1, -1)
+                stronger = speed > peak[rows, cols]
+                peak_hour[rows, cols] = torch.where(stronger, torch.full_like(speed, float(h[k])), peak_hour[rows, cols])
                 peak[rows, cols] = torch.maximum(peak[rows, cols], speed)
                 gust[rows, cols] = torch.maximum(gust[rows, cols], g)
                 rain[rows, cols] = rain[rows, cols] + rate * float(dt)
                 prev = arrival[rows, cols]
                 arrival[rows, cols] = torch.where(torch.isinf(prev) & (speed >= WIND_KT[0]), torch.full_like(speed, float(h[k])), prev)
+                prev = hu_arrival[rows, cols]
+                hu_arrival[rows, cols] = torch.where(torch.isinf(prev) & (speed >= WIND_KT[2]), torch.full_like(speed, float(h[k])), prev)
 
     wk = torch.as_tensor(w, dtype=dt32, device=dev)
     cell_acc = {}
     for key, thr in (("p34", WIND_KT[0]), ("p50", WIND_KT[1]), ("p64", WIND_KT[2])):
         cell_acc[key] = (wk[:, None] * (peak >= thr)).sum(0)
     cell_acc["p_gust64"] = (wk[:, None] * (gust >= WIND_KT[2])).sum(0)
+    cell_acc["peak"] = (wk[:, None] * peak).sum(0)
+    cell_acc["gust_kt"] = (wk[:, None] * gust).sum(0)
     cell_acc["rain"] = (wk[:, None] * rain).sum(0)
     cell_acc["p_rain250"] = (wk[:, None] * (rain >= RAIN_MM[1])).sum(0)
     hit = torch.isfinite(arrival)
@@ -296,6 +316,25 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
     reached = torch.isfinite(uarr)
     unit_acc["arr_sum"] = (wk[:, None] * torch.where(reached, uarr, torch.zeros_like(uarr))).sum(0)
     unit_acc["arr_w"] = (wk[:, None] * reached).sum(0)
+    # the parish's peak gust, the hour of its peak wind (peak-weighted over its cells), when hurricane force arrives,
+    # and the 90th percentile of its peak wind over the worlds -- the numbers a parish plans around
+    ugust = torch.zeros(n, n_units, dtype=dt32, device=dev).scatter_reduce(1, unit.expand(n, -1), gust, reduce="amax", include_self=True)
+    unit_acc["gust"] = (wk[:, None] * ugust).sum(0)
+    hour_num = torch.zeros(n, n_units, dtype=dt32, device=dev).index_add_(1, unit, peak_hour * peak)
+    hour_den = torch.zeros(n, n_units, dtype=dt32, device=dev).index_add_(1, unit, peak)
+    uhour = torch.where(hour_den > 0, hour_num / hour_den.clamp_min(1e-9), torch.zeros_like(hour_num))
+    windy = upeak >= WIND_KT[0]
+    unit_acc["hour_sum"] = (wk[:, None] * torch.where(windy, uhour, torch.zeros_like(uhour))).sum(0)
+    unit_acc["hour_w"] = (wk[:, None] * windy).sum(0)
+    uhu = torch.full((n, n_units), float("inf"), dtype=dt32, device=dev).scatter_reduce(1, unit.expand(n, -1), hu_arrival, reduce="amin", include_self=True)
+    hu_reached = torch.isfinite(uhu)
+    unit_acc["hu_sum"] = (wk[:, None] * torch.where(hu_reached, uhu, torch.zeros_like(uhu))).sum(0)
+    unit_acc["hu_w"] = (wk[:, None] * hu_reached).sum(0)
+    order = torch.argsort(upeak, dim=0)
+    sorted_peak = torch.gather(upeak, 0, order)
+    cum = torch.cumsum(torch.gather(wk[:, None].expand(-1, n_units), 0, order), dim=0)
+    at90 = (cum >= 0.9).to(torch.int64).argmax(dim=0)
+    unit_acc["peak_p90"] = torch.gather(sorted_peak, 0, at90.view(1, -1))[0]
     cells = {k: (v[keep] if isinstance(v, np.ndarray) else v) for k, v in cells.items()}
 
     shape = region.unit.shape
@@ -307,6 +346,10 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
     grid = np.full(shape, np.nan)
     grid[cells["i"], cells["j"]] = cell_acc["rain"].cpu().numpy()
     maps["mean_rain_mm"] = grid
+    for key, name in (("peak", "mean_peak_kt"), ("gust_kt", "mean_gust_kt")):
+        grid = np.full(shape, np.nan)
+        grid[cells["i"], cells["j"]] = cell_acc[key].cpu().numpy()
+        maps[name] = grid
     grid = np.full(shape, np.nan)
     aw = cell_acc["arr_w"].cpu().numpy()
     grid[cells["i"], cells["j"]] = np.where(aw > 0.05, cell_acc["arr_sum"].cpu().numpy() / np.maximum(aw, 1e-9), np.nan)
@@ -320,7 +363,10 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
                       "p34": ua["p34"][u], "p50": ua["p50"][u], "p64": ua["p64"][u], "p_gust64": ua["p_gust64"][u],
                       "peak_kt": ua["peak"][u], "rain_mm": ua["rain"][u], "p_rain100": ua["p_rain100"][u],
                       "p_rain250": ua["p_rain250"][u], "p_flash": ua["p_flash"][u],
-                      "arrival_h": ua["arr_sum"][u] / ua["arr_w"][u] if ua["arr_w"][u] > 0.05 else float("nan")})
+                      "arrival_h": ua["arr_sum"][u] / ua["arr_w"][u] if ua["arr_w"][u] > 0.05 else float("nan"),
+                      "peak_gust_kt": ua["gust"][u], "peak_kt_p90": ua["peak_p90"][u],
+                      "peak_hour": ua["hour_sum"][u] / ua["hour_w"][u] if ua["hour_w"][u] > 0.05 else float("nan"),
+                      "hu_arrival_h": ua["hu_sum"][u] / ua["hu_w"][u] if ua["hu_w"][u] > 0.05 else float("nan")})
     units.sort(key=lambda d: (-d["p64"], -d["p_gust64"], -d["p34"], -d["rain_mm"]))
     return ImpactResult(region, units, maps, n, h, {"area_share": st.area_share})
 
