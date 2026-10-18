@@ -36,8 +36,8 @@ def holland_pressure(r_km, pc_hpa, penv_hpa, rmw_km, b=DEFAULT_B):
 
 
 def pressure_to_wind_kt(pc_hpa, penv_hpa=1010.0) -> float:
-    """Atkinson-Holliday pressure-wind relation (kt), the simple one every basin's agencies have used."""
-    return float(3.4 * max(penv_hpa - pc_hpa, 0.0) ** 0.644)
+    """Atkinson-Holliday (1977) pressure-wind relation, kt: ``6.7 (penv - pc)^0.644`` (3.44 in m/s)."""
+    return float(6.7 * max(penv_hpa - pc_hpa, 0.0) ** 0.644)
 
 
 def centre_from_pressures(lat, lon, pressure_hpa, guess=None, sigma_hpa: float = 1.0, penv_hpa: float | None = None,
