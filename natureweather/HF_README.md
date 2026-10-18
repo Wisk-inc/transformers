@@ -893,7 +893,18 @@ wind from it; the physics that would use such data is in place. A terrain bounda
 lee sheltering, Jackson-Hunt scaling) is in `ImpactSettings.terrain_speedup_per_slope`, off by default, because it
 has not been verified against station winds here.
 
-<!-- PENDING 0.15 intensity -->
+**The ocean's depth: what the measurement said.** Melissa's lesson was that a storm crawling over 120 m of
+26 C water does not cool its own ocean the way one over 30 m does, so 0.15 brought in the World Ocean Atlas
+climatology of the 26 C depth and the heat potential, let the wake cooling scale with that depth, let this year's
+sea-surface anomaly deepen or shoal the climatological layer, and put the heat potential and the storm's observed
+size into the SHIPS and rapid-intensification predictors. Each piece was then chosen on the tuning seasons by
+cross-validation, and the cooling term lost: with no depth dependence at all the LGEM member's 12-72 h error was
+15.32 kt; with any depth exponent (0.25-1.0) or any anomaly coefficient it was 15.43-15.56 kt, and the same held on
+the 349 forecasts over water more than 1 C warmer than the climatology. A monthly 1-degree climatology does not know
+the water under one storm well enough to improve on the surface temperature the analysis already has. The depth
+term is in the code with its exponent set to zero by the fitted coefficients; the heat potential and the size are
+scored below as predictors.
+<!-- PENDING 0.15 intensity table -->
 
 <!-- PENDING 0.15 melissa -->
 
