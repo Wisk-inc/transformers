@@ -40,7 +40,7 @@ from .geography import RegionMap
 REACH_KM = 500.0
 AREA_SHARE = 0.10
 OROGRAPHIC_PER_MS = 1.5
-OROGRAPHIC_CAP = 4.0
+OROGRAPHIC_CAP = 2.0                 # was 4; with the radar multiplier on the base rate, 4 doubled Melissa's gauge maxima over Jamaica's hills
 STEEP_SLOPE = 0.08                   # 8% -- where heavy rain becomes flash floods and landslides
 WIND_KT = (34.0, 50.0, 64.0)
 RAIN_MM = (100.0, 250.0)

@@ -1000,7 +1000,10 @@ So the heavy rain is found far more often (the threat score for 100 mm rises fro
 at the price of too much rain in the light-rain cells (the held-out storms were less under-forecast than the tuning
 storms: ratio about 1.5 against 1.9), which is where the overall MAE and the +13 mm bias come from. A multiplier
 cannot fix R-CLIPER's shape -- too concentrated near the core, nothing for the outer bands and the remnant low -- and
-that is the next thing to build. The parish numbers also changed form: the swarm-mean rain is diluted by every world
+that is the next thing to build. One consequence was handled by hand: the US storms have no mountains, so the multiplier
+was calibrated with the orographic term at 1, and stacking it under the old orographic cap of 4 doubled the wettest cells
+of a perfect-track Melissa painting against Jamaica's 13 parish gauge maxima; the cap is now 2 (a 1.5-2.5x enhancement is
+what the literature finds on windward slopes). That is a choice informed by Melissa, not a verification, and it is marked as such. The parish numbers also changed form: the swarm-mean rain is diluted by every world
 that misses, so the landfall report now gives the rain **if the parish is hit**, its 90th percentile over the worlds,
 and the parish's wettest cell if hit (the number a rain gauge reports), next to the mean. Satellite rain was checked
 as a reference and rejected: CHIRPS put Melissa's 27-29 October total over Jamaica at a maximum of 158 mm against 817 mm
