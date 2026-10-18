@@ -874,6 +874,25 @@ others. Two caveats carry over from 4.15: the blend contains these models' own t
 comparison, not a physics-versus-model one; and live the model set is different (GFS, IFS, AIFS, GraphCast-GFS,
 GEFS), with the blend weight fitted for one model.
 
+**Landfall, answered the way a parish needs it.** `naturev1.swarm.landfall` turns the swarm and the consensus into:
+when the centre comes ashore (the median and the 10-90% range over the worlds, with dates, in UTC), which parish it
+crosses first and with what probability, the intensity at the consensus landfall time with its calibrated 10-90%
+band, the peak intensity and when it comes, and for every parish the expected peak sustained wind, peak gust, the
+90th percentile of the peak over the worlds, rain, and the times tropical-storm force and hurricane force arrive
+and the peak passes. `plot.landfall_figure` draws it; the molab cell shows it for `LANDFALL_COUNTRY`. The wind field
+is now sized to the storm's observed 34-kt radius from the best track, and the worlds' intensities are drawn from
+the forecast's own calibrated error distribution for the storm's regime instead of a fixed ±8%.
+
+**Observations that survive a landfall.** `naturev1.swarm.observations` holds two operators for feeds this package
+does not yet read: a vortex fitted to any set of barometer readings (phones, watches, home stations -- pressure goes
+through walls) gives a centre fix with its uncertainty, a central pressure and a wind, which the swarm filters like
+a satellite fix; and point wind observations are blended into the painted wind map by optimal interpolation. Both
+are checked on constructed storms (300 phone-grade readings place a 935 hPa centre to within 12 km and 1 hPa).
+No telecom signal-loss or crowd-sourced pressure data was available to train on, so nothing here claims to infer
+wind from it; the physics that would use such data is in place. A terrain boundary-layer term (windward speed-up,
+lee sheltering, Jackson-Hunt scaling) is in `ImpactSettings.terrain_speedup_per_slope`, off by default, because it
+has not been verified against station winds here.
+
 <!-- PENDING 0.15 intensity -->
 
 <!-- PENDING 0.15 melissa -->

@@ -34,6 +34,7 @@ import torch
 # ── settings ──────────────────────────────────────────────────────────────────────────────────────────────────────
 STORM = None                   # None: every active NHC storm. Or an NHC id, e.g. "al132025" (Melissa 2025)
 REPLAY_TIME = None             # with STORM: replay what was known then, e.g. "2025-10-27T00" (fixes after it unused)
+LANDFALL_COUNTRY = "Jamaica"   # the parish-by-parish landfall panel: when, where first, how strong, each parish's peak
 GPU = torch.cuda.is_available()
 PARTICLES = 1_000_000 if GPU else 50_000          # worlds in the swarm
 IMPACT_WORLDS = 40_000 if GPU else 2_000          # worlds painted onto the map (the map is the costly part)
@@ -51,7 +52,8 @@ import naturev1
 from naturev1.swarm.fixes import active_storms
 from naturev1.swarm.geography import CARIBBEAN, RegionMap
 from naturev1.swarm.live import consensus_inputs, forecast_storm, goes_scene
-from naturev1.swarm.plot import impact_figure
+from naturev1.swarm.landfall import format_landfall, landfall_summary
+from naturev1.swarm.plot import impact_figure, landfall_figure
 
 print(f"naturev1 {naturev1.__version__} on {DEVICE}" + (f" ({torch.cuda.get_device_name(0)})" if GPU else ""))
 
@@ -92,6 +94,13 @@ for storm_id, name in storms:
         except Exception as error:
             print(f"GOES: {error}")
     fig = impact_figure(run, scene=scene)
+    landfall_panels = []
+    if impact is not None and LANDFALL_COUNTRY:
+        summary = landfall_summary(region, result, case, impact, LANDFALL_COUNTRY, analysis_time=run["analysis_time"])
+        if summary["p_landfall"] >= 0.02:
+            landfall_panels = [landfall_figure(run, summary, LANDFALL_COUNTRY), mo.plain_text(format_landfall(summary, top=14))]
+        else:
+            landfall_panels = [mo.md(f"**{LANDFALL_COUNTRY}:** the centre reaches it in {summary['p_landfall']:.0%} of worlds within 5 days.")]
     sw = result["swarm"]
     scen = ", ".join(f"{k} {v['probability']:.0%}" for k, v in sw["scenarios"].items())
     filt = sw["filter"]
@@ -135,6 +144,7 @@ for storm_id, name in storms:
               f"**Swarm:** {PARTICLES:,} worlds; scenarios: {scen}.  \n"
               f"**Track** ({result['consensus_table']}): {track}{gfs_text}{cone_text}  \n**Intensity:** {intensity}{ri}"),
         fig,
+        *landfall_panels,
         mo.plain_text(impact.table(top=30)),
         mo.md(f"<sub>{region.attribution} Research model, not an operational forecast.</sub>"),
     ]))

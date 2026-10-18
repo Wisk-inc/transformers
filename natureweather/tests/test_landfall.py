@@ -65,7 +65,7 @@ def test_barometers_place_the_centre_and_read_its_pressure():
     p = holland_pressure(r, true["pc"], true["penv"], true["rmw"]) + rng.normal(0.0, 1.0, 300)       # phones: ~1 hPa
     fit = centre_from_pressures(lat, lon, p, sigma_hpa=1.0)
     assert geo.great_circle_km(fit["lat"], fit["lon"], true["lat"], true["lon"]) < 12.0
-    assert abs(fit["pc_hpa"] - true["pc"]) < 6.0 and fit["sigma_km"] < 30.0 and 120.0 < fit["wind_kt"] < 160.0
+    assert abs(fit["pc_hpa"] - true["pc"]) < 6.0 and fit["sigma_km"] < 30.0 and 95.0 < fit["wind_kt"] < 130.0   # Atkinson-Holliday: 108 kt at 935 hPa
     fix, _ = fix_from_pressures("2025-10-28T15:00", lat, lon, p)
     assert fix.source == "BARO" and fix.sigma_km == fit["sigma_km"]
 
