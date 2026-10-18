@@ -141,3 +141,19 @@ def test_gfs_forecast_flow_tracks_the_model_storm_and_keeps_the_environment(monk
         assert geo.great_circle_km(*track[k], 20.0 + h / 12.0, -60.0 - h / 12.0) < 120.0, f"lost GFS's storm at {h} h"
     u, v = flow.velocity(_vortex_env(), np.array([25.0]), np.array([-65.0]), 60.0, depth=0.5)
     assert abs(u[0] + 4.0) < 0.3 and abs(v[0] - 2.0) < 0.3, "the environment survives the vortex removal"
+
+
+def test_physics_forecast_uses_the_forecast_flow_consensus_and_leans_on_the_model_late():
+    from naturev1.cyclone.forecast import physics_forecast
+
+    case = _case(motion_kmh=(-18.0, 0.0))
+    env = _vortex_env(u=-5.0, v=0.0)
+    flow = _flow(env, turn_hour=48)
+    model = np.stack(geo.move(case.lat, case.lon, -18.0 * np.minimum(np.asarray(LEADS, float), 48.0),
+                              20.0 * np.maximum(np.asarray(LEADS, float) - 48.0, 0.0)), -1)     # west, then north
+    plain = physics_forecast(case, env, intensity=False)
+    steered = physics_forecast(case, env, forecast_flow=flow, model_track=model, intensity=False)
+    assert plain["consensus_table"] == "CONSENSUS_BASIC" and steered["consensus_table"] == "CONSENSUS_BASIC_FF"
+    k120 = LEADS.index(120)
+    assert geo.great_circle_km(*steered["track"][k120], *model[k120]) < 0.3 * geo.great_circle_km(*plain["track"][k120], *model[k120])
+    assert np.isfinite(steered["members"]["fflow"]).all()

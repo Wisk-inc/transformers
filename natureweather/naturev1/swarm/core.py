@@ -818,7 +818,10 @@ def _strike_counts(track: np.ndarray, glat: np.ndarray, glon: np.ndarray, radius
         n = t.shape[0]
         i = np.round((t[..., 0] - glat[0]) / di_step)
         j = np.round((t[..., 1] - glon[0]) / dj_step)
+        # points farther off the grid than the radius cannot strike it -- and would overflow the packed index below
         ok = np.isfinite(i) & np.isfinite(j)
+        ok &= (np.nan_to_num(i, nan=-1e9) >= -ri) & (np.nan_to_num(i, nan=1e9) < ni + ri)
+        ok &= (np.nan_to_num(j, nan=-1e9) >= -rj) & (np.nan_to_num(j, nan=1e9) < nj + rj)
         pid = np.broadcast_to(np.arange(n)[:, None], i.shape)[ok].astype(np.int64)
         cells = np.unique(pid * (ni + 2 * ri) * (nj + 2 * rj) + (i[ok].astype(np.int64) + ri) * (nj + 2 * rj)
                           + (j[ok].astype(np.int64) + rj))

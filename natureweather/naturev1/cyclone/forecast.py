@@ -100,6 +100,7 @@ def consensus_table(members: dict) -> dict:
     """
     from . import coefficients
 
+    best, best_share = None, -1.0
     for name in ("CONSENSUS_FF", "CONSENSUS_BASIC_FF", "CONSENSUS", "CONSENSUS_BASIC"):
         table = getattr(coefficients, name, None)
         if table is None:
@@ -107,7 +108,12 @@ def consensus_table(members: dict) -> dict:
         have = [np.isfinite(np.asarray(members.get(m, [[np.nan]]))[0]).all() for m in table["members"]]
         if all(have):
             return {**table, "name": name}
-    return {**coefficients.CONSENSUS_BASIC, "name": "CONSENSUS_BASIC"}
+        # none complete (say, no analysis 12 hours earlier): the table missing the smallest share of its members,
+        # renormalised over the rest, in the same order of preference
+        if np.mean(have) > best_share:
+            best, best_share = name, float(np.mean(have))
+    name = best or "CONSENSUS_BASIC"
+    return {**getattr(coefficients, name), "name": name}
 
 
 def _intensity(case, env, ctx, track, leads) -> dict:

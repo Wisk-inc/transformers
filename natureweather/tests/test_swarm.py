@@ -131,3 +131,19 @@ def test_physics_forecast_carries_a_swarm_centred_on_the_consensus():
     assert abs(sum(v["probability"] for v in sw["scenarios"].values()) - 1.0) < 1e-9
     assert sw["strike_probability"].max() <= 1.0 + 1e-9 and sw["strike_probability"].max() > 0.5
     assert np.all(np.diff(sw["cone_km"][1:]) > 0), "the cone widens with lead"
+
+
+def test_strike_counts_ignore_worlds_that_leave_the_grid():
+    # Worlds that run far off the map (a recurving storm racing north) must neither crash the counter nor credit
+    # their strikes to other worlds' cells.
+    from naturev1.swarm.core import _strike_counts
+
+    glat, glon = np.arange(10.0, 20.01, 0.5), np.arange(-80.0, -70.01, 0.5)
+    inside = np.stack([np.full(9, 15.0), np.linspace(-79.0, -71.0, 9)], -1)
+    away = np.stack([np.linspace(15.0, 60.0, 9), np.full(9, -75.0)], -1)          # leaves the grid to the north
+    tracks = np.stack([inside] * 3 + [away] * 3)
+    counts = _strike_counts(tracks, glat, glon, 111.0, np.full(6, 1.0 / 6))
+    assert counts.max() <= 1.0 + 1e-9
+    k = int(np.argmin(np.abs(glat - 15.0)))
+    assert abs(counts[k, int(np.argmin(np.abs(glon + 77.0)))] - 0.5) < 1e-9, "only the three worlds that pass there"
+    assert abs(counts[k, int(np.argmin(np.abs(glon + 75.0)))] - 1.0) < 1e-9, "all six pass the centre"

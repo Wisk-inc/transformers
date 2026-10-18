@@ -18,7 +18,9 @@ plot            maps of the swarm, its worldlines and its impacts
 ==============  ======================================================================================================
 
 It works with :func:`naturev1.cyclone.physics_forecast` (``swarm=N``): the physics consensus stays the best single
-track, and the swarm, re-centred on it, supplies the probabilities around it.
+track, and the swarm, re-centred on it, supplies the probabilities around it. Given a dynamical model's forecast
+steering (:class:`naturev1.cyclone.forecastflow.ForecastFlow`, read from GFS by :mod:`analysis`), the worlds are
+carried through it, which is what makes their recurvature probabilities skilful.
 """
 
 from .core import Swarm, SwarmFields, SwarmForecast, SwarmPriors, classify_tracks, swarm_products

@@ -194,6 +194,31 @@ the track. On Melissa the consensus missed the northward turn. The swarm kept we
 for hurricane-force wind where the storm brought it to most of the island, because a 160 kt Category 5 was forecast
 at 111-125 kt. `molab_swarm_cell.py` is the one-cell molab runbook for live storms.
 
+## 0.13.1: the turns, and rapid intensification
+
+The track now uses a dynamical model's **forecast** winds, the way NHC's Beta and Advection Model does. They come
+from GFS live and from ECMWF HRES in the hindcasts. The model's own storm is removed at every forecast hour. The
+consensus is then blended with the model's own track, one weight per lead. That lets the track see a trough two
+days out, which the analysis cannot. Held-out seasons 2018 and 2020-2022, km:
+
+| lead (h) | 6 | 12 | 24 | 36 | 48 | 72 | 96 | 120 |
+|---|---|---|---|---|---|---|---|---|
+| 0.13.0 consensus | 29 | 59 | 127 | 207 | 301 | 512 | 711 | 874 |
+| HRES's own track | 49 | 60 | 79 | 100 | 123 | 187 | 251 | 326 |
+| **0.13.1 consensus** | **26** | **45** | **72** | **96** | **120** | **184** | **249** | **326** |
+
+On storms that turned by more than 45 degrees, the 72 h error fell from 601 to 209 km. The swarm, steered by the
+same forecast, now gives skilful recurvature probabilities: Brier skill +0.26, up from +0.05. Its loop
+probabilities got worse (−0.25), so treat them as unreliable.
+
+For intensity, a rapid-intensification probability (Brier skill +0.10, AUC 0.81) switches the intensity consensus
+to weights fitted on such storms. That lowers the error by 1-3% overall and by 5-10% when P(RI) ≥ 30%, at 6-36 h.
+
+On Melissa from 27 October, the track now curves north into Jamaica: 55 / 79 / 246 km errors at 36 / 48 / 72 h,
+against 187 / 392 / 892 km before. Every parish gets a 24-47% chance of hurricane-force wind, up from 13-20%. The
+intensity is still far too low (118 kt at 24 h against 155 kt). The live track leans on GFS, which has
+historically erred somewhat more than HRES. Details are in section 4.14 of the model card.
+
 ## Not trained
 
 No weights here have seen real data. The architecture, losses, ingest and training loop are complete and

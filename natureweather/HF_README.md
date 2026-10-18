@@ -52,6 +52,10 @@ pipeline_tag: other
 > The **swarm sandbox** takes satellite fixes minute by minute and maps impacts parish by parish across the whole Caribbean.
 > On unseen seasons its stall probabilities are skilful, its cone is not better than the fixed cone, and on Hurricane
 > Melissa it kept western Jamaica at risk but far too low — [section 4.13](#413-013-the-swarm-sandbox-the-satellite-path-and-caribbean-impacts).
+> **0.13.1** steers the track with a dynamical model's forecast winds (GFS live, HRES in the hindcasts) and blends
+> in the model's own track. Held-out track errors fall by 12% to 65% (72 h: 512 → 184 km), slightly ahead of HRES
+> alone to 72 h. On Melissa the track now curves north into Jamaica, but the intensity is still far too low —
+> [section 4.14](#414-0131-the-turns-and-rapid-intensification).
 
 NatureV1 is an 89-million-parameter model of the atmosphere that forecasts global weather out to five days and,
 for tropical cyclones, where a storm will go, how strong it will get, whether it will intensify rapidly, and
@@ -620,12 +624,97 @@ the best track to then, and the 21 merged satellite, recon, microwave and scatte
   a storm that reached 160 kt: rapid intensification to Category 5 is beyond these statistical models.
 - From 26 October, extrapolation beat the consensus from 12 to 48 h while Melissa crawled.
 
-<img src="melissa_jamaica.png" alt="Melissa 2025 over Jamaica: forecast hurricane-wind probability, best-track swath and forecast rain" width="100%">
+Section 4.14 shows the same forecast after the 0.13.1 upgrade, which fixes the missed turn.
 
 The molab cell (`molab_swarm_cell.py`) runs all of this for every active NHC storm, or replays any storm since
 2021, on one GPU. Research model, not an operational forecast: storm surge is not modelled. Boundaries are from
 geoBoundaries (OpenStreetMap and others; attribution travels with the map) and terrain from the Terrarium tiles
 on AWS Open Data.
+
+### 4.14 0.13.1: the turns, and rapid intensification
+
+A storm turns when its steering changes: a trough digs in, a ridge erodes. The analysis, even with its 12-hour
+trend, cannot see a trough that is still 2,000 km and two days away. A dynamical model's forecast can. 0.13.1
+uses that forecast the way NHC's Beta and Advection Model does, and blends in the model's own track:
+
+- **Forecast-flow member.** The storm is carried through the model's forecast 850-400 hPa winds, every 12 hours
+  to 120 h, plus beta drift and the part of its present motion those winds do not explain. At each forecast hour,
+  the model's own copy of the storm is found in its pressure field and removed from its winds, so the storm is
+  steered by the environment rather than by itself.
+- **Model blend.** The consensus, now with the forecast-flow member, is pulled toward the model's own track by
+  one weight per lead, fitted on the tuning seasons: 0.2 at 6 h, 0.7 at 24 h and 0.9 by day 3. One weight per lead
+  transferred cleanly between seasons. Fifteen free per-member weights did not, at 96-120 h.
+- **Live**, the model is GFS: `GFSAnalysis.forecast_flow` reads its forecast winds and pressure from NOAA's
+  bucket, about 150 MB per storm, cached. **In the hindcasts** it is ECMWF HRES from WeatherBench 2, at
+  1.5 degrees in both cases.
+
+**Track, held-out seasons 2018 and 2020-2022** (4,188 forecasts at 6 h, 1,103 at 120 h; every gain over the old
+consensus has its whole 90% storm-bootstrap interval above zero):
+
+| lead (h) | 6 | 12 | 24 | 36 | 48 | 72 | 96 | 120 |
+|---|---|---|---|---|---|---|---|---|
+| 0.13.0 consensus (km) | 29 | 59 | 127 | 207 | 301 | 512 | 711 | 874 |
+| HRES's own track (km) | 49 | 60 | 79 | 100 | 123 | 187 | 251 | 326 |
+| **0.13.1 consensus (km)** | **26** | **45** | **72** | **96** | **120** | **184** | **249** | **326** |
+| gain over 0.13.0 | 12% | 24% | 43% | 54% | 60% | 64% | 65% | 63% |
+| gain over HRES alone | 48% | 25% | 8% | 4% | 2% | 2% | 1% (n.s.) | 0% (n.s.) |
+
+- **Storms that turned.** On the 561 forecasts whose true track turned by more than 45 degrees between 24 and
+  72 h, errors fell from 131 / 326 / 601 / 1,048 km to 71 / 119 / 209 / 363 km at 24 / 48 / 72 / 120 h.
+- **Cone.** Recalibrated for the new consensus (27 km at 6 h to 413 km at 120 h), it covers 63-70% of held-out
+  positions against a 67% target.
+- **Swarm scenarios.** The swarm's worlds are now steered by the same forecast winds, which markedly improves
+  its scenario probabilities. Measured on 1,200 held-out forecasts (287 storms with a complete 120-hour truth):
+
+  | Brier skill vs climatology | recurve | stall | steady | loop |
+  |---|---|---|---|---|
+  | swarm, analysis steering | +0.05 | +0.09 | +0.01 | +0.01 |
+  | swarm, forecast steering | **+0.26** | **+0.20** | **+0.14** | **−0.25** |
+
+  Recurvature probabilities are now reliable: forecasts of 33% verified 41% of the time, and 63% verified 67%.
+  Loops got worse. The swarm now forecasts them three times too often (6.4% against 2.1% observed), so treat its
+  loop probability as unreliable. The swarm's cone still sizes uncertainty no better than the fixed one (rank
+  correlation with error 0.09-0.22).
+
+**Intensity: a rapid-intensification switch.** A logistic model gives the probability of a 30 kt rise in 24 hours
+from SHIPS-RII-style predictors: recent change, intensity, headroom below potential intensity, shear, humidity,
+ocean heat, latitude and land. On the held-out seasons its Brier skill over climatology is +0.10 and its
+AUC 0.81, and it is reliable up to about 50%. When it reaches 15%, the intensity consensus switches to weights fitted on
+such storms. Those lean on LGEM and a new **trend member**, which carries the last 24 hours' change forward
+with a 24-hour memory, capped at the potential intensity and decayed over land.
+
+On all held-out storms the switch lowers the mean absolute error by 0.9-2.6% from 6 to 72 h, every lead
+significant, and is neutral at 96-120 h. On the 72 forecasts with P(RI) ≥ 30% it lowers the error by 5-10%
+from 6 to 36 h. `physics_forecast` now also returns `ri_probability` and `intensity_regime`.
+
+**Melissa, replayed again** with only what was known at the time:
+
+| track error (km), lead (h) | 6 | 12 | 24 | 36 | 48 | 72 | 96 | 120 |
+|---|---|---|---|---|---|---|---|---|
+| from 27 Oct 00Z, 0.13.0 | 2 | 12 | 35 | 187 | 392 | 892 | 1,834 | 3,383 |
+| from 27 Oct 00Z, **0.13.1** | 5 | 17 | 91 | **55** | **79** | **246** | **369** | **1,011** |
+| from 26 Oct 00Z, 0.13.0 | 14 | 29 | 69 | 149 | 236 | 588 | 992 | 1,794 |
+| from 26 Oct 00Z, **0.13.1** | 17 | 28 | 69 | 140 | 215 | **294** | **394** | **375** |
+
+- **From 27 October**, about 41 hours before landfall, the track now curves north into Jamaica. The forecast puts
+  the storm at 18.0N 78.0W at 36 h, against an actual 17.5N 78.1W.
+- **Parishes.** Every parish now gets a 24-47% chance of hurricane-force wind, up from 13-20%. St Elizabeth,
+  Manchester and Westmoreland are highest. The four parishes the best track gave only tropical-storm winds
+  (St Andrew, St Thomas, Kingston and Portland) are the four lowest.
+- **Rain.** The forecast is 165-261 mm per parish, against a best-track swath of 146-431 mm (it was 110-175 mm in
+  0.13.0).
+- **From 26 October**, extrapolation still wins to 48 h while Melissa crawled, because GFS turned it north too
+  early that day.
+- **Intensity is still missed.** From 26 October, P(RI) was 26% and the rapid weights were used, yet the
+  forecast was 107 kt at 24 h against 125 kt observed, and 100 kt at 48 h against 155. Taking an already intense
+  storm to Category 5 is still beyond these statistical models.
+
+<img src="melissa_jamaica.png" alt="Melissa 2025 over Jamaica from 27 Oct 00Z: hurricane-wind probability in 0.13.0 and 0.13.1, best-track swath, and 0.13.1 rain" width="100%">
+
+**What to keep in mind.** Much of the new track skill comes from a dynamical model: HRES in these hindcasts, GFS
+live. GFS has historically tracked storms somewhat less accurately than HRES, so live errors will likely be
+larger than this table, and the cone may run slightly narrow. Without GFS's forecast, for example if NOAA's
+bucket is unreachable, the forecast falls back to the 0.13.0 consensus and cone, and the run says so.
 
 ## 5. Limitations
 
