@@ -1028,7 +1028,39 @@ they should, and the swarm's shape (its 50% and 90% radii are 0.79 and 1.47 time
 truth's (0.64-0.79 and 1.50-1.66). Before this the swarm was spreading a Jamaica landfall over the whole western
 Caribbean; a world that misses by 300 km at 24 h no longer counts against the parish in its path.
 
-<!-- PENDING 0.15 melissa -->
+**Melissa, replayed cycle by cycle with 0.15.** GFS, GraphCast-GFS and the GEFS mean (the ECMWF mirror is throttled
+from this network); a 20,000-world swarm; each cycle fed the previous cycle's track. What was issued, against what
+happened (landfall near New Hope, Westmoreland, 18.09N 77.97W, about 17 UTC on 28 October at 160 kt; peak 165 kt at
+12 UTC):
+
+| forecast from | before landfall | P(landfall, Jamaica) | centre ashore, median (10-90%) | consensus landfall | intensity then (10-90%) | the RI branch (its probability) | P(peak ≥ cat 4 / cat 5) | track error 24 / 48 / 72 h |
+|---|---|---|---|---|---|---|---|---|
+| 26 Oct 00 UTC | 65 h | 74% | 28 Oct 03 UTC (27 Oct 18 → 28 Oct 15) | 28 Oct 03 UTC, Clarendon | 104 kt (72-140) | 125 kt at landfall, peak 134 (24%) | 63% / 29% | 42 / 158 / 277 km |
+| 26 Oct 12 UTC | 53 h | 80% | 28 Oct 15 UTC (06 → 21) | 28 Oct 13 UTC, St Elizabeth | 110 kt (79-146) | 152 kt, peak 155 (20%) | 100% / 32% | 19 / 57 / 161 km |
+| 27 Oct 00 UTC | 41 h | 76% | 28 Oct 15 UTC (09 → 21) | 28 Oct 14 UTC, St Elizabeth, 18.12N 77.88W | 110 kt (90-133) | 153 kt, peak 162 (8%) | 100% / 23% | 43 / 74 / 215 km |
+
+![Melissa over Jamaica, parish by parish, from 27 October 00 UTC](melissa_landfall.png)
+
+Where it is now right: the landfall point (10 km from the actual at 41 h out), the landfall time (the median two hours
+early with the actual inside a 12-hour band, where 0.14 had put it eight hours early inside a 30-hour band), the
+parish ranking (at 27 Oct 00 UTC the ten parishes the best-track swath gave hurricane-force wind are the top ten by
+P(HU): St Elizabeth 84%, Westmoreland 77%, Manchester 72%, St James 71%, Trelawny 71%, Hanover 64%, Clarendon 56%,
+St Ann 53%, St Catherine 33%, St Mary 20%; the eastern parishes 9-15%; Brier 0.061 against the swath), and the
+landfall probability itself (76% where 0.14 said 41% from the same cycle -- the swarm sized to the cone, 4.16 above).
+Where it is still wrong, said plainly: the consensus intensity, 125 → 116 → 106 kt over the first 48 h against
+135 → 155 → 165 → 105, is the under-forecast of section 4.16's table made flesh -- a storm in the top few percent of
+intensification over the deepest warm water in the basin. The branch that *was* the storm -- 153 kt at landfall,
+peak 162 -- was on the page from 26 October with its probability (24%, 20%, 8%), and the chance of a category-5
+peak sat at 23-32% through all three cycles; a reader of the report had the right scenario and a fair probability
+for it, not a point forecast that said so. Parish timing ran 3-4 hours early (hurricane force into St Elizabeth at
+09:20 UTC, the peak at 13:17, against an eyewall that arrived mid-afternoon), because the consensus moved the storm
+faster than the crawl it actually made. Rain, if hit / wettest cell against the NHC gauge maximum: Manchester
+563 / 747 against 817 mm, St Elizabeth 547 / 787 against 508, Clarendon 483 / 668 against 530, St Catherine
+432 / 593 against 668, Kingston 424 against 567 -- the right magnitude in the centre and south, now that the
+multiplier is in; too much in the far west, where the storm crossed quickest (Westmoreland 689 against 309,
+Hanover 603 against a single gauge at 146), and too little in the east (Portland 397 against 536), because R-CLIPER
+puts the rain under the strongest wind and Melissa's two days of crawling south of the island fed the Blue Mountains
+and St Catherine instead. `melissa_jamaica.png` shows the four releases side by side from 27 October 00 UTC.
 
 ## 5. Limitations
 

@@ -283,7 +283,11 @@ swarm mean that every missing world dilutes. The swarm itself is now sized to th
 consensus they cover 64-75%, with the 50% and 90% radii where they should be, so strike, landfall and parish
 probabilities stop being diluted by worlds that miss by hundreds of km. Full tables in the model card, section 4.16.
 
-<!-- PENDING readme 0.15 melissa -->
+**Melissa, 27 October 00 UTC, 41 hours before landfall:** Jamaica landfall probability 76% (0.14: 41%), the consensus
+ashore at 18.12N 77.88W on 28 October 14 UTC (actual: New Hope, 18.09N 77.97W, about 17 UTC), the swarm's median 15 UTC
+inside a 12-hour band; St Elizabeth 84%, Westmoreland 77%, Manchester 72% for hurricane-force wind, the eastern parishes
+9-15%; 110 kt at landfall with the rapid-intensification branch at 153 kt (actual 160) and a 23% chance of a category-5
+peak; Manchester's wettest cell 747 mm against the 817 mm gauge. ![](melissa_landfall.png)
 
 ## Not trained
 

@@ -102,14 +102,15 @@ def landfall_figure(run: dict, summary: dict, country: str = "Jamaica", extent=N
     if extent is None:
         ii, jj = np.nonzero(np.isin(region.unit, ids))
         extent = (region.lon[jj.min()] - 1.2, region.lon[jj.max()] + 1.2, region.lat[ii.min()] - 1.0, region.lat[ii.max()] + 1.0)
-    fig = plt.figure(figsize=(16, 7.2), constrained_layout=True)
-    gs = GridSpec(1, 2, width_ratios=[1.25, 1.0], figure=fig)
+    # the map on top at full width, the text panel below it: a wide parish table no longer squeezes the map
+    fig = plt.figure(figsize=(15, 12.5))
+    gs = GridSpec(2, 1, height_ratios=[1.0, 0.95], figure=fig, left=0.05, right=0.98, top=0.95, bottom=0.02, hspace=0.08)
     ax = fig.add_subplot(gs[0, 0])
     ax.set_facecolor("#dfe8ee")
     land = np.where(region.land, 1.0, np.nan)
     ax.pcolormesh(region.lon, region.lat, land, cmap="Greys", vmin=0, vmax=4, shading="auto")
     mesh = ax.pcolormesh(region.lon, region.lat, grid, cmap="YlOrRd", vmin=34, vmax=140, shading="auto")
-    fig.colorbar(mesh, ax=ax, shrink=0.75, label="peak sustained wind if hit (kt)")
+    fig.colorbar(mesh, ax=ax, shrink=0.85, pad=0.02, label="peak sustained wind if hit (kt)")
     ax.contour(region.lon, region.lat, np.where(region.land, region.unit, -1), levels=np.arange(-0.5, len(region.names)), colors="k", linewidths=0.3)
     t0 = np.datetime64(run["analysis_time"], "m")
     track = np.vstack([[case.lat, case.lon], result["track"]])
@@ -130,16 +131,16 @@ def landfall_figure(run: dict, summary: dict, country: str = "Jamaica", extent=N
         cells = np.nonzero(region.unit == u)
         if cells[0].size and u in by_unit:
             ax.text(float(region.lon[cells[1]].mean()), float(region.lat[cells[0]].mean()), region.names[u].replace("Saint", "St").split(" Parish")[0],
-                    fontsize=6, ha="center", va="center", color="black")
+                    fontsize=7, ha="center", va="center", color="black")
     ax.set_xlim(extent[0], extent[1]); ax.set_ylim(extent[2], extent[3]); ax.set_aspect(1.0 / np.cos(np.radians(np.mean(extent[2:]))))
-    ax.set_title(f"{case.name or case.storm_id}: {country}, parish by parish -- forecast from {str(t0)[:16].replace('T', ' ')}Z", fontsize=10)
-    ax.legend(loc="lower left", fontsize=7)
-    panel = fig.add_subplot(gs[0, 1])
+    ax.set_title(f"{case.name or case.storm_id}: {country}, parish by parish -- forecast from {str(t0)[:16].replace('T', ' ')}Z", fontsize=12)
+    ax.legend(loc="lower left", fontsize=8)
+    panel = fig.add_subplot(gs[1, 0])
     panel.axis("off")
     from .landfall import format_landfall
 
-    panel.text(0.0, 1.0, format_landfall(summary, top=top), family="monospace", fontsize=7.2, va="top", ha="left", transform=panel.transAxes)
-    panel.text(0.0, 0.0, "Research model, not an operational forecast. Storm surge is not modelled.", fontsize=7, va="bottom", transform=panel.transAxes)
+    panel.text(0.0, 1.0, format_landfall(summary, top=top), family="monospace", fontsize=8.2, va="top", ha="left", transform=panel.transAxes)
+    panel.text(0.0, 0.0, "Research model, not an operational forecast. Storm surge is not modelled.", fontsize=8, va="bottom", transform=panel.transAxes)
     return fig
 
 
