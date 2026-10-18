@@ -50,9 +50,11 @@ def test_landfall_summary_times_the_crossing_and_ranks_the_units():
     assert s["units"] and all(k in s["units"][0] for k in ("peak_gust_kt", "peak_kt_p90", "peak_hour", "hu_arrival_h"))
     u = s["units"][0]
     assert u["peak_gust_kt"] > u["peak_kt"] >= 64.0 and u["peak_kt_p90"] >= u["peak_kt"] - 1e-6
+    assert u["peak_kt_if_hit"] >= u["peak_kt"] - 1e-6 and u["gust_kt_if_hit"] >= u["peak_kt_if_hit"]
     assert np.isfinite(u["hu_arrival_h"]) and u["hu_arrival_h"] >= u["arrival_h"] - 1e-6 and u["peak_hour"] >= u["arrival_h"] - 1e-6
     text = format_landfall(s)
-    assert "centre comes ashore" in text and "peak intensity: 110 kt" in text
+    assert "centre comes ashore" in text and "peak intensity: 110 kt" in text and "peak at (UTC)" in text
+    assert any(line.strip().startswith("Island") or "10-2" in line for line in text.splitlines()[-6:]), "the parish rows carry dates"
     assert "mean_peak_kt" in impact.cell_maps and np.nanmax(impact.cell_maps["mean_peak_kt"]) >= 64.0
 
 

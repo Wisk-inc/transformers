@@ -82,7 +82,7 @@ def impact_figure(run: dict, worldlines: int = 300, scene=None, extent=None):
 
 def landfall_figure(run: dict, summary: dict, country: str = "Jamaica", extent=None, top: int = 14):
     """
-    One country, parish by parish: expected peak sustained wind (colour), the consensus track with its date and hour
+    One country, parish by parish: peak sustained wind given a hit (colour), the consensus track with its date and hour
     every 12 hours, the landfall point, and a panel with when the centre comes ashore (median and 10-90%), the
     intensity then, the peak intensity, and the parishes ranked by peak wind with gust, rain and arrival times.
     """
@@ -96,7 +96,7 @@ def landfall_figure(run: dict, summary: dict, country: str = "Jamaica", extent=N
     value = np.full(len(region.names) + 1, np.nan)
     for u in ids:
         if u in by_unit:
-            value[u] = by_unit[u]["peak_kt"]
+            value[u] = by_unit[u].get("peak_kt_if_hit", by_unit[u]["peak_kt"])
     grid = np.where(region.unit >= 0, value[np.where(region.unit >= 0, region.unit, len(region.names))], np.nan)
     grid = np.where(np.isin(region.unit, ids), grid, np.nan)
     if extent is None:
@@ -109,7 +109,7 @@ def landfall_figure(run: dict, summary: dict, country: str = "Jamaica", extent=N
     land = np.where(region.land, 1.0, np.nan)
     ax.pcolormesh(region.lon, region.lat, land, cmap="Greys", vmin=0, vmax=4, shading="auto")
     mesh = ax.pcolormesh(region.lon, region.lat, grid, cmap="YlOrRd", vmin=34, vmax=140, shading="auto")
-    fig.colorbar(mesh, ax=ax, shrink=0.75, label="expected peak sustained wind (kt)")
+    fig.colorbar(mesh, ax=ax, shrink=0.75, label="peak sustained wind if hit (kt)")
     ax.contour(region.lon, region.lat, np.where(region.land, region.unit, -1), levels=np.arange(-0.5, len(region.names)), colors="k", linewidths=0.3)
     t0 = np.datetime64(run["analysis_time"], "m")
     track = np.vstack([[case.lat, case.lon], result["track"]])

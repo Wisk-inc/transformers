@@ -75,7 +75,8 @@ class ImpactResult:
     region: RegionMap
     units: list                          # one dict per affected unit, sorted by hurricane-wind probability
     cell_maps: dict                      # (H, W) grids: p34, p50, p64, p_gust64, mean_rain_mm, p_rain250, arrival_h
-    #: each unit dict also carries peak_gust_kt, peak_kt_p90 (90th percentile over worlds), peak_hour, hu_arrival_h
+    #: each unit dict also carries peak_gust_kt, peak_kt_p90 (90th percentile over worlds), peak_kt_if_hit and
+    #: gust_kt_if_hit (over the worlds that bring at least tropical-storm force), peak_hour, hu_arrival_h
     particles: int
     hours: np.ndarray
     meta: dict = field(default_factory=dict)
@@ -326,6 +327,10 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
     windy = upeak >= WIND_KT[0]
     unit_acc["hour_sum"] = (wk[:, None] * torch.where(windy, uhour, torch.zeros_like(uhour))).sum(0)
     unit_acc["hour_w"] = (wk[:, None] * windy).sum(0)
+    # the peak given that the unit is hit at all (tropical-storm force): the number a parish plans around, not
+    # diluted by the worlds in which the storm passes elsewhere
+    unit_acc["peak_hit"] = (wk[:, None] * torch.where(windy, upeak, torch.zeros_like(upeak))).sum(0)
+    unit_acc["gust_hit"] = (wk[:, None] * torch.where(windy, ugust, torch.zeros_like(ugust))).sum(0)
     uhu = torch.full((n, n_units), float("inf"), dtype=dt32, device=dev).scatter_reduce(1, unit.expand(n, -1), hu_arrival, reduce="amin", include_self=True)
     hu_reached = torch.isfinite(uhu)
     unit_acc["hu_sum"] = (wk[:, None] * torch.where(hu_reached, uhu, torch.zeros_like(uhu))).sum(0)
@@ -365,6 +370,8 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
                       "p_rain250": ua["p_rain250"][u], "p_flash": ua["p_flash"][u],
                       "arrival_h": ua["arr_sum"][u] / ua["arr_w"][u] if ua["arr_w"][u] > 0.05 else float("nan"),
                       "peak_gust_kt": ua["gust"][u], "peak_kt_p90": ua["peak_p90"][u],
+                      "peak_kt_if_hit": ua["peak_hit"][u] / ua["hour_w"][u] if ua["hour_w"][u] > 0.05 else float("nan"),
+                      "gust_kt_if_hit": ua["gust_hit"][u] / ua["hour_w"][u] if ua["hour_w"][u] > 0.05 else float("nan"),
                       "peak_hour": ua["hour_sum"][u] / ua["hour_w"][u] if ua["hour_w"][u] > 0.05 else float("nan"),
                       "hu_arrival_h": ua["hu_sum"][u] / ua["hu_w"][u] if ua["hu_w"][u] > 0.05 else float("nan")})
     units.sort(key=lambda d: (-d["p64"], -d["p_gust64"], -d["p34"], -d["rain_mm"]))

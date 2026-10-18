@@ -122,17 +122,18 @@ def landfall_summary(region, result: dict, case, impact=None, where="Jamaica", a
         kk = int(np.nanargmax(np.concatenate([[case.wind_kt], kt[good]])))
         ph = np.concatenate([[0.0], leads[good]])[kk]
         out["peak"] = {"intensity_kt": round(float(np.concatenate([[case.wind_kt], kt[good]])[kk]), 0), "hour": float(ph), "time": stamp(ph),
-                       "band_kt": band_at(ph)}
+                       "band_kt": band_at(ph) if ph > 0 else None, "strengthens": bool(ph > 0),
+                       "forecast_max_kt": round(float(np.nanmax(kt)), 0), "forecast_max_time": stamp(leads[good][int(np.nanargmax(kt[good]))])}
     if impact is not None:
         rows = []
         for u in impact.units:
             if u["unit"] in set(ids.tolist()):
                 row = dict(u)
-                for key in ("arrival_h", "hu_arrival_h", "peak_hour"):
+                for key, name in (("arrival_h", "arrival_time"), ("hu_arrival_h", "hu_arrival_time"), ("peak_hour", "peak_time")):
                     if key in row:
-                        row[key.replace("_h", "_time").replace("_hour", "_time")] = stamp(row[key])
+                        row[name] = stamp(row[key])
                 rows.append(row)
-        rows.sort(key=lambda r: (-r.get("peak_kt", 0.0), -r.get("p64", 0.0)))
+        rows.sort(key=lambda r: (-np.nan_to_num(r.get("peak_kt_if_hit", r.get("peak_kt", 0.0))), -r.get("p64", 0.0)))
         out["units"] = rows
     return out
 
@@ -151,16 +152,21 @@ def format_landfall(summary: dict, top: int = 14) -> str:
         lines.append(f"  consensus track: {c['time']} near {c['unit'].split(',')[0]} ({c['lat']}N {abs(c['lon']):.2f}W), "
                      f"{c['intensity_kt']:.0f} kt" + (f" (10-90%: {band[0]:.0f}-{band[1]:.0f} kt)" if band else ""))
     p = s.get("peak")
-    if p:
+    if p and p.get("strengthens", True):
         band = p.get("band_kt")
         lines.append(f"  peak intensity: {p['intensity_kt']:.0f} kt at {p['time']}" + (f" (10-90%: {band[0]:.0f}-{band[1]:.0f} kt)" if band else ""))
+    elif p:
+        lines.append(f"  peak intensity: the storm is at its forecast peak now ({p['intensity_kt']:.0f} kt); the forecast does not strengthen it "
+                     f"(forecast maximum {p['forecast_max_kt']:.0f} kt at {p['forecast_max_time']})")
     if s.get("units"):
-        head = f"  {'parish':22s} {'P(HU)':>6s} {'peak kt':>8s} {'p90 kt':>7s} {'gust kt':>8s} {'rain mm':>8s} {'TS arrives (UTC)':>18s} {'HU arrives (UTC)':>18s} {'peak at (UTC)':>18s}"
+        head = (f"  {'parish':22s} {'P(HU)':>6s} {'peak kt if hit':>14s} {'p90 kt':>7s} {'gust kt if hit':>14s} {'rain mm':>8s} "
+                f"{'TS arrives (UTC)':>17s} {'HU arrives (UTC)':>17s} {'peak at (UTC)':>14s}")
         lines += ["", head, "  " + "-" * (len(head) - 2)]
         for r in s["units"][:top]:
-            lines.append(f"  {r['label'].split(',')[0][:22]:22s} {r['p64']:6.0%} {r['peak_kt']:8.0f} {r.get('peak_kt_p90', float('nan')):7.0f} "
-                         f"{r.get('peak_gust_kt', float('nan')):8.0f} {r['rain_mm']:8.0f} {r.get('arrival_time', '-')[5:16]:>18s} "
-                         f"{r.get('hu_arrival_time', '-')[5:16]:>18s} {r.get('peak_time', '-')[5:16]:>18s}")
+            lines.append(f"  {r['label'].split(',')[0][:22]:22s} {r['p64']:6.0%} {r.get('peak_kt_if_hit', r['peak_kt']):14.0f} {r.get('peak_kt_p90', float('nan')):7.0f} "
+                         f"{r.get('gust_kt_if_hit', r.get('peak_gust_kt', float('nan'))):14.0f} {r['rain_mm']:8.0f} {r.get('arrival_time', '-')[5:16]:>17s} "
+                         f"{r.get('hu_arrival_time', '-')[5:16]:>17s} {r.get('peak_time', '-')[5:16]:>14s}")
+        lines.append("  'if hit' = over the worlds that bring at least tropical-storm force to the parish; p90 = 90th percentile over all worlds")
     return "\n".join(lines)
 
 
