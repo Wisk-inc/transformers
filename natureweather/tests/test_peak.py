@@ -85,3 +85,23 @@ def test_landfall_text_carries_the_peak_probabilities_and_rain_if_hit():
     text = format_landfall(s)
     assert "chance the storm peaks at or above" in text and "category 4 (113 kt) 31%" in text
     assert "rain if hit" in text and "max mm" in text
+
+
+def test_rescaling_the_worlds_about_the_consensus_scales_their_spread_exactly():
+    from naturev1.swarm.core import rescale_worlds
+
+    region, case, result, impact = _island_run(n=100)
+    fc = result["swarm"]["forecast"]
+    leads = np.asarray(LEADS, float)
+    ref = np.asarray(result["track"], float)
+    before_pos, before_track = fc.positions.copy(), fc.track.copy()
+    d0 = np.array([geo.great_circle_km(ref[k, 0], ref[k, 1], fc.positions[:, k, 0], fc.positions[:, k, 1]) for k in range(len(LEADS))])
+    factor = np.array([1.0, 1.0, 0.5, 0.5, 2.0, 1.0, 1.0, 1.0])
+    rescale_worlds(fc, case, ref, LEADS, factor)
+    d1 = np.array([geo.great_circle_km(ref[k, 0], ref[k, 1], fc.positions[:, k, 0], fc.positions[:, k, 1]) for k in range(len(LEADS))])
+    for k in range(len(LEADS)):
+        assert np.allclose(d1[k], factor[k] * d0[k], rtol=1e-3, atol=0.5), f"lead {LEADS[k]}"
+    assert fc.track.shape == before_track.shape and not np.allclose(fc.track, before_track)
+    k0 = list(fc.track_hours).index(0.0)
+    assert np.allclose(fc.track[:, k0], before_track[:, k0]), "nothing moves at the analysis time"
+    assert np.isfinite(fc.positions).all() and np.isfinite(fc.track).all()

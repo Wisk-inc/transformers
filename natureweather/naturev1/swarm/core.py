@@ -704,15 +704,44 @@ class Swarm:
                 "scenarios": {k: v / max(done, 1) for k, v in counts.items()}}
 
 
+def rescale_worlds(fc, case, ref_track: np.ndarray, leads, factor: np.ndarray) -> None:
+    """
+    Scale every world's displacement from ``ref_track`` ``(L, 2)`` by ``factor`` ``(L,)`` per lead, in place -- the
+    positions at the leads and the hourly worldlines (the factor interpolated in time, 1 at the analysis). An affine
+    change about the reference: the worlds keep their shapes and their weights, only their spread changes.
+    """
+    from ..cyclone.geometry import local_displacement_km, move
+
+    factor = np.asarray(factor, np.float64)
+    e, n = local_displacement_km(ref_track[None, :, 0], ref_track[None, :, 1], fc.positions[..., 0], fc.positions[..., 1])
+    la, lo = move(ref_track[None, :, 0], ref_track[None, :, 1], e * factor[None, :], n * factor[None, :])
+    fc.positions = np.stack([la, lo], -1)
+    if getattr(fc, "track", None) is not None:
+        hours = np.concatenate([[0.0], np.asarray(leads, float)])
+        f_h = np.interp(fc.track_hours, hours, np.concatenate([[1.0], factor]))
+        lat_h = np.interp(fc.track_hours, hours, np.concatenate([[case.lat], ref_track[:, 0]]))
+        lon_h = np.degrees(np.interp(fc.track_hours, hours, np.unwrap(np.radians(np.concatenate([[case.lon], ref_track[:, 1]])))))
+        e, n = local_displacement_km(lat_h[None, :], lon_h[None, :], fc.track[..., 0], fc.track[..., 1])
+        la, lo = move(lat_h[None, :], lon_h[None, :], e * f_h[None, :], n * f_h[None, :])
+        fc.track = np.stack([la, lo], -1)
+
+
 def swarm_products(case, ctx, track: np.ndarray, leads, particles: int = 20000, device="cpu", seed: int = 0,
                    grid_step_deg: float = 0.5, strike_radius_km: float = 111.0, fixes: list | None = None,
-                   micro_minutes: float = 15.0, intensity_kt=None, forecast_flow=None) -> dict:
+                   micro_minutes: float = 15.0, intensity_kt=None, forecast_flow=None, target_cone_km=None) -> dict:
     """
     The swarm as the probabilistic half of :func:`naturev1.cyclone.forecast.physics_forecast`: filtered on the last
     day's fixes, then re-centred on ``track`` (the consensus, which stays the best single estimate: on held-out
     seasons the swarm's own mean is worse) so that it contributes what a single track cannot -- how likely each kind
     of future is, where the centre may pass, and a cone whose size is calibrated on past seasons
     (``coefficients.SWARM``, or ``SWARM_FF`` when the worlds are steered by a forecast flow).
+
+    ``target_cone_km`` (per lead) sharpens or widens the swarm to a cone sized for *this* forecast: the worlds'
+    displacements about the consensus are rescaled per lead so the swarm's 67% radius equals it (clipped to 0.5-1.5
+    times the swarm's own). With the flow-dependent cone (``CONE_FLOW``, verified on held-out seasons) the swarm is
+    tight when the models agree and wide when they do not, and every product built on the worlds -- strike
+    probabilities, landfall timing and probability, the parish numbers -- sharpens with it. The scenario
+    probabilities are read before the rescaling (they are about the worlds' shapes).
     """
     from ..cyclone import coefficients
 
@@ -750,12 +779,26 @@ def swarm_products(case, ctx, track: np.ndarray, leads, particles: int = 20000, 
             hours = np.concatenate([[0.0], np.asarray(leads, float)])
             full = np.concatenate([[[0.0, 0.0]], shift])
             fc.track = fc.track + np.stack([np.interp(fc.track_hours, hours, full[:, i]) for i in range(2)], -1)[None]
+    scenarios = fc.scenarios()
     spread = np.array([_weighted_quantile(fc.distances_km()[:, k], fc.weights, 0.67) for k in range(len(leads))])
     scale = np.interp(np.asarray(leads, float), table.get("leads", list(leads)), table.get("cone_scale", np.ones(len(leads))))
+    sharpen = np.ones(len(leads))
+    cone = scale * spread
+    if target_cone_km is not None and good.any():
+        # the worlds' raw spread is wider than the truth distribution (that is what cone_scale < 1 says), and it is the
+        # raw positions that make the strike, landfall and parish probabilities: rescale them so the swarm's own 67%
+        # radius about the consensus equals the cone sized for this forecast
+        target = np.asarray(target_cone_km, np.float64)
+        ok = np.isfinite(target) & np.isfinite(spread) & (spread > 1.0) & good
+        sharpen[ok] = np.clip(target[ok] / spread[ok], 0.2, 2.0)
+        ref = np.where(good[:, None], track, raw_mean)
+        rescale_worlds(fc, case, ref, leads, sharpen)
+        spread = np.array([_weighted_quantile(fc.distances_km()[:, k], fc.weights, 0.67) for k in range(len(leads))])
+        cone = np.where(ok, spread, scale * spread)
     lat_c, lon_c = float(np.nanmean(fc.positions[..., 0])), float(np.nanmean(fc.positions[..., 1]))
     glat = np.arange(np.floor(lat_c) - 15.0, np.floor(lat_c) + 15.0 + 1e-9, grid_step_deg)
     glon = np.arange(np.floor(lon_c) - 25.0, np.floor(lon_c) + 25.0 + 1e-9, grid_step_deg)
-    return {"forecast": fc, "raw_mean_track": raw_mean, "cone_km": scale * spread, "scenarios": fc.scenarios(),
+    return {"forecast": fc, "raw_mean_track": raw_mean, "cone_km": cone, "scenarios": scenarios, "sharpen": sharpen,
             "strike_probability": fc.strike_probability(glat, glon, strike_radius_km), "grid_lat": glat,
             "grid_lon": wrap_longitude(glon), "filter": list(sw.history)}
 
@@ -865,4 +908,5 @@ def _strike_counts(track: np.ndarray, glat: np.ndarray, glon: np.ndarray, radius
 
 
 __all__ = ["SPEED_CAP_MS", "Swarm", "SwarmFields", "SwarmForecast", "SwarmPriors", "classify_tracks", "depth_for_wind",
+           "rescale_worlds",
            "swarm_products"]

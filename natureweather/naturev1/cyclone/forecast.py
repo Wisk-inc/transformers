@@ -120,9 +120,11 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
     if swarm and ctx is not None:
         from ..swarm.core import swarm_products
 
+        # the swarm sized to this forecast's own cone where the flow-dependent cone could be made
         result["swarm"] = swarm_products(case, ctx, track, leads, particles=int(swarm), fixes=swarm_fixes,
                                          intensity_kt=result.get("intensity"), device=swarm_device,
-                                         forecast_flow=forecast_flow)
+                                         forecast_flow=forecast_flow,
+                                         target_cone_km=result.get("cone_km") if "cone_predictors" in result else None)
     return result
 
 

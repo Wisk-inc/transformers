@@ -92,8 +92,6 @@ def landfall_summary(region, result: dict, case, impact=None, where="Jamaica", a
     kt = np.asarray(result.get("intensity", np.full(leads.size, np.nan)), float)
     good = np.isfinite(kt)
     ikt = lambda h: float(np.interp(h, np.concatenate([[0.0], leads[good]]), np.concatenate([[case.wind_kt], kt[good]]))) if good.any() else float("nan")
-    cat = result.get("category_probability")
-    band = None
     spread = None
     try:
         from ..cyclone import coefficients

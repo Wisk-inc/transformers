@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import numpy as np
-import torch
 
 from naturev1.cyclone import geometry as geo
 from naturev1.cyclone.consensus import blend_with_model
