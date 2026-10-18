@@ -56,6 +56,10 @@ pipeline_tag: other
 > in the model's own track. Held-out track errors fall by 12% to 65% (72 h: 512 → 184 km), slightly ahead of HRES
 > alone to 72 h. On Melissa the track now curves north into Jamaica, but the intensity is still far too low —
 > [section 4.14](#414-0131-the-turns-and-rapid-intensification).
+> **0.14** blends the consensus with the equal-weight mean of several models (live: GFS, ECMWF IFS and AIFS,
+> GraphCast-GFS, GEFS), which cuts held-out errors another 11% at 24 h and 19-23% at 48-120 h (72 h: 142 km), sizes
+> the cone per forecast, and makes the swarm's worlds each follow one model —
+> [section 4.15](#415-014-several-models-at-once-a-cone-sized-per-forecast-and-a-quieter-swarm).
 
 NatureV1 is an 89-million-parameter model of the atmosphere that forecasts global weather out to five days and,
 for tropical cyclones, where a storm will go, how strong it will get, whether it will intensify rapidly, and
@@ -715,6 +719,59 @@ from 6 to 36 h. `physics_forecast` now also returns `ri_probability` and `intens
 live. GFS has historically tracked storms somewhat less accurately than HRES, so live errors will likely be
 larger than this table, and the cone may run slightly narrow. Without GFS's forecast, for example if NOAA's
 bucket is unreachable, the forecast falls back to the 0.13.0 consensus and cone, and the run says so.
+
+### 4.15 0.14: several models at once, a cone sized per forecast, and a quieter swarm
+
+**Why the long-range errors were what they were.** After 0.13.1 the consensus had become, from 72 h on, essentially
+the one model it was blended with (HRES in the hindcasts, GFS live): 184 / 249 / 326 km at 72 / 96 / 120 h against
+HRES's own 187 / 251 / 326. One model's error is the floor you reach that way. Two ideas that sounded right were
+measured and turned out wrong, so they are not in the release: anchoring the model's track to the observed
+position (NHC's "interpolated" models) made the blend worse at 6-24 h on the held-out seasons, because it makes the
+model's short-range error correlated with the physics consensus's and the averaging benefit disappears; and
+shrinking the model's weight when it disagrees with the forecast-flow member was worse at every lead, because when
+they disagree the model is still the better of the two.
+
+What does work is the oldest result in track forecasting: several independent models, averaged with equal weight.
+
+**Held-out seasons 2018 and 2020-2022, forecasts with at least two archived models** (4,205 of 4,447; the models are
+HRES, Pangu-Weather, GraphCast, FuXi, Aurora and FGN, whichever WeatherBench 2 holds for the date; no weight fitted
+to them):
+
+| lead (h) | 6 | 12 | 24 | 36 | 48 | 72 | 96 | 120 |
+|---|---|---|---|---|---|---|---|---|
+| 0.13.1: consensus blended with HRES (km) | 26 | 45 | 72 | 96 | 120 | 184 | 249 | 326 |
+| equal-weight model mean alone (km) | 44 | 51 | 64 | 79 | 93 | 140 | 195 | 256 |
+| **0.14: consensus blended with the model mean (km)** | **25** | **42** | **64** | **81** | **96** | **142** | **200** | **263** |
+
+Every gain from 24 h on has its whole 90% storm-bootstrap interval above zero. The physics still earns its place
+at 6-12 h, where it beats the models' mean by 18-43%; from 24 h on the forecast is mostly the models' mean. That is
+the honest shape of it: the physics knows the next day, the models know the week.
+
+**Live, the models are** GFS, ECMWF IFS and AIFS Single (ECMWF open data, CC-BY-4.0), NOAA's GraphCast-GFS and
+the GEFS ensemble mean (with its spread as a diagnostic), each read by byte range from its public bucket into the
+same 1.5-degree boxes the physics was fitted on (`naturev1.swarm.models`). Any model not yet published for a
+cycle is skipped. For replays older than about four days the ECMWF models come from the AWS mirror, which
+throttled every request from this session's network, so the Melissa replay below uses the three NOAA models.
+
+**A cone sized for this forecast.** The cone is now a regression of the consensus's error on how far the physics
+members spread, how far the model mean sits from the physics consensus, how far the forecast-flow member sits from
+the model, the storm's speed, latitude and intensity (Goerss's GPCE idea), fitted on the tuning seasons and scaled
+to 67% coverage. On the held-out seasons its radius ranks the actual errors with a correlation of 0.17-0.38 (the
+fixed cone, by construction, 0; the swarm's own spread 0.09-0.22) at 64-71% coverage, about 5-10% wider on average
+than the fixed cone it replaces. The fixed cone is still returned alongside it.
+
+**The swarm, quieter.** With forecast steering the swarm's spread had been three times the consensus's error at
+72-120 h (its cone needed scaling by 0.27-0.34), and that excess motion is what made it forecast loops three times
+too often. The steering perturbations were sized for persisted analysis winds, which err far more than a model's
+forecast winds. Cutting the steering-error and residual perturbations to a quarter brought the swarm's 67% spread
+to within 12-24% of the error at every lead on the tuning seasons and raised every scenario's skill there.
+<!-- PENDING swarm held-out -->
+Each world now also follows **one model's forecast winds**, drawn with equal probability, so the swarm's futures
+carry the disagreement between models the way an ensemble does.
+
+<!-- PENDING intensity -->
+
+<!-- PENDING melissa -->
 
 ## 5. Limitations
 

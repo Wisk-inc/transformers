@@ -18,7 +18,7 @@ from .data import LEADS
 
 def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, intensity: bool = True,
                      swarm: int = 0, swarm_fixes: list | None = None, swarm_device="cpu", forecast_flow=None,
-                     model_track=None) -> dict:
+                     model_track=None, model_extras=None) -> dict:
     """
     Args:
         case: a :class:`naturev1.cyclone.data.Case` (position, intensity and the last 48 hours of best track; no
@@ -38,13 +38,16 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
             storm at ``leads`` (one ``(L, 2)`` or ``{name: track}``): they add the ``fflow`` and ``model`` members
             (equal-weight means over the models; the consensus fitted with them is blended with the models' mean
             track) and steer the swarm's worlds, each world following one model.
+        model_extras: the models' ``extras`` from :func:`naturev1.swarm.models.fetch_models` (``{name: extras}``):
+            their central-pressure deepening feeds the rapid-intensification probability and the model-trend
+            intensity member.
 
     Returns:
         ``{"leads", "track" (L, 2), "members": {name: (L, 2)}, "cone_km" (L,), "regime", "stall", "ridge",
         "shear", "intensity_kt": {member: (L,)}, "intensity" (L,), "ri_probability" (P(+30 kt in 24 h)),
-        "intensity_regime" ("rapid" when the rapid-intensification weights were used), "cone_fixed_km" and
-        "model_spread_km" (with models: the climatological cone behind the flow-dependent one, and the models'
-        disagreement)}``.
+        "intensity_regime" ("rapid" when the rapid-intensification weights were used), "category_probability"
+        (P(>= 64 / 96 / 113 / 137 kt) per lead), "cone_fixed_km", "model_spread_km" and "model_deepening_hpa" (with
+        models: the climatological cone behind the flow-dependent one, the models' disagreement, their deepening)}``.
     """
     from .consensus import apply_consensus
     from .members import run_members
@@ -99,7 +102,7 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
                        "regime": classify(case, stall, ridge), "shear": shear_diagnostics(ctx.clean, case.lat, case.lon, ctx.motion),
                        "outer_strength_ms": ctx.outer_ms})
     if intensity:
-        result.update(_intensity(case, env, ctx, track, leads))
+        result.update(_intensity(case, env, ctx, track, leads, model_extras))
     if swarm and ctx is not None:
         from ..swarm.core import swarm_products
 
@@ -134,8 +137,9 @@ def consensus_table(members: dict) -> dict:
     return {**getattr(coefficients, name), "name": name}
 
 
-def _intensity(case, env, ctx, track, leads) -> dict:
-    from .intensity import (decay_along, environment_along_track, lgem_intensity, ri_probability, shifor_intensity,
+def _intensity(case, env, ctx, track, leads, model_extras=None) -> dict:
+    from .intensity import (category_probabilities, decay_along, environment_along_track, lgem_intensity,
+                            model_deficit_change, model_trend_intensity, ri_probability, shifor_intensity,
                             trend_intensity)
 
     members = {"persistence": np.full(len(leads), case.wind_kt)}
@@ -153,7 +157,12 @@ def _intensity(case, env, ctx, track, leads) -> dict:
     members["decay_shifor"] = decay_along(case, along, leads, np.nan_to_num(shifor, nan=case.wind_kt))
     members["lgem"] = lgem_intensity(case, along, leads)
     members["trend"] = trend_intensity(case, along, leads)
+    model_dp = model_deficit_change(model_extras, leads)
     extra = {}
+    if model_dp is not None and np.isfinite(model_dp).any():
+        # the dynamical models' own deepening, as an intensity member and (below) as a rapid-intensification predictor
+        members["mdl"] = model_trend_intensity(case, along, leads, model_dp)
+        extra["model_deepening_hpa"] = model_dp
     try:
         from .coefficients import INTENSITY_CONSENSUS
         from .intensity import ships_intensity
@@ -164,17 +173,22 @@ def _intensity(case, env, ctx, track, leads) -> dict:
         if regime is not None:
             # A storm primed for rapid intensification gets the weights fitted on such storms: they lean on LGEM and
             # the trend, and correct the consensus's habit of pulling an intensifying storm back toward the mean.
-            p = ri_probability(case, along)
-            extra = {"ri_probability": p, "intensity_regime": "rapid" if p >= regime["cut"] else "normal"}
+            p = ri_probability(case, along, model_dp=model_dp)
+            extra.update({"ri_probability": p, "intensity_regime": "rapid" if p >= regime["cut"] else "normal"})
             if p >= regime["cut"]:
                 table = {**table, "weights": regime["weights"], "bias": regime["bias"]}
         weights = np.asarray(table["weights"], np.float64)                      # (L, members)
-        stack = np.stack([members[n] for n in table["members"]], -1)
+        nan = np.full(len(leads), np.nan)
+        stack = np.stack([members.get(n, nan) for n in table["members"]], -1)   # a member without its model: dropped
         blended = (np.nan_to_num(stack) * weights).sum(-1) / np.maximum((np.isfinite(stack) * weights).sum(-1), 1e-9)
         blended = blended + np.asarray(table.get("bias", np.zeros(len(leads))), np.float64)
     except ImportError:
         blended = np.nanmean(np.stack([members["decay_shifor"], members["lgem"]]), 0)
-    return {"intensity_kt": members, "intensity": np.clip(blended, 15.0, 200.0), "environment": along, **extra}
+    intensity = np.clip(blended, 15.0, 200.0)
+    categories = category_probabilities(intensity, extra.get("intensity_regime", "normal"))
+    if categories:
+        extra["category_probability"] = categories
+    return {"intensity_kt": members, "intensity": intensity, "environment": along, **extra}
 
 
 __all__ = ["consensus_table", "physics_forecast"]

@@ -157,3 +157,30 @@ def test_physics_forecast_uses_the_forecast_flow_consensus_and_leans_on_the_mode
     k120 = LEADS.index(120)
     assert geo.great_circle_km(*steered["track"][k120], *model[k120]) < 0.3 * geo.great_circle_km(*plain["track"][k120], *model[k120])
     assert np.isfinite(steered["members"]["fflow"]).all()
+
+
+def test_model_deepening_feeds_the_intensity_member_and_the_ri_probability():
+    from naturev1.cyclone.intensity import (RI_FEATURES, category_probabilities, model_deficit_change,
+                                            model_trend_intensity, ri_probability)
+
+    hours = np.array([0, 6, 12, 24, 36, 48, 60, 72, 84, 96, 108, 120], float)
+    deep = {"hours": hours, "msl_min_hpa": 1000.0 - 1.0 * hours, "msl_env_hpa": np.full(hours.size, 1012.0)}   # 24 hPa by 24 h
+    flat = {"hours": hours, "msl_min_hpa": np.full(hours.size, 1000.0), "msl_env_hpa": np.full(hours.size, 1012.0)}
+    dp = model_deficit_change({"a": {"extras": deep}, "b": flat}, LEADS)
+    k24 = LEADS.index(24)
+    assert abs(dp[k24] + 12.0) < 1e-9, "the mean of a 24 hPa deepening and none"
+    assert model_deficit_change(None, LEADS) is None
+    case = _intensifying(rise_kt=10.0, wind=80.0)
+    table = {"leads": list(LEADS), "kt_per_hpa": [1.5] * len(LEADS)}
+    v = model_trend_intensity(case, _along(pi=150.0), LEADS, dp, table)
+    assert abs(v[k24] - (80.0 + 1.5 * 12.0)) < 1e-6 and np.all(v <= 150.0 + 1e-9)
+    weights = [0.0] * len(RI_FEATURES) + [2.0, 0.0, 0.0]
+    weights[0] = -2.0
+    ri = {"weights": weights, "base_rate": 0.1}
+    with_model = ri_probability(case, _along(), ri, model_dp=dp)
+    without = ri_probability(case, _along(), ri)
+    assert without < 0.2 and with_model > without, "a deepening model raises P(RI); no model counts as none"
+    spread = {"quantiles": {"normal": [[-10.0, 0.0, 10.0]] * len(LEADS), "rapid": [[0.0, 10.0, 20.0]] * len(LEADS)}, "thresholds_kt": [64, 96]}
+    normal = category_probabilities(np.full(len(LEADS), 90.0), "normal", spread)["probability"]
+    rapid = category_probabilities(np.full(len(LEADS), 90.0), "rapid", spread)["probability"]
+    assert normal.shape == (len(LEADS), 2) and abs(normal[0, 1] - 1 / 3) < 1e-9 and abs(rapid[0, 1] - 2 / 3) < 1e-9

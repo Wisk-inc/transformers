@@ -219,6 +219,25 @@ against 187 / 392 / 892 km before. Every parish gets a 24-47% chance of hurrican
 intensity is still far too low (118 kt at 24 h against 155 kt). The live track leans on GFS, which has
 historically erred somewhat more than HRES. Details are in section 4.14 of the model card.
 
+## 0.14: several models at once, a cone sized per forecast, a quieter swarm
+
+The consensus is now blended with the **equal-weight mean of several models' tracks**, not one model's. Live they
+are GFS, ECMWF IFS and AIFS (open data), GraphCast-GFS and the GEFS mean, each read by byte range from its public
+bucket (`naturev1.swarm.models`); any model not yet published is skipped. On the held-out seasons, with the
+archived models WeatherBench 2 holds (HRES, Pangu, GraphCast, FuXi, Aurora, FGN) and no weight fitted to them:
+
+| lead (h) | 6 | 12 | 24 | 36 | 48 | 72 | 96 | 120 |
+|---|---|---|---|---|---|---|---|---|
+| 0.13.1, one model | 26 | 45 | 72 | 96 | 120 | 184 | 249 | 326 |
+| **0.14, the models' mean** | **25** | **42** | **64** | **81** | **96** | **142** | **200** | **263** |
+
+Also: a cone sized per forecast from member spread, model disagreement, speed, latitude and intensity (held-out
+rank correlation with the error 0.17-0.38, the fixed cone 0); the swarm's perturbations cut to a quarter under
+forecast steering (its spread had been three times the error, which over-forecast loops), and each world follows
+one model's forecast winds. Two ideas measured and rejected: anchoring the model track to the observed position,
+and shrinking the model's weight when it disagrees with the physics.
+<!-- PENDING readme 0.14 -->
+
 ## Not trained
 
 No weights here have seen real data. The architecture, losses, ingest and training loop are complete and

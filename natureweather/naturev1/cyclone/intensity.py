@@ -378,18 +378,100 @@ def trend_intensity(case, along: dict, leads, tau_h: float | None = None) -> np.
 RI_FEATURES = ("one", "dv12", "dv24", "wind", "headroom", "shear", "rh", "sst", "lat", "land24")
 
 
-def ri_features(case, along: dict) -> np.ndarray:
-    """SHIPS-RII-style predictors over the first 24 hours along the forecast track."""
+#: With a dynamical model's forecast: its central-pressure deficit change by 24 and 48 h, and whether it was there.
+RI_MODEL_FEATURES = ("model_dp24", "model_dp48", "has_model")
+
+
+def ri_features(case, along: dict, model_dp=None) -> np.ndarray:
+    """
+    SHIPS-RII-style predictors over the first 24 hours along the forecast track; with ``model_dp`` (the models' mean
+    change in central-pressure deficit at the standard leads, hPa, negative = deepening, from
+    :func:`model_deficit_change`) three more: the deepening by 24 h, by 48 h, and that a model was there.
+    """
     h = along["hours"]
     six = along["six_hours"]
     first = six <= 24.0 + 1e-9
     pi = float(np.nanmean(np.asarray(along["pi_kt"])[first]))
     dv12, dv24 = recent_change(case, 12), recent_change(case, 24)
-    return np.array([1.0, np.nan_to_num(dv12) / 10.0, np.nan_to_num(dv24) / 10.0, case.wind_kt / 50.0,
+    base = np.array([1.0, np.nan_to_num(dv12) / 10.0, np.nan_to_num(dv24) / 10.0, case.wind_kt / 50.0,
                      (pi - case.wind_kt) / 50.0, float(np.nanmean(np.asarray(along["shear_ms"])[first])) / 10.0,
                      float(np.nanmean(np.asarray(along["rh_mid"])[first])),
                      (float(np.nanmean(np.asarray(along["sst_eff_k"])[h <= 24.0])) - 301.65) / 2.0,
                      abs(case.lat) / 20.0, float(np.mean(np.asarray(along["land"])[h <= 24.0]))])
+    if model_dp is None:
+        return base
+    from .data import LEADS
+
+    dp = np.asarray(model_dp, np.float64)
+    k24, k48 = list(LEADS).index(24), list(LEADS).index(48)
+    have = np.isfinite(dp[k24])
+    return np.concatenate([base, [np.nan_to_num(-dp[k24]) / 10.0 if have else 0.0, np.nan_to_num(-dp[k48]) / 20.0 if have else 0.0, float(have)]])
+
+
+def model_deficit_change(extras: dict | list | None, leads) -> np.ndarray | None:
+    """
+    ``(L,)`` the models' mean change in central-pressure deficit (central minus environmental pressure, hPa) from
+    the analysis to each lead -- negative when the model deepens its storm -- from the ``extras`` of
+    :func:`naturev1.swarm.models.fetch_models` (each with ``hours``, ``msl_min_hpa``, ``msl_env_hpa``). None without any.
+    """
+    if not extras:
+        return None
+    rows = []
+    for e in (extras.values() if isinstance(extras, dict) else extras):
+        e = e.get("extras", e)
+        hours, pmin, penv = np.asarray(e["hours"], float), np.asarray(e["msl_min_hpa"], float), np.asarray(e["msl_env_hpa"], float)
+        deficit = pmin - penv
+        if hours.size == 0 or not np.isfinite(deficit[0]):
+            continue
+        at = np.array([deficit[np.argmin(np.abs(hours - h))] if np.any(np.abs(hours - h) < 1e-6) else np.nan for h in leads])
+        rows.append(at - deficit[0])
+    if not rows:
+        return None
+    return np.nanmean(np.stack(rows), axis=0) if len(rows) > 1 else rows[0]
+
+
+def model_trend_intensity(case, along: dict, leads, model_dp, table: dict | None = None) -> np.ndarray:
+    """
+    The dynamical models' own intensification, as an intensity member: ``V0 + k_lead * deepening`` (kt per hPa of
+    central-pressure-deficit change fitted per lead on the tuning seasons, ``coefficients.MODEL_INTENSITY``), capped
+    at the potential intensity, then land and terrain decay. A model that deepens its storm by 30 hPa is saying
+    something the statistical members cannot.
+    """
+    if table is None:
+        from . import coefficients
+
+        table = getattr(coefficients, "MODEL_INTENSITY", None) or {"leads": list(leads), "kt_per_hpa": [1.0] * len(leads)}
+    hours = along["hours"]
+    k = np.interp(np.asarray(leads, float), table["leads"], table["kt_per_hpa"])
+    dp = np.asarray(model_dp, np.float64)
+    water = case.wind_kt + k * (-np.nan_to_num(dp))
+    pi = np.interp(np.asarray(leads, float), along["six_hours"], along["pi_kt"])
+    water = np.where(np.isfinite(dp), np.minimum(water, np.maximum(pi, case.wind_kt)), np.nan)
+    knots = np.concatenate([[0.0], np.asarray(leads, float)])
+    path = np.interp(hours, knots, np.concatenate([[case.wind_kt], np.nan_to_num(water, nan=case.wind_kt)]))
+    path = apply_land_decay(hours, np.maximum(path, 15.0), along["land"], along["height_m"])
+    return np.where(np.isfinite(water), np.interp(np.asarray(leads, float), hours, path), np.nan)
+
+
+def category_probabilities(intensity: np.ndarray, regime: str, table: dict | None = None) -> dict:
+    """
+    ``{"thresholds_kt": [...], "probability": (L, T)}`` -- P(intensity >= each threshold) at each lead, from the
+    forecast plus the empirical distribution of the consensus's out-of-sample errors on the tuning seasons
+    (``coefficients.INTENSITY_SPREAD``: 25 quantiles per lead, separately for the normal and the rapid regime).
+    """
+    if table is None:
+        from . import coefficients
+
+        table = getattr(coefficients, "INTENSITY_SPREAD", None)
+    if table is None:
+        return {}
+    q = np.asarray(table["quantiles"].get(regime, table["quantiles"]["normal"]), np.float64)        # (L, 25)
+    thresholds = np.asarray(table.get("thresholds_kt", (64, 96, 113, 137)), np.float64)
+    v = np.asarray(intensity, np.float64)
+    samples = v[:, None] + q                                                                        # (L, 25)
+    prob = np.stack([(samples >= t).mean(1) for t in thresholds], -1)
+    prob[~np.isfinite(v)] = np.nan
+    return {"thresholds_kt": thresholds.tolist(), "probability": prob}
 
 
 def fit_ri(cases, alongs: list, threshold_kt: float = 30.0, l2: float = 1e-2, iterations: int = 30) -> dict:
@@ -417,17 +499,22 @@ def fit_ri(cases, alongs: list, threshold_kt: float = 30.0, l2: float = 1e-2, it
             "base_rate": float(y.mean()), "cases": int(len(y))}
 
 
-def ri_probability(case, along: dict, table: dict | None = None) -> float:
-    """P(+30 kt in 24 h) for a storm on its forecast track (``coefficients.RI`` by default)."""
+def ri_probability(case, along: dict, table: dict | None = None, model_dp=None) -> float:
+    """P(+30 kt in 24 h) for a storm on its forecast track (``coefficients.RI`` by default; a table fitted with the
+    model-deepening predictors uses them when ``model_dp`` is given, and counts the model as absent otherwise)."""
     if table is None:
         from .coefficients import RI as table
-    f = ri_features(case, along)
+    w = np.asarray(table["weights"], np.float64)
+    f = ri_features(case, along, model_dp if w.size > len(RI_FEATURES) else None)
+    if w.size > f.size:                                     # a table with model predictors, no model here
+        f = np.concatenate([f, np.zeros(w.size - f.size)])
     if not np.isfinite(f).all():
         return float(table.get("base_rate", 0.05))
-    return float(1.0 / (1.0 + np.exp(-np.asarray(table["weights"]) @ f)))
+    return float(1.0 / (1.0 + np.exp(-w @ f)))
 
 
-__all__ = ["LGEM_KAPPA", "RI_FEATURES", "SHIFOR_PREDICTORS", "SHIPS_PREDICTORS", "TREND_TAU_H", "decay_along",
-           "environment_along_track", "fit_ri", "recent_change", "ri_features", "ri_probability", "trend_intensity",
+__all__ = ["LGEM_KAPPA", "RI_FEATURES", "RI_MODEL_FEATURES", "SHIFOR_PREDICTORS", "SHIPS_PREDICTORS", "TREND_TAU_H",
+           "category_probabilities", "decay_along", "environment_along_track", "fit_ri", "model_deficit_change",
+           "model_trend_intensity", "recent_change", "ri_features", "ri_probability", "trend_intensity",
            "fit_lgem", "fit_shifor", "fit_ships", "lgem_batch", "lgem_intensity", "lgem_table", "potential_intensity_at", "shifor_intensity",
            "shifor_predictors", "ships_intensity", "ships_predictors"]

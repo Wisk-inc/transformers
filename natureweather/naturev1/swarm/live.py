@@ -94,7 +94,8 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
         else:
             log("no model forecast could be read; going ahead on the analysis alone")
     result = physics_forecast(case, env, climatology, analogs, swarm=particles, swarm_fixes=before or None,
-                              swarm_device=device, forecast_flow=flows, model_track=tracks)
+                              swarm_device=device, forecast_flow=flows, model_track=tracks,
+                              model_extras={k: v["extras"] for k, v in read.items()} or None)
     model_track = model_mean(case, tracks, result["leads"]) if tracks else None
     after, ess_after = [], None
     if not archive and fdeck:
