@@ -153,6 +153,9 @@ forecasts, 407 storms, every basin; storm-bootstrap 90% intervals):
 | **physics consensus** | **29** | **59** | **127** | **301** | **515** | **884** |
 | GraphCast (2018, 2020 only) | 49 | 54 | 67 | 102 | 162 | 296 |
 
+Intensity (SHIFOR + SHIPS-style + logistic growth, blended per lead): mean absolute error 4/6/11/14/17/20/21/22 kt
+at 6-120 h against persistence's 4/8/14/19/23/28/31/32 -- +14% to +31%, every interval clear of zero.
+
 It beats extrapolation and CLIPER at every lead, and loses to every modern global model (GraphCast, Pangu, HRES,
 Aurora, FGN/WeatherNext 2, FuXi, GenCast) past 6 hours; combined with one of them, lead by lead, it is never worse
 than that model and better at 6-12 hours. Genesis: 68% of formations flagged a median 24 hours ahead (52% false
@@ -168,6 +171,28 @@ teacher into NatureV1's space), `naturev1.assimilation` (bias correction, qualit
 interpolation for live inputs), `naturev1.highres` (decoding the latent mesh at 0.25 degrees), and
 `molab_naturev1.py`, the runbook for one 96 GB GPU. Distillation and the 0.25-degree decoder are tested on CPU,
 not yet trained.
+
+## 0.13: the swarm sandbox, the satellite path and Caribbean impacts
+
+`naturev1.swarm` (idea: Nathan) runs alongside the physics. It is a particle filter over possible futures. Each
+world is a 4D worldline (longitude, latitude, steering depth, time) with its own physics, integrated in micro-segments
+and re-weighted minute by minute by NHC's satellite, recon and radar centre fixes. Its wind and rain are then painted
+onto every parish, province and district of the Caribbean: 309 units, with terrain.
+
+```python
+from naturev1.swarm.geography import CARIBBEAN, RegionMap
+from naturev1.swarm.live import forecast_storm
+region = RegionMap.build(CARIBBEAN)                                   # once; cached
+run = forecast_storm("al132025", when="2025-10-27T00", archive=True,  # Melissa as it was known then
+                     particles=100_000, region=region)
+print(run["impact"].table())                                          # parish-by-parish probabilities
+```
+
+On unseen seasons, its stall probabilities are skilful (Brier +0.08 over climatology) and its loop probabilities are
+reliable. Its cone is not better than the fixed one, and its own mean track is worse than the consensus, which stays
+the track. On Melissa the consensus missed the northward turn. The swarm kept western Jamaica at risk, but at 13-20%
+for hurricane-force wind where the storm brought it to most of the island, because a 160 kt Category 5 was forecast
+at 111-125 kt. `molab_swarm_cell.py` is the one-cell molab runbook for live storms.
 
 ## Not trained
 

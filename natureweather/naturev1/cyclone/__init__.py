@@ -43,7 +43,8 @@ pouch                       the wave-relative marsupial pouch
 synthetic                   Dorian-type and other hard scenarios with known truth, and balanced vortex implants
 fit / coefficients          the constants, fitted once on disjoint data and shipped as code
 benchmark                   the hindcast benchmark and its report
-forecast                    :func:`physics_forecast`, everything in one call
+forecast                    :func:`physics_forecast`, everything in one call (``swarm=N`` adds
+                            :mod:`naturev1.swarm`, which works alongside it)
 ==========================  =================================================================================
 """
 

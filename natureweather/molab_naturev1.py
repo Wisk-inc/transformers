@@ -19,6 +19,8 @@
 #    9  0.25-degree decoder (GPU, optional)    budget   learned downscaling of every forecast to 0.25 degrees
 #   10  publish                                minutes  only if the new model beat the old one
 #
+#  Live storms, the satellite path, the swarm sandbox and Caribbean parish impacts: molab_swarm_cell.py (one cell).
+#
 #  96 GB is enough for everything here with bf16 and activation checkpointing: the 151M-parameter model with an
 #  8-step rollout at batch 2 peaks around 60 GB on the full 1.5-degree grid. Every checkpoint is pushed to HF_REPO.
 #  Nothing here has run on molab hardware by its author; the CPU parts were run end to end in development and the

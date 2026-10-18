@@ -326,7 +326,44 @@ GENESIS = {'features': ['one', 'vort850', 'vort600', 'dvort24', 'okubo_weiss', '
  'window_h': 48,
  'radius_km': 300}
 
-PROVENANCE = {'generated': '2026-10-17 22:34 UTC',
+CONE_KM = {'leads': [6, 12, 24, 36, 48, 72, 96, 120],
+ 'radius_km': [30.1, 62.7, 139.7, 228.5, 331.4, 553.2, 761.9, 967.9],
+ 'coverage_target': 0.67,
+ 'held_out_coverage': [0.621, 0.638, 0.647, 0.65, 0.644, 0.633, 0.602, 0.618]}
+
+SHIPS = {'leads': [6, 12, 24, 36, 48, 72, 96, 120],
+ 'weights': [[-0.82299, -1.59395, 2.75461, 1.81493, -0.41477, 0.06121, -0.59938, 1.33286, 0.29728, -1.84474, -1.68594,
+              0.78002, -0.36896],
+             [-1.90427, -3.49715, 3.92716, 4.32632, -0.96747, -0.19014, -0.84168, 2.97467, 1.03096, -4.81738,
+              -4.10405, 1.54322, -0.26564],
+             [-3.05817, -7.25925, 4.27239, 9.21359, -1.54216, -1.45717, -2.78837, 4.07664, 2.34315, -6.90379,
+              -7.22539, 3.18815, -0.00204],
+             [-4.24687, -10.68148, 4.10874, 11.77488, -1.17338, -2.40026, -3.30248, 4.53972, 2.97432, -5.87147,
+              -9.34274, 4.31569, 0.72206],
+             [-4.3297, -13.73214, 3.72237, 11.30578, 0.04536, -2.67524, -3.04155, 4.89313, 3.37945, -6.1483,
+              -11.31145, 5.44789, 1.17184],
+             [-4.82442, -19.42248, 1.96659, 9.45344, 1.73438, -1.20958, -4.2967, 5.8083, 4.78479, -3.79685, -13.39481,
+              6.81355, 3.91802],
+             [-6.13603, -23.87268, 1.2651, 6.504, 2.89851, -0.32828, -2.06292, 5.71275, 5.37831, -0.85311, -14.3134,
+              10.79064, 6.76513],
+             [-9.17925, -31.29393, 1.71377, 4.3576, 3.09869, 1.48777, 1.17459, 7.55282, 3.8571, 2.00991, -14.34499,
+              16.77867, 10.70165]]}
+
+LGEM = {'kappa': [0.01923, -0.00558, 0.00776, 0.00539, -0.00447], 'n': 2.5, 'beta_per_h': 0.04167}
+
+INTENSITY_CONSENSUS = {'members': ['shifor', 'decay_shifor', 'ships', 'lgem'],
+ 'leads': [6, 12, 24, 36, 48, 72, 96, 120],
+ 'weights': [[0.2731, 0.3087, 0.3743, 0.0439], [0.0716, 0.3716, 0.4707, 0.0861], [0.0675, 0.3937, 0.3237, 0.2151],
+             [0.1454, 0.3228, 0.2197, 0.3121], [0.1844, 0.2906, 0.1876, 0.3374], [0.3756, 0.113, 0.1716, 0.3398],
+             [0.6057, 0.0, 0.0872, 0.3071], [0.7786, 0.0, 0.0266, 0.1948]],
+ 'bias': [0.384, 0.937, 2.24, 3.459, 4.381, 4.751, 4.707, 4.699]}
+
+SWARM = {'priors': {'fix_sigma_km': 20.0},
+ 'leads': [6, 12, 24, 36, 48, 72, 96, 120],
+ 'cone_scale': [0.8158, 0.9239, 0.8595, 0.8029, 0.7465, 0.7748, 0.7233, 0.7292],
+ 'coverage_target': 0.67}
+
+PROVENANCE = {'generated': '2026-10-18 02:12 UTC',
  'CLIPER': 'IBTrACS v04r01 best tracks 1980-2014, all basins (82,816 fixes at 00/06/12/18 UTC)',
  'SHIFOR': 'IBTrACS v04r01 best tracks 1980-2014, all basins',
  'CONSENSUS': 'hindcasts of the 2016, 2017 and 2019 seasons (3,053 forecasts, NA EP WP SI SP)',
@@ -334,4 +371,9 @@ PROVENANCE = {'generated': '2026-10-17 22:34 UTC',
  'held_out': '2018, 2020, 2021, 2022 -- never used for fitting',
  'CONSENSUS_BASIC': 'same hindcasts as CONSENSUS; the members that need neither a climatology nor an analog database',
  'GENESIS': 'northern-hemisphere candidates of June-November 2016, 2017, 2019 (16,929 candidates, 194 formations); '
-            'second-order terms chosen by leave-one-season-out cross-validation'}
+            'second-order terms chosen by leave-one-season-out cross-validation',
+ 'CONE_KM': 'hindcasts of the 2016, 2017 and 2019 seasons',
+ 'SHIPS': 'hindcasts of the 2016, 2017 and 2019 seasons',
+ 'LGEM': 'hindcasts of the 2016, 2017 and 2019 seasons',
+ 'INTENSITY_CONSENSUS': 'hindcasts of the 2016, 2017 and 2019 seasons',
+ 'SWARM': 'hindcasts of the 2016, 2017 and 2019 seasons'}

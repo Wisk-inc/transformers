@@ -112,7 +112,8 @@ def _local_frame(points_lat, points_lon, centre_lat, centre_lon):
 
 def wind_field(points_lat: torch.Tensor, points_lon: torch.Tensor, centre_lat: torch.Tensor, centre_lon: torch.Tensor,
                vmax_kt: torch.Tensor, rmw_km: torch.Tensor | None = None, r34_km: torch.Tensor | None = None,
-               motion_ms: torch.Tensor | None = None, land: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+               motion_ms: torch.Tensor | None = None, land: torch.Tensor | None = None,
+               dtype: torch.dtype = torch.float64) -> dict[str, torch.Tensor]:
     """
     The 1-minute sustained surface wind of a storm at a set of points.
 
@@ -126,10 +127,11 @@ def wind_field(points_lat: torch.Tensor, points_lon: torch.Tensor, centre_lat: t
             radii were given.
         land: ``(P,)`` land fraction of each point -- roughness and gust factor.
 
+        dtype: arithmetic precision (float32 for large swarms painted onto maps).
+
     Returns:
         ``{"speed_kt": (S, P), "u_ms", "v_ms", "gust_kt"}``.
     """
-    dtype = torch.float64
     lat_p, lon_p = points_lat.to(dtype).view(1, -1), points_lon.to(dtype).view(1, -1)
     clat, clon = centre_lat.to(dtype).view(-1, 1), centre_lon.to(dtype).view(-1, 1)
     vmax = vmax_kt.to(dtype).view(-1, 1).clamp_min(0.0)

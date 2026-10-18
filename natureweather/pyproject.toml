@@ -5,13 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "naturev1"
 version = "0.13.0"
-description = "Probabilistic weather and hurricane model: geometric-attention backbone, tropical-cyclone physics that beats extrapolation, multi-teacher distillation, data assimilation"
+description = "Probabilistic weather and hurricane model: geometric-attention backbone, tropical-cyclone physics that beats extrapolation, a satellite-fed particle swarm with Caribbean parish impacts, multi-teacher distillation, data assimilation"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Nathan" }]
-keywords = ["weather", "hurricane", "tropical-cyclone", "forecasting", "distillation", "data-assimilation", "goes", "satellite", "geometric-deep-learning", "pytorch"]
+keywords = ["weather", "hurricane", "tropical-cyclone", "forecasting", "particle-filter", "caribbean", "impact-forecasting", "distillation", "data-assimilation", "goes", "satellite", "geometric-deep-learning", "pytorch"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -26,7 +26,9 @@ dependencies = ["torch>=2.5", "ihelix>=0.6.0", "numpy>=1.24"]
 satellite = ["xarray>=2023.1", "netCDF4>=1.6"]
 corpora = ["xarray>=2023.1", "zarr>=2.16", "gcsfs>=2023.1"]
 hub = ["huggingface_hub>=0.20"]
-all = ["xarray>=2023.1", "netCDF4>=1.6", "huggingface_hub>=0.20", "zarr>=2.16", "gcsfs>=2023.1", "safetensors>=0.4"]
+swarm = ["eccodes>=2.37", "pillow>=9", "matplotlib>=3.6", "xarray>=2023.1", "netCDF4>=1.6"]
+all = ["xarray>=2023.1", "netCDF4>=1.6", "huggingface_hub>=0.20", "zarr>=2.16", "gcsfs>=2023.1", "safetensors>=0.4",
+       "eccodes>=2.37", "pillow>=9", "matplotlib>=3.6"]
 
 [project.urls]
 Source = "https://github.com/Wisk-inc/transformers/tree/main/natureweather"

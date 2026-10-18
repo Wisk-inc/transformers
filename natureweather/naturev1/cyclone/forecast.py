@@ -16,7 +16,8 @@ import numpy as np
 from .data import LEADS
 
 
-def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, intensity: bool = True) -> dict:
+def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, intensity: bool = True,
+                     swarm: int = 0, swarm_fixes: list | None = None, swarm_device="cpu") -> dict:
     """
     Args:
         case: a :class:`naturev1.cyclone.data.Case` (position, intensity and the last 48 hours of best track; no
@@ -26,6 +27,11 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
         climatology: a :class:`naturev1.cyclone.climatology.Climatology` (members that need it are skipped
             without it, and the consensus renormalises over the rest).
         analogs: an :class:`naturev1.cyclone.analogs.AnalogDatabase`.
+        swarm: if positive, also run the particle-filter sandbox (:mod:`naturev1.swarm`) with this many
+            worlds, re-centred on the consensus track: scenario probabilities, a strike-probability map and a
+            flow-dependent cone under ``result["swarm"]``.
+        swarm_fixes: centre fixes (:mod:`naturev1.swarm.fixes`) to filter the swarm with instead of the 6-hourly
+            history -- the satellite path, minute by minute.
 
     Returns:
         ``{"leads", "track" (L, 2), "members": {name: (L, 2)}, "cone_km" (L,), "regime", "stall", "ridge",
@@ -64,6 +70,11 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
                        "outer_strength_ms": ctx.outer_ms})
     if intensity:
         result.update(_intensity(case, env, ctx, track, leads))
+    if swarm and ctx is not None:
+        from ..swarm.core import swarm_products
+
+        result["swarm"] = swarm_products(case, ctx, track, leads, particles=int(swarm), fixes=swarm_fixes,
+                                         intensity_kt=result.get("intensity"), device=swarm_device)
     return result
 
 

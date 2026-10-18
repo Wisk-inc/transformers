@@ -49,6 +49,9 @@ pipeline_tag: other
 > HRES, Aurora, FGN (WeatherNext 2), FuXi or GenCast past 6 hours; combined with any of them it is never worse and
 > is better at 6-12 hours. Plus genesis detection (68% of formations flagged a median 24 h ahead), multi-teacher
 > distillation, data assimilation and a 0.25-degree decoder — [section 4.12](#412-013-hurricane-physics-measured-on-seasons-it-never-saw).
+> The **swarm sandbox** takes satellite fixes minute by minute and maps impacts parish by parish across the whole Caribbean.
+> On unseen seasons its stall probabilities are skilful, its cone is not better than the fixed cone, and on Hurricane
+> Melissa it kept western Jamaica at risk but far too low — [section 4.13](#413-013-the-swarm-sandbox-the-satellite-path-and-caribbean-impacts).
 
 NatureV1 is an 89-million-parameter model of the atmosphere that forecasts global weather out to five days and,
 for tropical cyclones, where a storm will go, how strong it will get, whether it will intensify rapidly, and
@@ -534,6 +537,19 @@ So: the physics alone is far better than extrapolation and climatology and far w
 past 6 hours; what it adds to a global model is the first 12 hours. Distilling those models into NatureV1 (below)
 is the route to their long-range skill; the physics is then the short-range half of the consensus.
 
+**Intensity, on the same unseen seasons** (SHIFOR, a SHIPS-style regression, a logistic growth model with
+Kaplan-DeMaria land and terrain decay, all fitted on 2016/2017/2019 and blended per lead; mean absolute error of the
+peak wind, kt):
+
+| kt | 6 h | 12 h | 24 h | 36 h | 48 h | 72 h | 96 h | 120 h |
+|---|---|---|---|---|---|---|---|---|
+| persistence | 4 | 8 | 14 | 19 | 23 | 28 | 31 | 32 |
+| **NatureV1 intensity consensus** | **4** | **6** | **11** | **14** | **17** | **20** | **21** | **22** |
+| skill against persistence | +14% | +21% | +24% | +25% | +26% | +29% | +31% | +31% |
+
+Every interval is clear of zero and the consensus beats each of its members at every lead. That is the standard
+statistical-dynamical bar; operational models do better, and rapid intensification is still missed.
+
 **Hurricane Dorian (2019, a tuning season; weights fitted on 2016-2017 only):** 21/49/99/164/249/480/656/810 km at
 6-120 h against extrapolation's 23/52/131/237/365/641/897/1173 -- and 230 km against 341 at 48 h during the stall
 over the Bahamas -- while HRES scored 64 km at 24 h and Pangu 63.
@@ -557,6 +573,59 @@ assimilation for live inputs (`naturev1.assimilation`: bias correction, gross/ba
 optimal interpolation with NatureV1's own predicted variance as the background error), and a 0.25-degree decoder
 (`naturev1.highres`) that reads the latent mesh directly. The molab runbook (`molab_naturev1.py`) runs all of it on
 one 96 GB GPU and publishes only if the distilled model beats the physics-only consensus.
+
+### 4.13 0.13: the swarm sandbox, the satellite path and Caribbean impacts
+
+`naturev1.swarm` (idea: Nathan) runs alongside the physics. It is a particle filter over possible futures. Each
+world is a **4D worldline**: longitude, latitude, **steering depth** (it follows the storm's intensity and wanders)
+and time. It is integrated in micro-segments of a few minutes and carries its own physics: steering-layer depth, beta
+drift, how far the flow's recent trend persists, how fast its departure from climatology fades, non-divergent
+steering perturbations, and a short-memory wobble.
+
+The **satellite path** comes from NHC's fix deck: Dvorak fixes from GOES imagery, microwave, scatterometer, SAR,
+reconnaissance and radar centre fixes. Each fix has its own uncertainty. Fixes stream in at their own minute, and
+each one re-weights the worlds. Worlds that disagree with the storm are pruned and the survivors are resampled
+with genealogy. Fixes that arrive after the analysis re-weight the forecast itself.
+
+The swarm is then **painted onto the ground**. The map holds every Caribbean country and territory, split into its
+parishes, provinces and districts: 309 units on a 3 km grid, with terrain. Each world contributes the
+asymmetric Holland wind field, gusts, and R-CLIPER rain with orographic enhancement on windward slopes. Every unit
+gets probabilities of tropical-storm, 50 kt and hurricane-force wind (and gusts), rain totals, a flash-flood signal
+on steep ground, and an arrival time. A million worlds run on one GPU. On a 4-core CPU it manages about 15,000
+120-hour worlds a second, and 1,000 worlds painted over a Jamaica landfall take a minute.
+
+**Measured on the same unseen seasons (2018 and 2020-2022, 4,447 forecasts).**
+
+- **Track:** the swarm's own mean track beats extrapolation from 12 h (+2% to +22%), loses at 6 h (−9%), and is
+  well behind the consensus. So the consensus stays the track and the swarm is re-centred on it.
+- **Cone:** calibrated on the tuning seasons, the swarm's cone covers 57-64% of positions, against 60-65% for the
+  fixed cone, at about the same size. It is **not** better yet: its spread barely predicts the consensus's error
+  (rank correlation 0.06-0.13).
+- **Scenarios:** what it adds is these. The probability of a Dorian-type **stall** has Brier skill +0.08 over
+  climatology, and the probabilities line up with outcomes: forecast 5% → stalled 8%, 17% → 25%, 33% → 38%.
+  Loop probabilities are reliable (forecast 2.2%, observed 2.1%). Recurvature and steady-track probabilities are
+  no better than climatology.
+
+**Hurricane Melissa (2025), replayed with only what was known at the time.** The inputs were the GFS analysis,
+the best track to then, and the 21 merged satellite, recon, microwave and scatterometer fixes of the previous
+24 hours.
+
+- From 00 UTC on 27 October, about 41 h before the Category 5 landfall, the consensus missed the northward turn
+  and took the storm west-south-west of Jamaica.
+- The swarm still put western Jamaica at risk: Westmoreland, St Elizabeth, Hanover, Manchester and St James
+  were the most threatened parishes, at 13-20% for hurricane-force wind and 55-70% for tropical-storm wind, with
+  the heaviest rain on St Elizabeth's and Manchester's slopes. That is where the worst damage was.
+- It was **far too low**. Melissa's best track puts hurricane-force wind over 12 of the 14 parishes and
+  250-480 mm of rain over them, against forecasts of 110-175 mm. The intensity consensus forecast 111-125 kt for
+  a storm that reached 160 kt: rapid intensification to Category 5 is beyond these statistical models.
+- From 26 October, extrapolation beat the consensus from 12 to 48 h while Melissa crawled.
+
+<img src="melissa_jamaica.png" alt="Melissa 2025 over Jamaica: forecast hurricane-wind probability, best-track swath and forecast rain" width="100%">
+
+The molab cell (`molab_swarm_cell.py`) runs all of this for every active NHC storm, or replays any storm since
+2021, on one GPU. Research model, not an operational forecast: storm surge is not modelled. Boundaries are from
+geoBoundaries (OpenStreetMap and others; attribution travels with the map) and terrain from the Terrarium tiles
+on AWS Open Data.
 
 ## 5. Limitations
 
