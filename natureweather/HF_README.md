@@ -1006,6 +1006,25 @@ and the parish's wettest cell if hit (the number a rain gauge reports), next to 
 as a reference and rejected: CHIRPS put Melissa's 27-29 October total over Jamaica at a maximum of 158 mm against 817 mm
 in the gauges.
 
+**The swarm, sized to the forecast.** The worlds' raw spread was never the calibrated one: `cone_scale` in the swarm
+tables (0.27-0.70 for the forecast-steered swarm) corrected the *reported* cone, but the strike probabilities, the
+landfall probability and timing and every parish number are made from the raw worlds, which on the held-out cases
+were 1.4 to 3.2 times (median, 6 to 120 h) wider than the flow-dependent cone. 0.15 rescales every world's
+displacement about the consensus so the swarm's own 67% radius equals the cone sized for this forecast
+(`CONE_FLOW`: tight when the models agree, wide when they do not; `swarm_products(target_cone_km=...)`, the affine
+`rescale_worlds`). Verified on 396 held-out forecasts of 2018 and 2020 (HRES-steered swarm, 4,096 worlds; the share
+of the truth inside the swarm's own 50 / 67 / 90% radii about the consensus, 6 h → 120 h):
+
+| | 50% radius | 67% radius | 90% radius |
+|---|---|---|---|
+| raw worlds (0.14) | 0.69 → 0.98 | 0.81 → 0.99 | 0.93 → 1.00 |
+| **sized to the cone (0.15)** | 0.50, 0.51, 0.58, 0.56, 0.53, 0.59, 0.63, 0.63 | 0.65, 0.64, 0.70, 0.71, 0.69, 0.73, 0.74, 0.75 | 0.87, 0.87, 0.86, 0.87, 0.90, 0.89, 0.89, 0.89 |
+
+The 67% coverage is the flow-dependent cone's own (0.64-0.72 on the same cases), the 50% and 90% radii fall where
+they should, and the swarm's shape (its 50% and 90% radii are 0.79 and 1.47 times its 67% one) matches the
+truth's (0.64-0.79 and 1.50-1.66). Before this the swarm was spreading a Jamaica landfall over the whole western
+Caribbean; a world that misses by 300 km at 24 h no longer counts against the parish in its path.
+
 <!-- PENDING 0.15 melissa -->
 
 ## 5. Limitations

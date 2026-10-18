@@ -278,7 +278,10 @@ for the best per-lead category probability. Track: the previous cycle's error fe
 against gauge-corrected radar delivered half the observed rain; a ×1.95 multiplier set on 8 tuning storms raises the
 held-out threat score for 100 mm from 0.20 to 0.29 and for 250 mm from 0.12 to 0.29, at the cost of a +13 mm bias in
 the light-rain cells. Parish rain is now reported *if the parish is hit* and as its wettest cell, not only as the
-swarm mean that every missing world dilutes. Full tables in the model card, section 4.16.
+swarm mean that every missing world dilutes. The swarm itself is now sized to the flow-dependent cone: its raw worlds were
+1.4-3.2 times too wide on held-out cases (the truth sat inside its 67% radius 81-99% of the time); rescaled about the
+consensus they cover 64-75%, with the 50% and 90% radii where they should be, so strike, landfall and parish
+probabilities stop being diluted by worlds that miss by hundreds of km. Full tables in the model card, section 4.16.
 
 <!-- PENDING readme 0.15 melissa -->
 
