@@ -190,6 +190,8 @@ def _intensity(case, env, ctx, track, leads, model_extras=None) -> dict:
         stack = np.stack([members.get(n, nan) for n in table["members"]], -1)   # a member without its model: dropped
         blended = (np.nan_to_num(stack) * weights).sum(-1) / np.maximum((np.isfinite(stack) * weights).sum(-1), 1e-9)
         blended = blended + np.asarray(table.get("bias", np.zeros(len(leads))), np.float64)
+        # a basin's own residual bias (wind conventions and storm sizes differ between basins), when the table has it
+        blended = blended + np.asarray(INTENSITY_CONSENSUS.get("basin_bias", {}).get(case.basin, np.zeros(len(leads))), np.float64)
     except ImportError:
         blended = np.nanmean(np.stack([members["decay_shifor"], members["lgem"]]), 0)
     intensity = np.clip(blended, 15.0, 200.0)
