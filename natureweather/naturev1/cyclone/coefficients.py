@@ -636,7 +636,50 @@ ARRIVAL_TIME_ERROR = {'hours': {'24': {'all': {'mean_h': 1.2, 'median_h': 0.3, '
  'source': 'held-out 2018 / 2020-2022, multi-model blend, crossing of the line through the truth position at 24 / 48 '
            "h perpendicular to the truth motion; speed = the forecast's mean speed to that lead"}
 
-PROVENANCE = {'generated': '2026-10-19 13:35 UTC',
+ADECK_TRACK = {'members': ['ours', 'HCCA', 'TVCN', 'AEMI', 'AVNI'],
+ 'leads': [6, 12, 24, 36, 48, 72, 96, 120],
+ 'weights': [[0.5, 0.5, 0.0, 0.0, 0.0], [0.5, 0.5, 0.0, 0.0, 0.0], [0.5, 0.5, 0.0, 0.0, 0.0],
+             [0.5, 0.5, 0.0, 0.0, 0.0], [0.5, 0.5, 0.0, 0.0, 0.0], [0.5, 0.5, 0.0, 0.0, 0.0],
+             [0.5, 0.5, 0.0, 0.0, 0.0], [0.5, 0.5, 0.0, 0.0, 0.0]],
+ 'choice': 'mean(ours, HCCA)',
+ 'fitted_weights': [[0.7215, 0.1061, 0.0928, 0.0, 0.0796], [0.5115, 0.3462, 0.1423, 0.0, 0.0],
+                    [0.5168, 0.385, 0.0982, 0.0, 0.0], [0.4952, 0.4472, 0.0576, 0.0, 0.0],
+                    [0.5233, 0.3573, 0.1195, 0.0, 0.0], [0.4718, 0.3265, 0.2017, 0.0, 0.0],
+                    [0.4351, 0.4838, 0.0, 0.0811, 0.0], [0.3687, 0.279, 0.3523, 0.0, 0.0]],
+ 'dev_loso_gain_pct': {'mean(ours, HCCA)': [0.09, 1.69, 2.1, 2.38, 2.15, 2.05, 2.34, 1.96],
+                       'mean(ours, HCCA, TVCN)': [-1.33, 1.49, 2.02, 2.31, 1.91, 2.0, 2.52, 2.33],
+                       'mean(ours, all aids)': [-3.21, 0.32, 0.85, 1.03, 0.57, 0.61, 1.43, 1.21],
+                       'ours 1/3 + HCCA 2/3': [-1.52, 1.29, 1.87, 2.24, 1.88, 1.82, 2.32, 1.98],
+                       'fitted': [1.06, 1.73, 2.08, 2.18, 1.89, 1.81, 2.24, 2.16]},
+ 'note': "our blended track and the NHC a-deck's early-cycle consensus aids, weights renormalised over the members "
+         'present; the rule chosen on the tuning seasons (2016/2017/2019, our own track cross-fitted by season) was '
+         'the plain mean of ours and HCCA; TVCN stands in when HCCA is absent (the three-way mean scored within 0.2% '
+         'of the pair on the tuning seasons)',
+ 'substitutes': {'HCCA': ['TVCN']},
+ 'held_out_gain_pct': [2.8, 11.0, 13.0, 11.9, 6.4, 11.4, 12.6, 12.7],
+ 'held_out_vs_ofcl_pct': [22.0, 15.9, 15.5, 14.6, 18.1, 11.7, 5.8, 4.7]}
+
+ADECK_INTENSITY = {'members': ['ours', 'IVCN', 'HWFI', 'HMNI', 'DSHP', 'LGEM', 'AVNI', 'HCCA'],
+ 'leads': [6, 12, 24, 36, 48, 72, 96, 120],
+ 'weights': [[0.7767, 0.0, 0.1386, 0.0847, 0.0, 0.0, 0.0, 0.0], [0.5388, 0.0, 0.1083, 0.2756, 0.0, 0.0, 0.0, 0.0773],
+             [0.2001, 0.0, 0.2488, 0.2078, 0.0, 0.0, 0.0, 0.3433],
+             [0.0657, 0.1857, 0.25, 0.2599, 0.0017, 0.0, 0.0, 0.2372],
+             [0.0, 0.0003, 0.0, 0.275, 0.008, 0.0, 0.0085, 0.7082],
+             [0.0, 0.7262, 0.0994, 0.034, 0.0, 0.0, 0.0801, 0.0603],
+             [0.0, 0.175, 0.2236, 0.0002, 0.0, 0.0, 0.0, 0.6012],
+             [0.0454, 0.3921, 0.1216, 0.1015, 0.0, 0.0, 0.0581, 0.2813]],
+ 'loso_gain_pct': {'2016': [2.81, 0.94, 13.24, 21.77, 28.5, 26.92, 28.2, 21.85],
+                   '2017': [3.44, 9.74, 17.61, 23.98, 26.54, 32.53, 30.57, 23.09],
+                   '2019': [0.43, 5.66, 13.28, 23.5, 22.03, 28.94, 24.6, 1.91]},
+ 'note': "simplex weights per lead over the 0.15 consensus and the a-deck's early-cycle intensity aids, smooth-L1 "
+         'fit on the tuning seasons 2016/2017/2019 (leave-one-season-out gains 13-28% at 24-96 h in every season); '
+         'members missing live are renormalised away; HAFS-A and HAFS-B stand in for HWRF and HMON when those are '
+         'absent (successor models, a lineage stand-in that the archive could not verify)',
+ 'substitutes': {'HWFI': ['HFAI'], 'HMNI': ['HFBI']},
+ 'held_out_gain_pct': [2.9, 9.9, 26.0, 30.6, 31.4, 35.1, 32.0, 32.3],
+ 'held_out_vs_ofcl_pct': [6.4, -7.9, 4.9, 4.5, 5.9, 6.1, -0.7, 4.6]}
+
+PROVENANCE = {'generated': '2026-10-19 14:02 UTC',
  'CLIPER': 'IBTrACS v04r01 best tracks 1980-2014, all basins (82,816 fixes at 00/06/12/18 UTC)',
  'SHIFOR': 'IBTrACS v04r01 best tracks 1980-2014, all basins',
  'CONSENSUS': 'hindcasts of the 2016, 2017 and 2019 seasons (3,053 forecasts, NA EP WP SI SP)',
@@ -698,4 +741,12 @@ PROVENANCE = {'generated': '2026-10-19 13:35 UTC',
                'cases bias +0.6 kt, MAE 13 kt',
  'ARRIVAL_TIME_ERROR': "held-out 2018 / 2020-2022: error of the blended track's crossing of the line through the "
                        "truth position at 24 and 48 h, by the forecast's translation speed; no systematic bias, slow "
-                       'movers the uncertain ones'}
+                       'movers the uncertain ones',
+ 'ADECK_TRACK': 'NHC a-deck aids (HCCA, TVCN, AEMI, AVNI) matched to the 2016, 2017 and 2019 Atlantic cases; the '
+                'rule chosen on them (our track cross-fitted by season) is the plain mean of ours and HCCA; held-out '
+                'Atlantic 2018 / 2020-2022: 11-13% lower track error than ours at 12-120 h, 12-22% lower than the '
+                'official forecast at 6-72 h',
+ 'ADECK_INTENSITY': 'NHC a-deck intensity aids (IVCN, HWRF, HMON, SHIPS, LGEM, GFS, HCCA) matched to the 2016, 2017 '
+                    'and 2019 Atlantic cases, smooth-L1 simplex weights per lead; held-out Atlantic 2018 / '
+                    '2020-2022: 26-35% lower intensity error than ours at 24-120 h and 4-6% lower than the official '
+                    'forecast at 24-120 h'}

@@ -97,7 +97,6 @@ def test_rescaling_the_worlds_about_the_consensus_scales_their_spread_exactly():
 
     region, case, result, impact = _island_run(n=100)
     fc = result["swarm"]["forecast"]
-    leads = np.asarray(LEADS, float)
     ref = np.asarray(result["track"], float)
     before_track = fc.track.copy()
     d0 = np.array([geo.great_circle_km(ref[k, 0], ref[k, 1], fc.positions[:, k, 0], fc.positions[:, k, 1]) for k in range(len(LEADS))])

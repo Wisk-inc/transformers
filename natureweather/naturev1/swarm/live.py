@@ -42,7 +42,7 @@ def _gfs_available(gfs: GFSAnalysis, when: np.datetime64) -> bool:
 def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: int = 100_000, device="cpu",
                    region=None, climatology=None, analogs=None, impact_particles: int = 20_000,
                    cache: str | Path = "~/.cache/naturev1", name: str = "", forecast_flow: bool = True,
-                   models=None, previous="auto", save_runs: bool = True, log=print) -> dict:
+                   models=None, previous="auto", save_runs: bool = True, guidance: bool = True, log=print) -> dict:
     """
     Args:
         storm_id: NHC id, e.g. ``"al132025"`` (Melissa) or ``"ep212026"``.
@@ -58,6 +58,10 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
             ``"auto"`` (the default) finds the newest saved cycle of this storm under ``cache/runs``; None: no feedback.
         save_runs: write every cycle under ``cache/runs/<storm>/<time>.json`` (:func:`naturev1.swarm.bulletin.write_bulletin`),
             which is what the next cycle's ``previous="auto"`` reads and what an operations desk keeps.
+        guidance: read the NHC's a-deck for the cycle (:mod:`naturev1.swarm.adeck`) and blend its aids into the track
+            and the intensity with the fitted tables; the official forecast and the NHC's rapid-intensification
+            consensus come back under ``guidance`` for the record and the display. A deck that cannot be read is
+            logged and skipped.
 
     Returns:
         ``{"case", "result" (physics_forecast output, swarm included), "impact", "fixes_before", "fixes_after",
@@ -106,9 +110,25 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
         previous = load_previous(cache / "runs", storm_id, when)
         if previous is not None:
             log(f"previous cycle {str(previous['time'])[:16]}Z found; its error feeds back into the track")
+    aids = None
+    if guidance:
+        try:
+            from ..cyclone.data import LEADS
+            from .adeck import aids_at, fetch_adeck, parse_adeck
+
+            aids = aids_at(parse_adeck(fetch_adeck(storm_id, archive)), when, LEADS)
+            if aids["available"]:
+                shown = ", ".join(aids["available"][:14]) + (" ..." if len(aids["available"]) > 14 else "")
+                log(f"NHC guidance for the {str(when)[:16]}Z cycle: {len(aids['available'])} aids ({shown})")
+            else:
+                log("NHC guidance: nothing for this cycle in the a-deck yet; the forecast stands on its own")
+                aids = None
+        except Exception as error:
+            log(f"NHC guidance not read: {type(error).__name__}: {error}")
+            aids = None
     result = physics_forecast(case, env, climatology, analogs, swarm=particles, swarm_fixes=before or None,
                               swarm_device=device, forecast_flow=flows, model_track=tracks,
-                              model_extras={k: v["extras"] for k, v in read.items()} or None, previous=previous)
+                              model_extras={k: v["extras"] for k, v in read.items()} or None, previous=previous, aids=aids)
     if "swarm" not in result:
         raise RuntimeError(f"{storm_id}: the physics context could not be built from the analysis at {when}; no swarm, no impacts")
     model_track = model_mean(case, tracks, result["leads"]) if tracks else None
@@ -139,7 +159,22 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
             qpf, model_track = None, None
     impact = (impact_from_forecast(region, result, case, particles=impact_particles, device=device, r34_km=r34, qpf=qpf, model_track=model_track)
               if region is not None else None)
-    run = {"case": case, "result": result, "impact": impact, "fixes_before": before, "fixes_after": after,
+    guidance_info = None
+    if aids is not None:
+        guidance_info = {"cycle": str(aids["cycle"]), "available": aids["available"], "track": aids["track"], "intensity": aids["intensity"],
+                         "ofcl": {"track": aids["track"].get("OFCL"), "intensity": aids["intensity"].get("OFCL")}, "nhc_ri": None}
+        try:
+            from .adeck import nhc_ri_probability
+
+            guidance_info["nhc_ri"] = nhc_ri_probability(storm_id, when, archive)
+            p_ours, p_nhc = result.get("ri_probability"), (guidance_info["nhc_ri"] or {}).get("p30_24")
+            if p_ours is not None and p_nhc is not None:
+                # the equal-weight mean of the two independent probabilities, reported beside ours (held-out 2020-2022
+                # Brier skill 0.20 against 0.13 for ours alone; see nhc_ri_probability for why it is not the headline)
+                guidance_info["ri_probability_combined"] = float(0.5 * (p_ours + p_nhc))
+        except Exception as error:
+            log(f"NHC rapid-intensification guidance not read: {type(error).__name__}: {error}")
+    run = {"case": case, "result": result, "impact": impact, "fixes_before": before, "fixes_after": after, "guidance": guidance_info,
            "best": best, "analysis_time": when, "ess_after": ess_after, "model_track": model_track, "r34_km": r34,
            "previous_used": previous["time"] if isinstance(previous, dict) and previous.get("time") is not None else None,
            "qpf_used": (qpf["source"] + f" to {int(qpf['hours'][-1])} h") if qpf is not None else None,

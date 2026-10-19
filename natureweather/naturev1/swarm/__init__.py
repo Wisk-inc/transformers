@@ -24,6 +24,7 @@ live            one call from an NHC storm id to an impact report (live, or a re
                 every cycle saved, the previous one's error fed back
 bulletin        the cycle record (JSON + parish CSV), the history of a storm's cycles, the previous cycle found again
 infrared        GOES band-13 read quantitatively: cold-top share, coldest top, ring symmetry, eye, their trend (diagnostic)
+adeck           the NHC's operational guidance: a-deck aids interpolated to the leads (blended in by cyclone.aids), the RI probabilities
 plot            maps of the swarm, its worldlines and its impacts; the parish-by-parish landfall figure
 ==============  ======================================================================================================
 

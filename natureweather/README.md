@@ -188,6 +188,8 @@ earlier = forecast_storm("al132025", when="2025-10-26T12", archive=True, particl
 run = forecast_storm("al132025", when="2025-10-27T00", archive=True,  # Melissa as it was known then
                      particles=100_000, region=region,
                      previous={"time": "2025-10-26T12", "track": earlier["result"]["track"]})   # 0.15: its error feeds back
+# 0.16: the NHC a-deck is read by default (guidance=False switches it off); the official forecast and the aids used:
+print(run["guidance"]["ofcl"], run["result"]["aids_track"], run["result"]["aids_intensity"], run["result"]["intensity_ours"])
 print(run["impact"].table())                                          # parish-by-parish probabilities
 print(format_landfall(landfall_summary(region, run["result"], run["case"], run["impact"], "Jamaica",
                                        analysis_time="2025-10-27T00")))  # when, where, how strong; rain if hit
@@ -288,6 +290,44 @@ ashore at 18.12N 77.88W on 28 October 14 UTC (actual: New Hope, 18.09N 77.97W, a
 inside a 12-hour band; St Elizabeth 84%, Westmoreland 77%, Manchester 72% for hurricane-force wind, the eastern parishes
 9-15%; 110 kt at landfall with the rapid-intensification branch at 153 kt (actual 160) and a 23% chance of a category-5
 peak; Manchester's wettest cell 747 mm against the 817 mm gauge. ![](melissa_landfall.png)
+
+## 0.16: the official guidance as members, the model's own rain, and the answer key
+
+The forecast now reads what the forecasters read. `naturev1.swarm.adeck` fetches the NHC's public a-deck for the
+cycle -- every operational aid's track and intensity, minutes after the synoptic time -- and `naturev1.cyclone.aids`
+blends the aids in with tables fitted on the tuning seasons: the track is the plain mean of our multi-model blend and
+HCCA (the HFIP corrected consensus), the intensity a simplex over our consensus, IVCN, HWRF, HMON, SHIPS, LGEM, the
+GFS and HCCA, lead by lead. Weights renormalise over the aids present, HAFS-A/B stand in for HWRF/HMON and TVCN for
+HCCA when those are absent (and the record says so), and our own track and intensity stay beside the blend
+(`track_ours`, `intensity_ours`). The NHC's rapid-intensification guidance (SHIPS-RII, logistic, Bayesian, DTOPS,
+consensus) is read from the SHIPS text and reported beside ours. The GFS's own accumulated rain travels with every
+world as half of its rain (`fetch_qpf`), so the moisture and the model's orography enter the parish totals. The peak
+quantiles, E[peak | RI] and the arrival-time window of the 0.16 roadmap are in the landfall report, and every cycle is
+saved and fed back (`naturev1.swarm.bulletin`). `ROADMAP_0.16.md` has the deficit matrix with what was tried, what
+shipped and what was rejected.
+
+**Measured on the held-out seasons (2018, 2020-2022), none of it tuned there; Atlantic cases, where the NHC guidance
+exists (626 at 24 h, 71 storms).** Track: the mean with HCCA takes the error from 62 to 54 km at 24 h, 96 to 89 at
+48 h, 169 to 150 at 72 h and 365 to 319 at 120 h (11-13% lower than 0.14 at 12-120 h, every lead significant), and sits
+12-22% under the NHC official forecast at 6-72 h and 5-6% under it at 96-120 h -- on the tuning seasons the same rule
+gained 2%, so the held-out gain is larger than the fit promised, not smaller. Intensity: the aid blend takes the mean
+error from 9.6 to 7.1 kt at 24 h, 13.9 to 9.5 at 48 h, 16.2 to 10.5 at 72 h and 18.8 to 12.8 at 120 h (26-35% lower
+than 0.15 from 24 h on, every tuning season agreeing in leave-one-season-out), and it is 4-6% under the official
+forecast at 24-72 h and level with it at 96-120 h (the official forecast is itself made from this guidance three hours
+later, so read it as a product comparison). What the aids do not fix: the under-forecast on the storms that intensify
+rapidly moves only from -23 to -21 kt at 24 h (the official forecast: -19), which is why the peak quantiles and the RI
+branch remain the answer to the explosive cases. Rapid intensification: the archive's e-decks carry no RI probabilities
+before 2020, so nothing could be chosen on the tuning seasons; on 2020-2022 ours has Brier skill 0.13, the SHIPS-RII
+consensus 0.07, DTOPS 0.17 and the equal-weight mean of ours and DTOPS 0.20 -- that mean is reported as
+`ri_probability_combined` with this caveat, and ours stays the headline. Rain: the GFS member against gauge-corrected
+radar on US landfalls -- Ida 23 vs 45 mm mean error, Nicholas 17 vs 55, Fred 21 vs 36, Ian level. Rejected on the
+tuning seasons and said so: a stall-over-water penalty (its sign flips between seasons; the fixed rule is 45-122% worse
+on the stall cases), a translation-speed rain factor, a 115-kt rain saturation, nonlinear rain transforms, dynamic
+per-storm model weighting. Timing: no systematic along-track bias was found, so the arrival-time error (3.6 h at 24 h,
+7.3 h for storms under 3 m/s) is reported as a window rather than corrected. The held-out case list with every
+reference's forecast on it is published as `benchmark_heldout_atlantic_2018_2020_2022.csv.gz` on the model
+repository, with the scoring code, so that a new model can be checked on the same storms. Full tables in the model
+card, section 4.17.
 
 ## Not trained
 

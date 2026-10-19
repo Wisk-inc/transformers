@@ -56,11 +56,12 @@ def write_bulletin(run: dict, summary: dict | None, directory: str | Path, storm
     folder = Path(directory).expanduser() / sid
     folder.mkdir(parents=True, exist_ok=True)
     keys = ("leads", "track", "intensity", "cone_km", "cone_fixed_km", "ri_probability", "intensity_regime", "intensity_if_ri",
-            "peak_probability", "category_probability", "consensus_table", "n_models", "model_spread_km", "model_deepening_hpa")
+            "peak_probability", "category_probability", "consensus_table", "n_models", "model_spread_km", "model_deepening_hpa",
+            "peak_quantiles", "peak_if_ri_kt", "track_ours", "intensity_ours", "aids_track", "aids_intensity")
     record = {"storm_id": sid, "name": getattr(case, "name", ""), "time": str(when), "lat": float(case.lat), "lon": float(case.lon),
               "wind_kt": float(case.wind_kt), "issued_by": f"naturev1 {_version()}", "forecast": {k: _plain(result[k]) for k in keys if k in result},
               "models": _plain({k: v.get("title", k) if isinstance(v, dict) else str(v) for k, v in (run.get("models") or {}).items()}),
-              "r34_km": _plain(run.get("r34_km")), "landfall": _plain(summary) if summary else None,
+              "r34_km": _plain(run.get("r34_km")), "guidance": _plain(run.get("guidance")), "landfall": _plain(summary) if summary else None,
               "scenarios": _plain({k: v.get("probability") for k, v in (result.get("swarm", {}).get("scenarios") or {}).items()}) if result.get("swarm") else None}
     impact = run.get("impact")
     rows = []

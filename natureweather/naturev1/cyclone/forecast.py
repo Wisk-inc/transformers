@@ -18,7 +18,7 @@ from .data import LEADS
 
 def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, intensity: bool = True,
                      swarm: int = 0, swarm_fixes: list | None = None, swarm_device="cpu", forecast_flow=None,
-                     model_track=None, model_extras=None, previous=None) -> dict:
+                     model_track=None, model_extras=None, previous=None, aids=None) -> dict:
     """
     Args:
         case: a :class:`naturev1.cyclone.data.Case` (position, intensity and the last 48 hours of best track; no
@@ -30,6 +30,11 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
         analogs: an :class:`naturev1.cyclone.analogs.AnalogDatabase`.
         previous: the previous cycle's result, ``{"time": its analysis time, "track": its (L, 2) track}``: its error
             for the time now analysed feeds back into the new track (:func:`naturev1.cyclone.consensus.apply_track_feedback`).
+        aids: the NHC's operational aids for the cycle, ``{"track": {tech: (L, 2)}, "intensity": {tech: (L,)}}``
+            (:func:`naturev1.swarm.adeck.aids_at`): blended into the track and the intensity with the tables fitted on
+            the tuning seasons (:mod:`naturev1.cyclone.aids`); our own stay in ``track_ours`` / ``intensity_ours``,
+            what was used in ``aids_track`` / ``aids_intensity``. The peak products keep our own consensus as their
+            input (they were fitted on it); the swarm, the categories and the headline follow the blend.
         swarm: if positive, also run the particle-filter sandbox (:mod:`naturev1.swarm`) with this many
             worlds, re-centred on the consensus track: scenario probabilities, a strike-probability map and a
             flow-dependent cone under ``result["swarm"]``.
@@ -83,8 +88,21 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
 
         track = apply_track_feedback(case, track, previous["track"], previous.get("time"), leads,
                                      previous_position=(previous["lat"], previous["lon"]) if "lat" in previous and "lon" in previous else None)
+    track_ours = used_aids = None
+    if aids and aids.get("track"):
+        from . import coefficients as _coefficients
+
+        if getattr(_coefficients, "ADECK_TRACK", None):
+            from .aids import blend_track
+
+            blended_track, used_aids = blend_track(case, track, aids["track"], leads, _coefficients.ADECK_TRACK)
+            if used_aids:
+                track_ours, track = track, blended_track
     result = {"leads": list(leads), "track": track, "members": out, "consensus_table": table["name"],
               "n_models": result_models}
+    if track_ours is not None:
+        result["track_ours"] = track_ours
+        result["aids_track"] = used_aids
     from . import coefficients
 
     # each consensus table has its own cone: the forecast-flow consensus errs less, so its cone is narrower
@@ -119,7 +137,7 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
                        "regime": classify(case, stall, ridge), "shear": shear_diagnostics(ctx.clean, case.lat, case.lon, ctx.motion),
                        "outer_strength_ms": ctx.outer_ms})
     if intensity:
-        result.update(_intensity(case, env, ctx, track, leads, model_extras))
+        result.update(_intensity(case, env, ctx, track, leads, model_extras, aids=aids))
     if swarm and ctx is not None:
         from ..swarm.core import swarm_products
 
@@ -156,7 +174,20 @@ def consensus_table(members: dict) -> dict:
     return {**getattr(coefficients, name), "name": name}
 
 
-def _intensity(case, env, ctx, track, leads, model_extras=None) -> dict:
+def _with_aids(out: dict, aids, leads) -> dict:
+    """The aid blend on a fallback intensity (SHIFOR only), when the table and the aids are there."""
+    from . import coefficients
+
+    if aids and aids.get("intensity") and getattr(coefficients, "ADECK_INTENSITY", None):
+        from .aids import blend_intensity
+
+        blended, used = blend_intensity(out["intensity"], aids["intensity"], leads, coefficients.ADECK_INTENSITY)
+        if used:
+            out.update({"intensity_ours": out["intensity"], "intensity": blended, "aids_intensity": used})
+    return out
+
+
+def _intensity(case, env, ctx, track, leads, model_extras=None, aids=None) -> dict:
     from . import coefficients
     from .intensity import (category_probabilities, decay_along, environment_along_track, lgem_intensity,
                             model_deficit_change, model_trend_intensity, peak_if_ri, peak_probability, peak_quantiles, ri_probability,
@@ -167,7 +198,7 @@ def _intensity(case, env, ctx, track, leads, model_extras=None) -> dict:
     shifor = shifor_intensity(case, leads)
     members["shifor"] = shifor
     if ctx is None or not np.isfinite(track[0, 0]):
-        return {"intensity_kt": members, "intensity": shifor}
+        return _with_aids({"intensity_kt": members, "intensity": shifor}, aids, leads)
     filled = track.copy()
     good = np.isfinite(filled[:, 0])
     filled[~good] = filled[np.nonzero(good)[0][-1]]
@@ -179,7 +210,7 @@ def _intensity(case, env, ctx, track, leads, model_extras=None) -> dict:
     try:
         along = environment_along_track(env, ctx.clean, case, filled, leads, np.nan_to_num(shifor, nan=case.wind_kt), ocean=ocean)
     except Exception as error:                              # missing fields in a live analysis: degrade, don't fail
-        return {"intensity_kt": members, "intensity": shifor, "intensity_note": f"environment along the track unavailable ({type(error).__name__}: {error}); SHIFOR only"}
+        return _with_aids({"intensity_kt": members, "intensity": shifor, "intensity_note": f"environment along the track unavailable ({type(error).__name__}: {error}); SHIFOR only"}, aids, leads)
     members["decay_shifor"] = decay_along(case, along, leads, np.nan_to_num(shifor, nan=case.wind_kt))
     members["lgem"] = lgem_intensity(case, along, leads)
     members["trend"] = trend_intensity(case, along, leads)
@@ -213,6 +244,16 @@ def _intensity(case, env, ctx, track, leads, model_extras=None) -> dict:
     except ImportError:
         blended = np.nanmean(np.stack([members["decay_shifor"], members["lgem"]]), 0)
     intensity = np.clip(blended, 15.0, 200.0)
+    own = intensity
+    if aids and aids.get("intensity") and getattr(coefficients, "ADECK_INTENSITY", None):
+        # the operational aids beside our consensus, with the weights fitted on the tuning seasons; the peak products
+        # below keep our own consensus as their input, which is what they were fitted on
+        from .aids import blend_intensity
+
+        intensity, used = blend_intensity(intensity, aids["intensity"], leads, coefficients.ADECK_INTENSITY)
+        if used:
+            extra["aids_intensity"] = used
+            extra["intensity_ours"] = own
     # the branch beside the expected value: the storm's path if it intensifies rapidly, with its probability
     if_ri = ri_scenario_intensity(case, along, leads)
     if np.isfinite(if_ri).any():
@@ -220,17 +261,17 @@ def _intensity(case, env, ctx, track, leads, model_extras=None) -> dict:
     categories = category_probabilities(intensity, extra.get("intensity_regime", "normal"), ri_probability=extra.get("ri_probability"),
                                         ri_intensity=extra.get("intensity_if_ri"))
     try:
-        peak = peak_probability(case, along, intensity, extra.get("ri_probability"), model_dp, leads=leads)
+        peak = peak_probability(case, along, own, extra.get("ri_probability"), model_dp, leads=leads)
     except Exception as error:
         peak = {}
         extra["intensity_note"] = f"peak probability unavailable ({type(error).__name__}: {error})"
     if peak:
         extra["peak_probability"] = peak
     try:
-        pq = peak_quantiles(case, along, intensity, extra.get("ri_probability"), model_dp, extra.get("intensity_if_ri"), leads=leads)
+        pq = peak_quantiles(case, along, own, extra.get("ri_probability"), model_dp, extra.get("intensity_if_ri"), leads=leads)
         if pq:
             extra["peak_quantiles"] = pq
-        e_ri = peak_if_ri(case, along, intensity, extra.get("ri_probability"), model_dp, extra.get("intensity_if_ri"), leads=leads)
+        e_ri = peak_if_ri(case, along, own, extra.get("ri_probability"), model_dp, extra.get("intensity_if_ri"), leads=leads)
         if np.isfinite(e_ri):
             extra["peak_if_ri_kt"] = e_ri
     except Exception as error:

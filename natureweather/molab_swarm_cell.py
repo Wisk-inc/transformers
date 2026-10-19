@@ -192,6 +192,25 @@ def issue(storm_id, name, when):
         ri += "  \n**Models' deepening (hPa, central-pressure deficit):** " + "  ".join(f"{h}h {d:+.0f}" for h, d in zip(result["leads"], deep) if np.isfinite(d))
     if ir:
         ri += f"  \n**{ir['text']}**"
+    guide = run.get("guidance") or {}
+    if guide.get("available"):
+        used_t = (result.get("aids_track") or {}).get("members", [])
+        used_i = (result.get("aids_intensity") or {}).get("members", [])
+        subs = {**(result.get("aids_track") or {}).get("substituted", {}), **(result.get("aids_intensity") or {}).get("substituted", {})}
+        ri += (f"  \n**NHC guidance ({len(guide['available'])} aids in the a-deck):** track blended with {', '.join(used_t) or 'none'}; "
+               f"intensity with {', '.join(used_i) or 'none'}" + (f"; stand-ins {', '.join(f'{v} for {k}' for k, v in subs.items())}" if subs else ""))
+        if result.get("intensity_ours") is not None:
+            ri += "  \n**Our own consensus before the aids:** " + "  ".join(f"{h} h {v:.0f} kt" for h, v in zip(result["leads"], result["intensity_ours"]) if np.isfinite(v))
+        of = guide.get("ofcl") or {}
+        if of.get("intensity") is not None and of.get("track") is not None:
+            ri += "  \n**NHC official forecast:** " + "  ".join(
+                f"{h} h {la:.1f}N {abs(lo):.1f}{'W' if lo < 0 else 'E'} {v:.0f} kt"
+                for h, (la, lo), v in zip(result["leads"], of["track"], of["intensity"]) if np.isfinite(la) and np.isfinite(v))
+        if guide.get("nhc_ri") and guide["nhc_ri"].get("p30_24") is not None:
+            schemes = "; ".join(f"{k} {v:.0%}" for k, v in (guide["nhc_ri"].get("schemes") or {}).items() if v is not None)
+            ri += f"  \n**NHC rapid-intensification guidance:** {guide['nhc_ri']['p30_24']:.0%} ({guide['nhc_ri']['source']}; {schemes})"
+            if guide.get("ri_probability_combined") is not None:
+                ri += f"; equal-weight with ours: **{guide['ri_probability_combined']:.0%}**"
     used = run.get("models", {})
     mm = run.get("model_track")
     model_text = ((f"  \n**Models read:** {', '.join(m['title'] for m in used.values())}; their mean track: "

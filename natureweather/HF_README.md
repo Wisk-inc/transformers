@@ -1062,6 +1062,87 @@ Hanover 603 against a single gauge at 146), and too little in the east (Portland
 puts the rain under the strongest wind and Melissa's two days of crawling south of the island fed the Blue Mountains
 and St Catherine instead. `melissa_jamaica.png` shows the four releases side by side from 27 October 00 UTC.
 
+### 4.17 0.16: the official guidance as members, the model's own rain, and the answer key
+
+The NHC's public a-deck carries every operational aid's track and intensity for a cycle within minutes of the synoptic
+time. 0.16 reads it (`naturev1.swarm.adeck`) and blends the aids in with tables fitted on the tuning seasons
+(`naturev1.cyclone.aids`, `coefficients.ADECK_TRACK` / `ADECK_INTENSITY`). Everything below is on the held-out
+seasons 2018 and 2020-2022, Atlantic cases where the guidance exists, homogeneous across the rows (749 / 703 / 626 /
+554 / 490 / 374 / 281 / 206 cases at 6 / 12 / 24 / 36 / 48 / 72 / 96 / 120 h; 79 storms); * marks a whole 90%
+storm-bootstrap interval above zero. The 6 h column of every aid is an interpolation between its analysis and its 12 h
+point, so it flatters nobody but us; read the aids from 12 h on.
+
+**Track (mean error, km).** The rule chosen on the tuning seasons -- with our own track cross-fitted by season so that
+it was scored out of sample like the aids -- was the plain mean of our multi-model blend and HCCA; the fitted simplex
+over HCCA, TVCN, the GEFS mean and the GFS came within 0.2% of it there, so the mean ships.
+
+| | 6 h | 12 h | 24 h | 36 h | 48 h | 72 h | 96 h | 120 h |
+|---|---|---|---|---|---|---|---|---|
+| NatureV1 0.14 blend | 22.1 | 40.1 | 62.2 | 82.3 | 95.5 | 168.7 | 260.5 | 365.1 |
+| **NatureV1 0.16 = mean(0.14 blend, HCCA)** | **21.5** | **35.7** | **54.1** | **72.5** | **89.4** | **149.6** | **227.7** | **318.7** |
+| 0.16 against 0.14 | +2.8% | +11.0%* | +13.0%* | +11.9%* | +6.4%* | +11.4%* | +12.6%* | +12.7%* |
+| HCCA (HFIP corrected consensus) | 29.9 | 40.7 | 60.3 | 80.7 | 104.6 | 170.5 | 253.8 | 363.9 |
+| TVCN (track consensus) | 29.8 | 41.8 | 62.7 | 84.5 | 109.5 | 170.0 | 248.8 | 346.5 |
+| OFCL (NHC official forecast) | 27.6 | 42.4 | 64.1 | 84.9 | 109.2 | 169.4 | 241.6 | 334.4 |
+| 0.16 against the official forecast | +22.0%* | +15.9%* | +15.5%* | +14.6%* | +18.1%* | +11.7%* | +5.8% | +4.7% |
+
+On the tuning seasons the same mean gained 2% -- there our blend leaned on HRES, which HCCA also contains; on the
+held-out seasons the blend is a six-model AI-heavy mean whose errors are more independent of HCCA's, and the gain is
+five times larger. Two things to read with it: HCCA reaches the a-deck about two and a half hours after the synoptic
+time (our cycle waits for the GFS analysis anyway, which is later), and the official forecast is written by
+forecasters from this same guidance, so the last row is a product comparison, not a claim about who sees the
+atmosphere better.
+
+**Intensity (mean absolute error, kt).** Smooth-L1 simplex weights per lead over our 0.15 consensus and the
+early-cycle aids; leave-one-season-out on the tuning seasons the blend gained 13-28% at 24-96 h in 2016, 2017 and 2019
+alike. HAFS-A and HAFS-B take the HWRF and HMON slots when those are absent, a stand-in by lineage that the archive
+could not verify and that the record reports.
+
+| | 6 h | 12 h | 24 h | 36 h | 48 h | 72 h | 96 h | 120 h |
+|---|---|---|---|---|---|---|---|---|
+| NatureV1 0.15 consensus | 3.4 | 6.0 | 9.6 | 12.2 | 13.9 | 16.2 | 18.4 | 18.8 |
+| **NatureV1 0.16 = 0.15 + aids** | **3.3** | **5.4** | **7.1** | **8.5** | **9.5** | **10.5** | **12.5** | **12.8** |
+| 0.16 against 0.15 | +2.9%* | +9.9%* | +26.0%* | +30.6%* | +31.4%* | +35.1%* | +32.0%* | +32.3%* |
+| IVCN (intensity consensus) | 4.3 | 5.5 | 7.2 | 8.5 | 9.4 | 10.7 | 12.7 | 13.8 |
+| HCCA | 4.3 | 5.5 | 7.2 | 8.7 | 9.6 | 11.1 | 12.5 | 13.0 |
+| HWRF (HWFI) | 4.6 | 6.2 | 8.0 | 9.4 | 10.6 | 13.3 | 15.3 | 16.3 |
+| SHIPS with decay (DSHP) | 4.5 | 6.1 | 8.4 | 10.2 | 11.6 | 13.4 | 16.3 | 18.3 |
+| LGEM | 4.5 | 6.4 | 9.0 | 11.1 | 12.2 | 13.3 | 15.8 | 17.5 |
+| OFCL (NHC official forecast) | 3.6 | 5.0 | 7.4 | 8.8 | 10.1 | 11.2 | 12.4 | 13.4 |
+| 0.16 against the official forecast | +6.4% | −7.9% | +4.9% | +4.5% | +5.9%* | +6.1% | −0.7% | +4.6% |
+
+The weights say what the archive thinks of us: our consensus carries 78% of the blend at 6 h, 54% at 12 h, 20% at 24 h
+and nothing from 48 h on, where HCCA, IVCN and the hurricane models take over. The one thing the aids do not fix is
+the thing this roadmap started from: on the 39 held-out cases that intensified by 30 kt or more in the next day, the
+bias at 24 h moves from −23 kt (ours) to −21 kt (the blend), with the official forecast at −19 kt -- every mean
+forecast under-forecasts the explosive cases, which is why the calibrated peak quantiles and the RI branch (4.16) stay
+in the report beside the headline.
+
+**Rapid intensification, the NHC's probabilities beside ours.** The SHIPS text carries the SHIPS-RII, logistic,
+Bayesian, DTOPS and consensus probabilities of +30 kt in 24 h; the season archive's e-deck carries the same after the
+fact -- but only from 2020, so there is no tuning-season sample and nothing here was chosen on one. On 2020-2022
+(481 cases with the consensus, 453 with DTOPS; 25 and 24 events): ours Brier skill 0.125 (AUC 0.866), the SHIPS-RII
+consensus 0.068 (0.847), the deterministic SHIPS-RII 0.020, the logistic −0.070, the Bayesian 0.074, DTOPS 0.171
+(0.866); the equal-weight mean of ours and the consensus 0.133, of ours and DTOPS 0.199. The mean with DTOPS is
+reported as `ri_probability_combined` in the cycle record and the cell with that caveat; ours stays the headline and
+the regime switch until a tuning-season sample exists.
+
+**The rest of the roadmap, briefly** (`ROADMAP_0.16.md` has the matrix): the GFS's own accumulated rain travels with
+every world as half of its rain -- against gauge-corrected radar on US landfalls, Ida 23 vs 45 mm mean error,
+Nicholas 17 vs 55, Fred 21 vs 36, Ian level; the calibrated peak quantiles (coverage 0.53 / 0.77 / 0.91 / 0.95 at
+50 / 75 / 90 / 95%, q90 four kt above the true peak of the category-5 storms where the consensus max sits 37 kt
+under) and E[peak | RI] (+0.6 kt bias on the storms that went rapid); the arrival-time window (3.6 h at 24 h overall,
+7.3 h for storms under 3 m/s; no along-track bias found, so nothing is nudged); the cycle record and the previous
+cycle's feedback found automatically. Rejected on the tuning seasons and listed as such: the stall-over-water penalty,
+a translation-speed rain factor, a 115-kt rain saturation, nonlinear rain transforms, dynamic per-storm model weighting.
+
+**The answer key.** `benchmark_heldout_atlantic_2018_2020_2022.csv.gz` in this repository holds the 849 held-out
+Atlantic cases with the best-track truth at every lead and every reference's forecast or error on them: NatureV1 0.14
+and 0.16 tracks, 0.15 and 0.16 intensities, the official forecast and the aids (HCCA, TVCN, IVCN, HWRF, HMON, SHIPS,
+LGEM, GFS, GEFS mean), the archived models' track errors (HRES, Pangu, GraphCast, FuXi, Aurora, FGN), CLIPER and
+extrapolation. `naturev1.cyclone.verify.compare` scores a new forecast against it on the same storms with the
+storm-block bootstrap. One long table, one scoring function: a claim about a hurricane model can be checked on it.
+
 ## 5. Limitations
 
 - **Resolution.** 1.5° (~165 km) cannot resolve an eyewall, so intensity is the weakest output. The explicit
@@ -1130,7 +1211,7 @@ turns a forward pass into the forecast bundle: track scenarios with cones, conse
 intensity, rapid intensification, eyewall, and a point forecast, in physical units with 90% intervals, with
 every untrained section marked unavailable.
 
-The hurricane path (0.13-0.15; the physics, the swarm, the parishes) is one call, live or replayed as it was known at
+The hurricane path (0.13-0.16; the physics, the swarm, the guidance, the parishes) is one call, live or replayed as it was known at
 the time:
 
 ```python
@@ -1147,6 +1228,10 @@ print(format_landfall(landfall_summary(region, run["result"], run["case"], run["
                                        analysis_time="2025-10-27T00")))  # when, where, how strong; rain if hit
 print(run["result"]["peak_probability"])                              # P(peak within 5 days >= 64/96/113/137 kt)
 print(run["result"]["intensity_if_ri"], run["result"]["ri_probability"])   # the rapid-intensification branch
+# 0.16: the NHC a-deck is read by default (guidance=False switches it off) and its aids blended in; the official
+# forecast, the aids used and our own forecast before the blend:
+print(run["guidance"]["ofcl"], run["result"]["aids_track"], run["result"]["aids_intensity"], run["result"]["intensity_ours"])
+print(run["guidance"]["nhc_ri"], run["guidance"].get("ri_probability_combined"))   # the NHC's RI guidance beside ours
 ```
 
 ### Files in this repository

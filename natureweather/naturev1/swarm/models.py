@@ -357,7 +357,6 @@ def fetch_models(case, when, names=DEFAULT_MODELS, cache: str | Path = "~/.cache
         try:
             flow, track, extras = LiveModel(spec, cache).forecast_flow(when, case, leads, hours)
             out[name] = {"title": spec.title, "flow": flow, "track": track, "extras": extras}
-            lost = int(np.isfinite(track[:, 0]).sum())
             followed = [h for h, p in zip(leads, track) if np.isfinite(np.asarray(p)[0])]
             log(f"{spec.title}: read; its storm followed to {followed[-1] if followed else 0} h")
         except Exception as error:
