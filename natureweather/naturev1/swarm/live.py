@@ -122,11 +122,27 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
 
     at_analysis = [f for f in best if f.time == when]
     r34 = gale_radius_km(at_analysis[0]) if at_analysis else float("nan")
-    impact = (impact_from_forecast(region, result, case, particles=impact_particles, device=device, r34_km=r34)
+    qpf, model_track = None, None
+    if region is not None and "gfs" in read and read["gfs"].get("track") is not None:
+        # the GFS's own rain, to travel with every world (half of each world's rain): see models.fetch_qpf
+        try:
+            from .models import fetch_qpf
+
+            pad = 1.5
+            bounds = (float(region.lat.min()) - pad, float(region.lat.max()) + pad, float(region.lon.min()) - pad, float(region.lon.max()) + pad)
+            qpf = fetch_qpf(when, bounds, cache=cache / "qpf", log=log)
+            gt = np.asarray(read["gfs"]["track"], np.float64)
+            ok = np.isfinite(gt[:, 0])
+            model_track = (np.concatenate([[0.0], np.asarray(result["leads"], float)[ok]]), np.concatenate([[case.lat], gt[ok, 0]]), np.concatenate([[case.lon], gt[ok, 1]]))
+        except Exception as error:
+            log(f"GFS rain not used: {type(error).__name__}: {error}")
+            qpf, model_track = None, None
+    impact = (impact_from_forecast(region, result, case, particles=impact_particles, device=device, r34_km=r34, qpf=qpf, model_track=model_track)
               if region is not None else None)
     run = {"case": case, "result": result, "impact": impact, "fixes_before": before, "fixes_after": after,
            "best": best, "analysis_time": when, "ess_after": ess_after, "model_track": model_track, "r34_km": r34,
            "previous_used": previous["time"] if isinstance(previous, dict) and previous.get("time") is not None else None,
+           "qpf_used": (qpf["source"] + f" to {int(qpf['hours'][-1])} h") if qpf is not None else None,
            "models": {k: {"title": v["title"], "track": v["track"], "extras": v["extras"]} for k, v in read.items()}}
     if save_runs:
         try:

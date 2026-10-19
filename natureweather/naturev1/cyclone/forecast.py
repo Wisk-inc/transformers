@@ -49,7 +49,8 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
         "shear", "intensity_kt": {member: (L,)}, "intensity" (L,), "ri_probability" (P(+30 kt in 24 h)),
         "intensity_regime" ("rapid" when the rapid-intensification weights were used), "intensity_if_ri" (the path if
         the storm intensifies rapidly, to read with "ri_probability"), "peak_probability" (P(peak within the window >=
-        64/96/113/137 kt)), "category_probability"
+        64/96/113/137 kt)), "peak_quantiles" (the 50/75/90/95% quantiles of the peak), "peak_if_ri_kt" (E[peak | RI]),
+        "category_probability"
         (P(>= 64 / 96 / 113 / 137 kt) per lead), "cone_fixed_km", "model_spread_km" and "model_deepening_hpa" (with
         models: the climatological cone behind the flow-dependent one, the models' disagreement, their deepening)}``.
     """
@@ -158,7 +159,8 @@ def consensus_table(members: dict) -> dict:
 def _intensity(case, env, ctx, track, leads, model_extras=None) -> dict:
     from . import coefficients
     from .intensity import (category_probabilities, decay_along, environment_along_track, lgem_intensity,
-                            model_deficit_change, model_trend_intensity, peak_probability, ri_probability, ri_scenario_intensity,
+                            model_deficit_change, model_trend_intensity, peak_if_ri, peak_probability, peak_quantiles, ri_probability,
+                            ri_scenario_intensity,
                             shifor_intensity, trend_intensity)
 
     members = {"persistence": np.full(len(leads), case.wind_kt)}
@@ -224,6 +226,15 @@ def _intensity(case, env, ctx, track, leads, model_extras=None) -> dict:
         extra["intensity_note"] = f"peak probability unavailable ({type(error).__name__}: {error})"
     if peak:
         extra["peak_probability"] = peak
+    try:
+        pq = peak_quantiles(case, along, intensity, extra.get("ri_probability"), model_dp, extra.get("intensity_if_ri"), leads=leads)
+        if pq:
+            extra["peak_quantiles"] = pq
+        e_ri = peak_if_ri(case, along, intensity, extra.get("ri_probability"), model_dp, extra.get("intensity_if_ri"), leads=leads)
+        if np.isfinite(e_ri):
+            extra["peak_if_ri_kt"] = e_ri
+    except Exception as error:
+        extra["intensity_note"] = f"peak quantiles unavailable ({type(error).__name__}: {error})"
     if categories:
         extra["category_probability"] = categories
     return {"intensity_kt": members, "intensity": intensity, "environment": along, **extra}

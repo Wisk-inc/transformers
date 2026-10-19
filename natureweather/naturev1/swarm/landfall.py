@@ -41,6 +41,38 @@ def _weighted_quantile(values, weights, q):
     return float(np.interp(q, c, v))
 
 
+def arrival_uncertainty_h(case, track, leads, hour, table: dict | None = None) -> dict | None:
+    """
+    The typical arrival-time error (hours) for a landfall ``hour`` hours out, from the held-out table
+    ``coefficients.ARRIVAL_TIME_ERROR``: the error of the blended track's crossing of the line through the truth
+    position (24 and 48 h), binned by the forecast's own translation speed. The archive shows no systematic early or
+    late bias to correct (the mean is 0.1-1.7 h late); what it shows is that slow movers are the uncertain ones
+    (7 h typical error at 24 h below 3 m/s against 2 h above 5 m/s), which is the window a parish should plan with.
+    """
+    if table is None:
+        from ..cyclone import coefficients
+
+        table = getattr(coefficients, "ARRIVAL_TIME_ERROR", None)
+    if not table or not np.isfinite(hour) or hour <= 0:
+        return None
+    from ..cyclone.geometry import great_circle_km
+
+    lead = "24" if hour <= 36 else "48"
+    leads = list(leads)
+    if int(lead) not in leads:
+        return None
+    k = leads.index(int(lead))
+    track = np.asarray(track, np.float64)
+    if not np.isfinite(track[k, 0]):
+        return None
+    speed = great_circle_km(case.lat, case.lon, track[k, 0], track[k, 1]) / float(lead) / 3.6          # km/h -> m/s
+    for name, (lo, hi) in table["speed_bins_ms"].items():
+        if lo <= speed < hi:
+            row = table["hours"][lead]["by_forecast_speed"][name]
+            return {"mae_h": float(row["mae_h"]), "mean_h": float(row["mean_h"]), "speed_ms": float(speed), "lead_h": int(lead), "n": int(row["n"])}
+    return None
+
+
 def landfall_summary(region, result: dict, case, impact=None, where="Jamaica", analysis_time=None) -> dict:
     """
     Args:
@@ -116,8 +148,16 @@ def landfall_summary(region, result: dict, case, impact=None, where="Jamaica", a
         cons = {"hour": float(hh[k]), "time": stamp(hh[k]), "unit": region.label(cunit[k]), "lat": round(float(clat[k]), 2),
                 "lon": round(float(clon[k]), 2), "intensity_kt": round(ikt(hh[k]), 0), "intensity_band_kt": band_at(hh[k])}
     out["consensus"] = cons
+    if cons.get("hour") is not None:
+        unc = arrival_uncertainty_h(case, result["track"], result["leads"], cons["hour"])
+        if unc:
+            out["arrival_uncertainty"] = unc
     if result.get("peak_probability"):
         out["peak_probability"] = result["peak_probability"]
+    if result.get("peak_quantiles"):
+        out["peak_quantiles"] = result["peak_quantiles"]
+    if result.get("peak_if_ri_kt") is not None:
+        out["peak_if_ri_kt"] = float(result["peak_if_ri_kt"])
     if_ri = result.get("intensity_if_ri")
     p_ri = result.get("ri_probability")
     if if_ri is not None and p_ri is not None and cin.any() and np.isfinite(if_ri).any():
@@ -160,10 +200,19 @@ def format_landfall(summary: dict, top: int = 14) -> str:
         band = c.get("intensity_band_kt")
         lines.append(f"  consensus track: {c['time']} near {c['unit'].split(',')[0]} ({c['lat']}N {abs(c['lon']):.2f}W), "
                      f"{c['intensity_kt']:.0f} kt" + (f" (10-90%: {band[0]:.0f}-{band[1]:.0f} kt)" if band else ""))
+    u = s.get("arrival_uncertainty")
+    if u:
+        lines.append(f"  typical arrival-time error at this range and speed ({u['speed_ms'] * 1.944:.0f} kt): +/-{u['mae_h']:.0f} h "
+                     f"(held-out mean {u['mean_h']:+.1f} h, n={u['n']}); plan with the 10-90% window above")
     r = s.get("if_rapid")
     if r:
+        e_ri = s.get("peak_if_ri_kt")
         lines.append(f"  if it intensifies rapidly (probability {r['probability']:.0%}): landfall at {r['landfall_kt']:.0f} kt, "
-                     f"peak {r['peak_kt']:.0f} kt at {r['peak_time']}")
+                     f"path peak {r['peak_kt']:.0f} kt at {r['peak_time']}" + (f"; expected peak given rapid intensification {e_ri:.0f} kt" if e_ri else ""))
+    pq = s.get("peak_quantiles")
+    if pq:
+        lines.append("  peak within the forecast, calibrated quantiles: " + ", ".join(f"{int(round(l * 100))}% {v:.0f} kt" for l, v in zip(pq["levels"], pq["peak_kt"]))
+                     + "  (the 90% figure is the ceiling to plan for)")
     pp = s.get("peak_probability")
     if pp:
         names = {64: "hurricane", 96: "major (96 kt)", 113: "category 4 (113 kt)", 137: "category 5 (137 kt)"}
@@ -188,4 +237,4 @@ def format_landfall(summary: dict, top: int = 14) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["format_landfall", "landfall_summary"]
+__all__ = ["arrival_uncertainty_h", "format_landfall", "landfall_summary"]

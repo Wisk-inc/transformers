@@ -83,9 +83,12 @@ def test_previous_cycle_error_feeds_back_into_the_track():
 def test_landfall_text_carries_the_peak_probabilities_and_rain_if_hit():
     region, case, result, impact = _island_run()
     result["peak_probability"] = {"thresholds_kt": [64.0, 96.0, 113.0, 137.0], "probability": [1.0, 0.62, 0.31, 0.08]}
+    result["peak_quantiles"] = {"levels": [0.5, 0.75, 0.9, 0.95], "peak_kt": [110.0, 118.0, 131.0, 140.0]}
+    result["peak_if_ri_kt"] = 138.0
     s = landfall_summary(region, result, case, impact, where=None, analysis_time="2025-10-27T00")
     text = format_landfall(s)
     assert "chance the storm peaks at or above" in text and "category 4 (113 kt) 31%" in text
+    assert "90% 131 kt" in text and "ceiling to plan for" in text and s["peak_if_ri_kt"] == 138.0
     assert "rain if hit" in text and "max mm" in text
 
 
@@ -107,3 +110,19 @@ def test_rescaling_the_worlds_about_the_consensus_scales_their_spread_exactly():
     k0 = list(fc.track_hours).index(0.0)
     assert np.allclose(fc.track[:, k0], before_track[:, k0]), "nothing moves at the analysis time"
     assert np.isfinite(fc.positions).all() and np.isfinite(fc.track).all()
+
+
+def test_peak_quantiles_are_calibrated_tables_and_monotone():
+    from naturev1.cyclone.intensity import peak_if_ri, peak_quantiles
+
+    case = _case(wind=70.0, lat=16.0)
+    path = np.array([80, 95, 115, 125, 120, 100, 80, 70.0])
+    hot = peak_quantiles(case, _along(pi=165.0, tchp=120.0, shear=3.0, rh=0.75), np.linspace(70, 125, 8), 0.6,
+                         np.array([np.nan, np.nan, -25.0, -35.0, -40.0] + [np.nan] * 3), intensity_if_ri=path)
+    cold = peak_quantiles(case, _along(pi=100.0, tchp=20.0, shear=15.0, rh=0.40), np.linspace(70, 55, 8), 0.02)
+    assert hot["levels"] == [0.5, 0.75, 0.9, 0.95] and np.all(np.diff(hot["peak_kt"]) >= -1e-9), "quantiles never cross"
+    assert hot["peak_kt"][2] > 140.0 > cold["peak_kt"][2], "a Melissa-like environment gets a category-5 ceiling, a sheared one does not"
+    assert all(15.0 <= v <= 200.0 for v in hot["peak_kt"] + cold["peak_kt"])
+    e = peak_if_ri(case, _along(pi=165.0, tchp=120.0, shear=3.0, rh=0.75), np.linspace(70, 125, 8), 0.6, intensity_if_ri=path)
+    assert 110.0 < e < 180.0 and e > hot["peak_kt"][0] - 40.0
+    assert peak_quantiles(case, _along(), np.full(8, 90.0), 0.2, table={}) == {} and np.isnan(peak_if_ri(case, _along(), np.full(8, 90.0), 0.2, table={}))

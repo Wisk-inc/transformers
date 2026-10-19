@@ -107,3 +107,46 @@ def test_peak_and_ri_follow_the_callers_leads():
     assert len(p["probability"]) == 4 and all(0.0 <= x <= 1.0 for x in p["probability"])
     q = ri_probability(case, _along(), model_dp=dp, leads=leads)
     assert 0.0 <= q <= 1.0
+
+
+def test_arrival_uncertainty_comes_from_the_held_out_table_and_lands_in_the_report():
+    from naturev1.swarm.landfall import arrival_uncertainty_h, format_landfall, landfall_summary
+
+    region, case, result, impact = _island_run()
+    u = arrival_uncertainty_h(case, result["track"], result["leads"], 22.0)
+    assert u and u["lead_h"] == 24 and u["mae_h"] > 0 and abs(u["speed_ms"] - 20.0 / 3.6) < 0.5, u
+    s = landfall_summary(region, result, case, impact, where=None, analysis_time="2025-10-27T00")
+    assert "arrival_uncertainty" in s and "typical arrival-time error" in format_landfall(s)
+    assert arrival_uncertainty_h(case, result["track"], result["leads"], float("nan")) is None
+
+
+def test_the_models_rain_travels_with_each_world():
+    from naturev1.cyclone.data import LEADS
+    from naturev1.swarm.impact import ImpactSettings, paint
+
+    region, case, result, impact = _island_run(n=40)
+    fc = result["swarm"]["forecast"]
+    hours, track = np.asarray(fc.track_hours, float), fc.track
+    kt, hh = np.concatenate([[case.wind_kt], result["intensity"]]), np.concatenate([[0.0], np.asarray(LEADS, float)])
+    lat_c = float(np.nanmean(track[:, :, 0]))
+    # the model's storm runs 1 degree south of the worlds; its rain is a uniform 6 mm per 6 h (1 mm/h) everywhere
+    q_lat = np.arange(region.lat.min() - 3.0, region.lat.max() + 3.0, 0.25); q_lon = np.arange(region.lon.min() - 3.0, region.lon.max() + 3.0, 0.25)
+    ends = np.arange(6.0, 49.0, 6.0)
+    uniform = {"source": "test", "hours": ends, "buckets": np.full((ends.size, q_lat.size, q_lon.size), 6.0, np.float32), "lat": q_lat, "lon": q_lon}
+    model_track = (hours, track[:, :, 0].mean(0) - 1.0, track[:, :, 1].mean(0))
+    only_model = paint(region, track, hours, kt, hh, settings=ImpactSettings(cell_stride=2, qpf_weight=1.0, orographic_per_ms=0.0), qpf=uniform, model_track=model_track)
+    r = only_model.cell_maps["mean_rain_mm"]                                  # NaN where a cell was not painted (stride 2)
+    near = (np.abs(region.lat[:, None] - lat_c) < 0.3) & region.land
+    assert 40.0 <= np.nanmean(r[near]) <= 49.0, np.nanmean(r[near])              # 1 mm/h for the hours the cell is within reach: about 48 h
+    # a blob of model rain centred on the MODEL's track lands on the worlds' track once moved with them
+    blob = np.exp(-(((q_lat[:, None] - (lat_c - 1.0)) / 0.3) ** 2)) * np.ones((1, q_lon.size))
+    blobby = dict(uniform, buckets=np.repeat((60.0 * blob)[None], ends.size, 0).astype(np.float32))
+    moved = paint(region, track, hours, kt, hh, settings=ImpactSettings(cell_stride=2, qpf_weight=1.0, orographic_per_ms=0.0), qpf=blobby, model_track=model_track)
+    rm = np.nan_to_num(moved.cell_maps["mean_rain_mm"])
+    lat_grid = np.broadcast_to(region.lat[:, None], rm.shape)
+    wet_lat = float((rm * lat_grid)[region.land].sum() / max(rm[region.land].sum(), 1e-9))
+    assert abs(wet_lat - lat_c) < 0.35, (wet_lat, lat_c)                 # on the worlds (lat_c), not the model (lat_c - 1)
+    half = paint(region, track, hours, kt, hh, settings=ImpactSettings(cell_stride=2, qpf_weight=0.5, orographic_per_ms=0.0), qpf=uniform, model_track=model_track)
+    none = paint(region, track, hours, kt, hh, settings=ImpactSettings(cell_stride=2, qpf_weight=0.0, orographic_per_ms=0.0), qpf=uniform, model_track=model_track)
+    rh, rn = half.cell_maps["mean_rain_mm"], none.cell_maps["mean_rain_mm"]
+    assert np.allclose(np.nanmean(rh[near]), 0.5 * np.nanmean(rn[near]) + 0.5 * np.nanmean(r[near]), rtol=0.05)

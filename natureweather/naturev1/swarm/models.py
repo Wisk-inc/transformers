@@ -365,5 +365,71 @@ def fetch_models(case, when, names=DEFAULT_MODELS, cache: str | Path = "~/.cache
     return out
 
 
-__all__ = ["DEFAULT_MODELS", "MODELS", "LiveModel", "ModelSpec", "coarsen_to_nodes", "decode_grib", "decode_grib_native",
+
+def fetch_qpf(init, bounds, hours: int = 120, step: int = 6, cache=None, log=print) -> dict | None:
+    """
+    The GFS cycle's own accumulated precipitation over ``bounds = (lat_min, lat_max, lon_min, lon_max)`` as 6-hourly
+    buckets (mm) to ``hours``, read by byte range from the cycle's cumulative APCP records (about 0.4 MB each, 20 records
+    for five days). Against gauge-corrected radar on four held-out US landfalls (eight cycles) the model's own rain beat
+    the parametric R-CLIPER swath along the *observed* track on three (Ida: cell MAE 23 against 45 mm, correlation 0.78
+    against 0.49) and lost on one (Ian), and a 50/50 blend of the two, each on the model's track, was the best or
+    within noise of it on all four -- which is how :func:`naturev1.swarm.impact.paint` uses it: every world's rain is
+    half its own R-CLIPER and half the model's field moved with the world (``ImpactSettings.qpf_weight``).
+
+    Returns ``{"source", "init", "hours" (bucket end hours), "buckets" (T, ny, nx) mm, "lat" ascending, "lon" ascending}``
+    or None when the cycle has no readable APCP yet. Cached under ``cache`` by cycle and bounds.
+    """
+    from .analysis import _get
+
+    init = np.datetime64(init, "h")
+    day, hour = str(init)[:10].replace("-", ""), int(str(init)[11:13])
+    key = f"gfs_{str(init).replace(':', '')}_{bounds[0]:.1f}_{bounds[1]:.1f}_{bounds[2]:.1f}_{bounds[3]:.1f}.npz"
+    path = Path(cache).expanduser() / key if cache is not None else None
+    if path is not None and path.exists():
+        z = np.load(path)
+        return {"source": "GFS", "init": str(init), "hours": z["hours"], "buckets": z["buckets"], "lat": z["lat"], "lon": z["lon"]}
+
+    def cumulative(lead):
+        url = GFS_URL.format(day=day, hour=hour, lead=lead)
+        want = f"0-{lead // 24} day acc fcst" if lead % 24 == 0 else f"0-{lead} hour acc fcst"
+        lines = _get(url + ".idx").decode().splitlines()
+        offsets = [int(line.split(":")[1]) for line in lines]
+        for k, line in enumerate(lines):
+            p = line.split(":")
+            if len(p) > 5 and p[3] == "APCP" and p[5].strip() == want:
+                raw = _get(url, offsets[k], offsets[k + 1] - 1 if k + 1 < len(lines) else None)
+                return decode_grib_native(raw)
+        raise KeyError(f"{url}: no APCP '{want}'")
+
+    buckets, ends, prev, grid = [], [], None, None
+    for lead in range(step, hours + 1, step):
+        try:
+            cum, grid = cumulative(lead)
+        except Exception as error:
+            log(f"GFS rain: stopped at {lead - step} h ({type(error).__name__})")
+            break
+        buckets.append(cum if prev is None else cum - prev)
+        ends.append(lead)
+        prev = cum
+    if not buckets:
+        return None
+    lat0, dlat, lon0, dlon = grid
+    stack = np.stack(buckets)
+    lat = lat0 - dlat * np.arange(stack.shape[1])
+    lon = (lon0 + dlon * np.arange(stack.shape[2]) + 180.0) % 360.0 - 180.0
+    order = np.argsort(lon)
+    lon, stack = lon[order], stack[:, :, order]
+    if lat[0] > lat[-1]:
+        lat, stack = lat[::-1], stack[:, ::-1, :]
+    i = (lat >= bounds[0]) & (lat <= bounds[1])
+    j = (lon >= bounds[2]) & (lon <= bounds[3])
+    out = {"source": "GFS", "init": str(init), "hours": np.asarray(ends, float), "buckets": np.clip(stack[:, i][:, :, j], 0.0, None).astype(np.float32),
+           "lat": lat[i], "lon": lon[j]}
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(path, **out)
+    log(f"GFS rain: {len(ends)} six-hour buckets to {ends[-1]} h over {out['lat'].size} x {out['lon'].size} cells")
+    return out
+
+__all__ = ["fetch_qpf", "DEFAULT_MODELS", "MODELS", "LiveModel", "ModelSpec", "coarsen_to_nodes", "decode_grib", "decode_grib_native",
            "fetch_models", "flow_and_track", "native_window"]

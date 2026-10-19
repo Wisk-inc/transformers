@@ -687,10 +687,60 @@ def peak_probability(case, along: dict, consensus_kt, ri_probability: float, mod
         out.append(1.0 if case.wind_kt >= thr else float(1.0 / (1.0 + np.exp(-float(z @ w)))))
     return {"thresholds_kt": [float(t) for t in table["thresholds_kt"]], "probability": out}
 
+
+def _peak_row(case, along: dict, consensus_kt, ri_probability, model_dp, intensity_if_ri, table: dict, leads=None) -> np.ndarray:
+    """The standardised PEAK features plus the rapid-intensification path's rise, as the peak-quantile tables were fitted."""
+    x = peak_features(case, along, consensus_kt, ri_probability, model_dp, leads)
+    mu, sd = np.asarray(table["mean"], np.float64), np.asarray(table["std"], np.float64)
+    n = x.size - 1
+    z = np.concatenate([x[:1], (x[1:] - mu[:n]) / np.where(sd[:n] > 1e-9, sd[:n], 1.0)])
+    scen = np.asarray(intensity_if_ri, np.float64) if intensity_if_ri is not None else np.array([np.nan])
+    rise = (np.nanmax(scen) - case.wind_kt) if np.isfinite(scen).any() else 0.0
+    return np.append(z, (rise - mu[n]) / (sd[n] if sd[n] > 1e-9 else 1.0))
+
+
+def peak_quantiles(case, along: dict, consensus_kt, ri_probability, model_dp=None, intensity_if_ri=None, table: dict | None = None,
+                   leads=None) -> dict:
+    """
+    ``{"levels": [0.5, 0.75, 0.9, 0.95], "peak_kt": [...]}`` -- calibrated quantiles of the storm's **peak** intensity
+    within the forecast window (``coefficients.PEAK_QUANTILES``: linear pinball-loss fits on the tuning seasons). The
+    point forecast cannot reach an explosive storm's top end and should not try; the 90% quantile can: on the held-out
+    storms that reached 137 kt it sits 4 kt above their true peak where the consensus maximum sits 37 kt below, with
+    91% of all held-out peaks under it. Quantiles are made monotone at prediction time.
+    """
+    if table is None:
+        from . import coefficients
+
+        table = getattr(coefficients, "PEAK_QUANTILES", None)
+    if not table:
+        return {}
+    z = _peak_row(case, along, consensus_kt, ri_probability, model_dp, intensity_if_ri, table, leads)
+    levels = sorted(float(q) for q in table["quantiles"])
+    rise = np.maximum.accumulate(np.array([float(z @ np.asarray(table["quantiles"][str(q)], np.float64)) for q in levels]))
+    return {"levels": levels, "peak_kt": [float(np.clip(case.wind_kt + r, 15.0, 200.0)) for r in rise]}
+
+
+def peak_if_ri(case, along: dict, consensus_kt, ri_probability, model_dp=None, intensity_if_ri=None, table: dict | None = None,
+               leads=None) -> float:
+    """
+    E[peak within the window | the storm intensifies rapidly], kt (``coefficients.PEAK_IF_RI``, a ridge fit on the
+    tuning seasons' rapid intensifiers): unbiased on the held-out storms that did go rapid (+0.6 kt, MAE 13) where the
+    rapid-intensification path's peak sat 17 kt low. To be read with ``ri_probability``, never as the forecast: on the
+    storms that do not go rapid it runs 35 kt high.
+    """
+    if table is None:
+        from . import coefficients
+
+        table = getattr(coefficients, "PEAK_IF_RI", None)
+    if not table:
+        return float("nan")
+    z = _peak_row(case, along, consensus_kt, ri_probability, model_dp, intensity_if_ri, table, leads)
+    return float(np.clip(case.wind_kt + float(z @ np.asarray(table["weights"], np.float64)), 15.0, 200.0))
+
 __all__ = ["LGEM_KAPPA", "PEAK_FEATURES", "RI_FEATURES", "RI_MODEL_FEATURES", "RI_OCEAN_FEATURES", "RI_SIZE_FEATURES", "SHIFOR_PREDICTORS",
            "SHIPS_PREDICTORS",
            "TREND_TAU_H",
            "category_probabilities", "decay_along", "environment_along_track", "fit_ri", "fit_ri_path", "model_deficit_change",
-           "model_trend_intensity", "peak_features", "peak_probability", "recent_change", "ri_features", "ri_probability", "ri_scenario_intensity", "trend_intensity",
+           "model_trend_intensity", "peak_features", "peak_if_ri", "peak_probability", "peak_quantiles", "recent_change", "ri_features", "ri_probability", "ri_scenario_intensity", "trend_intensity",
            "fit_lgem", "fit_shifor", "fit_ships", "lgem_batch", "lgem_intensity", "lgem_table", "potential_intensity_at", "shifor_intensity",
            "shifor_predictors", "ships_intensity", "ships_predictors"]

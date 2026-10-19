@@ -595,7 +595,48 @@ RAIN_SCALE = {'multiplier': 1.19,
                                         'mae_heavy': 58.6596,
                                         'p995': 0.9877}}}
 
-PROVENANCE = {'generated': '2026-10-18 19:40 UTC',
+PEAK_QUANTILES = {'features': ['one', 'v0', 'cons_rise', 'cons_max', 'headroom72', 'tchp48', 'shear48', 'rh48', 'p_ri', 'logit_p',
+              'dp24', 'has_dp', 'land72', 'abslat', 'scen_rise'],
+ 'mean': [54.35838, 12.04692, 66.4053, 91.12471, 28.25157, 10.53359, 0.6865, 0.07466, -3.27858, -0.88102, 0.95414,
+          0.12388, 19.46433, 33.36314],
+ 'std': [28.01184, 14.80723, 24.62294, 48.01961, 26.90911, 6.39609, 0.15142, 0.08733, 1.53582, 4.07612, 0.20917,
+         0.25617, 7.26468, 16.53708],
+ 'quantiles': {'0.5': [15.98992, -3.98112, 11.54093, 2.4112, 1.02477, 2.45392, -2.12953, 0.56947, 5.62092, -1.67897,
+                       -1.14164, 5.05584, -1.45962, -0.18116, -0.22434],
+               '0.75': [30.39761, -5.33318, 14.14135, 2.43683, 2.82383, 2.93821, -1.81273, 0.17093, 1.75926, 2.4545,
+                        -1.39718, 5.06781, -1.54468, -0.22826, 0.02534],
+               '0.9': [46.41835, -6.40701, 12.41642, 0.17791, 4.61604, 4.64533, -2.62747, -1.07527, -2.5048, 6.03149,
+                       -0.94617, 9.08334, -2.70622, -1.98146, 0.77281],
+               '0.95': [55.89355, -5.76505, 8.15522, -1.65429, 6.7332, 8.27783, -3.56078, -1.46701, -1.37289, 4.86184,
+                        -0.45709, 7.24641, -5.0844, -1.33421, -0.45249]},
+ 'note': 'linear pinball-loss fits of (true 120 h peak - analysis wind) on the standardised PEAK features plus the '
+         'RI-path peak rise; dev 2016/2017/2019'}
+
+PEAK_IF_RI = {'features': ['one', 'v0', 'cons_rise', 'cons_max', 'headroom72', 'tchp48', 'shear48', 'rh48', 'p_ri', 'logit_p',
+              'dp24', 'has_dp', 'land72', 'abslat', 'scen_rise'],
+ 'weights': [53.1333, -3.89744, 9.0371, 1.00069, 8.10017, 3.15362, 1.76969, -1.45009, 0.2314, -6.3153, 0.86357, -0.0,
+             -8.76211, -4.40894, -4.77421],
+ 'mean': [54.35838, 12.04692, 66.4053, 91.12471, 28.25157, 10.53359, 0.6865, 0.07466, -3.27858, -0.88102, 0.95414,
+          0.12388, 19.46433, 33.36314],
+ 'std': [28.01184, 14.80723, 24.62294, 48.01961, 26.90911, 6.39609, 0.15142, 0.08733, 1.53582, 4.07612, 0.20917,
+         0.25617, 7.26468, 16.53708]}
+
+ARRIVAL_TIME_ERROR = {'hours': {'24': {'all': {'mean_h': 1.2, 'median_h': 0.3, 'mae_h': 3.55, 'n': 3432, 'never_crosses': 1015},
+                  'by_forecast_speed': {'< 3 m/s': {'mean_h': 3.54, 'mae_h': 7.3, 'n': 794},
+                                        '3-5': {'mean_h': 0.82, 'mae_h': 3.02, 'n': 1152},
+                                        '5-8': {'mean_h': 0.29, 'mae_h': 1.88, 'n': 1213},
+                                        '> 8': {'mean_h': 0.09, 'mae_h': 2.22, 'n': 273}}},
+           '48': {'all': {'mean_h': 0.87, 'median_h': 0.66, 'mae_h': 5.65, 'n': 2685, 'never_crosses': 1762},
+                  'by_forecast_speed': {'< 3 m/s': {'mean_h': -0.05, 'mae_h': 9.91, 'n': 666},
+                                        '3-5': {'mean_h': 1.67, 'mae_h': 5.28, 'n': 949},
+                                        '5-8': {'mean_h': 0.95, 'mae_h': 3.24, 'n': 935},
+                                        '> 8': {'mean_h': -0.84, 'mae_h': 3.99, 'n': 135}}}},
+ 'speed_bins_ms': {'< 3 m/s': [0, 3], '3-5': [3, 5], '5-8': [5, 8], '> 8': [8, 99]},
+ 'sign': 'forecast arrival minus truth, hours; positive = the forecast arrives late',
+ 'source': 'held-out 2018 / 2020-2022, multi-model blend, crossing of the line through the truth position at 24 / 48 '
+           "h perpendicular to the truth motion; speed = the forecast's mean speed to that lead"}
+
+PROVENANCE = {'generated': '2026-10-19 13:35 UTC',
  'CLIPER': 'IBTrACS v04r01 best tracks 1980-2014, all basins (82,816 fixes at 00/06/12/18 UTC)',
  'SHIFOR': 'IBTrACS v04r01 best tracks 1980-2014, all basins',
  'CONSENSUS': 'hindcasts of the 2016, 2017 and 2019 seasons (3,053 forecasts, NA EP WP SI SP)',
@@ -650,4 +691,11 @@ PROVENANCE = {'generated': '2026-10-18 19:40 UTC',
                    'per lead on the 2016, 2017 and 2019 HRES blends; about 1% on the held-out multi-model blend at '
                    '12-36 h, zero beyond 48 h',
  'RAIN_SCALE': 'R-CLIPER storm totals along the observed track against NOAA MRMS gauge-corrected radar for US '
-               'landfalls of 2016, 2017 and 2019 (fit) and 2018, 2020-2022 (held-out)'}
+               'landfalls of 2016, 2017 and 2019 (fit) and 2018, 2020-2022 (held-out)',
+ 'PEAK_QUANTILES': 'linear pinball-loss fits of the 120 h peak rise on the PEAK features plus the RI-path rise, '
+                   '2016/2017/2019; held-out coverage 0.53 / 0.77 / 0.91 / 0.95 at the 50 / 75 / 90 / 95% levels',
+ 'PEAK_IF_RI': "ridge fit of the 120 h peak on the tuning seasons' rapid intensifiers (+30 kt / 24 h); held-out RI "
+               'cases bias +0.6 kt, MAE 13 kt',
+ 'ARRIVAL_TIME_ERROR': "held-out 2018 / 2020-2022: error of the blended track's crossing of the line through the "
+                       "truth position at 24 and 48 h, by the forecast's translation speed; no systematic bias, slow "
+                       'movers the uncertain ones'}

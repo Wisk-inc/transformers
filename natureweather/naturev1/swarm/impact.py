@@ -83,6 +83,9 @@ class ImpactSettings:
     rain_tail: float = RAIN_TAIL
     rain_asymmetry: float = RAIN_ASYMMETRY
     rain_asymmetry_phase_deg: float = RAIN_ASYMMETRY_PHASE
+    #: share of each world's rain taken from the model's own precipitation field (moved with the world) when one is
+    #: given to :func:`paint`; the rest is the world's R-CLIPER. 0.5 is what the radar comparison supported.
+    qpf_weight: float = 0.5
     steep_slope: float = STEEP_SLOPE
     land_decay: bool = True              # False when the intensities already include it (a best track)
     cell_stride: int = 1                 # paint every n-th cell in each direction (2 on a CPU: 4x faster)
@@ -191,7 +194,7 @@ def world_intensity(region: RegionMap, track_h: np.ndarray, hours: np.ndarray, f
 
 def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt, forecast_hours,
           weights: np.ndarray | None = None, settings: ImpactSettings | None = None, device="cpu", chunk: int = 256,
-          seed: int = 0) -> ImpactResult:
+          seed: int = 0, qpf: dict | None = None, model_track=None) -> ImpactResult:
     """
     Paint every world's wind and rain onto ``region`` and count them per unit.
 
@@ -199,6 +202,10 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
         tracks: ``(N, T, 2)`` world tracks (lat, lon) at ``hours`` (from 0).
         forecast_kt / forecast_hours: the intensity forecast to centre the worlds on (kt at those hours, 0 included).
         weights: per-world weights (default equal).
+        qpf: the model's own rain (:func:`naturev1.swarm.models.fetch_qpf`), with ``model_track`` = ``(hours, lat, lon)``
+            of that model's storm: each world takes ``settings.qpf_weight`` of its rain from the model's field displaced
+            by (world - model) at each hour, so the model's rain pattern travels with the world and the swarm's spread
+            applies to it too; the rest is the world's own R-CLIPER.
     """
     st = settings or ImpactSettings()
     gen = torch.Generator().manual_seed(seed)
@@ -256,6 +263,17 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
     size_t = torch.as_tensor(size, dtype=torch.float64, device=dev)
     motion_t = torch.as_tensor(motion, dtype=torch.float64, device=dev)
     track_t = torch.as_tensor(track_h, dtype=torch.float64, device=dev)
+    q_w = float(st.qpf_weight) if (qpf is not None and model_track is not None and st.qpf_weight > 0) else 0.0
+    if q_w > 0:
+        q_lat = np.asarray(qpf["lat"], np.float64); q_lon = np.asarray(qpf["lon"], np.float64)
+        q_ends = np.asarray(qpf["hours"], np.float64)
+        q_step = float(q_ends[0]) if q_ends.size == 1 else float(np.median(np.diff(q_ends)))
+        q_rate = torch.as_tensor(np.asarray(qpf["buckets"], np.float32) / q_step, dtype=dt32, device=dev)     # (T, ny, nx) mm/h
+        q_dlat = float(q_lat[1] - q_lat[0]) if q_lat.size > 1 else 1.0; q_dlon = float(q_lon[1] - q_lon[0]) if q_lon.size > 1 else 1.0
+        mh, mla, mlo = (np.asarray(v, np.float64) for v in model_track)
+        m_lat = np.interp(h, mh, mla); m_lon = np.degrees(np.interp(h, mh, np.unwrap(np.radians(mlo))))
+        if not (np.isfinite(m_lat).all() and q_lat.size > 1 and q_lon.size > 1):
+            q_w = 0.0
     if m:
         for k in range(h.size):
             lat_k, lon_k = track_t[:, k, 0], track_t[:, k, 1]
@@ -304,7 +322,22 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
                     phase = math.radians(float(st.rain_asymmetry_phase_deg)) * torch.sign(la32).view(-1, 1)
                     rate = rate * (1.0 + amp * torch.cos(torch.atan2(east, north) - heading - phase))
                 ascent = (wf["u_ms"] * sx[idx] + wf["v_ms"] * sy[idx]).clamp_min(0.0)
-                rate = rate * (1.0 + st.orographic_per_ms * ascent).clamp(max=st.orographic_cap) * float(st.rain_scale)
+                oro = (1.0 + st.orographic_per_ms * ascent).clamp(max=st.orographic_cap)
+                rate = rate * oro * float(st.rain_scale)
+                if q_w > 0:
+                    # the model's rain, read at the cell displaced by (model - world): the pattern moves with the world
+                    b = int(np.clip(np.searchsorted(q_ends, h[k], side="left"), 0, q_rate.shape[0] - 1))
+                    sh_lat = (la - m_lat[k]).to(dt32).view(-1, 1); sh_lon = (lo - m_lon[k]).to(dt32).view(-1, 1)
+                    fi = (pl.view(1, -1) - sh_lat - float(q_lat[0])) / q_dlat
+                    fj = ((po.view(1, -1) - sh_lon - float(q_lon[0]) + 180.0) % 360.0 - 180.0 + 0.0) / q_dlon
+                    inside_q = (fi >= 0) & (fi <= q_lat.size - 1) & (fj >= 0) & (fj <= q_lon.size - 1)
+                    fi = fi.clamp(0, q_lat.size - 1.001); fj = fj.clamp(0, q_lon.size - 1.001)
+                    i0 = fi.floor().long(); j0 = fj.floor().long(); di = fi - i0; dj = fj - j0
+                    flat = q_rate[b].reshape(-1); nx = q_lon.size
+                    qv = ((1 - di) * (1 - dj) * flat[i0 * nx + j0] + (1 - di) * dj * flat[i0 * nx + j0 + 1]
+                          + di * (1 - dj) * flat[(i0 + 1) * nx + j0] + di * dj * flat[(i0 + 1) * nx + j0 + 1])
+                    qv = torch.where(inside_q, qv, torch.zeros_like(qv)).masked_fill(far, 0.0) * oro
+                    rate = (1.0 - q_w) * rate + q_w * qv
                 rows, cols = ix.view(-1, 1), idx.view(1, -1)
                 stronger = speed > peak[rows, cols]
                 peak_hour[rows, cols] = torch.where(stronger, torch.full_like(speed, float(h[k])), peak_hour[rows, cols])
@@ -426,7 +459,8 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
 
 
 def impact_from_forecast(region: RegionMap, result: dict, case, particles: int | None = None, device="cpu",
-                         settings: ImpactSettings | None = None, seed: int = 0, r34_km: float | None = None) -> ImpactResult:
+                         settings: ImpactSettings | None = None, seed: int = 0, r34_km: float | None = None, qpf: dict | None = None,
+                         model_track=None) -> ImpactResult:
     """
     The impact report for a :func:`naturev1.cyclone.forecast.physics_forecast` result that carries a swarm
     (``swarm=N``): its worlds, re-centred on the consensus track, carry the NatureV1 intensity forecast, spread by the
@@ -460,7 +494,7 @@ def impact_from_forecast(region: RegionMap, result: dict, case, particles: int |
     good = np.isfinite(kt)
     f_hours = np.concatenate([[0.0], leads[good]])
     f_kt = np.concatenate([[case.wind_kt], kt[good]])
-    return paint(region, tracks, hours, f_kt, f_hours, weights, settings, device, seed=seed)
+    return paint(region, tracks, hours, f_kt, f_hours, weights, settings, device, seed=seed, qpf=qpf, model_track=model_track)
 
 
 __all__ = ["AREA_SHARE", "RAIN_ASYMMETRY", "RAIN_SCALE", "RAIN_TAIL", "ImpactResult", "ImpactSettings", "hourly", "impact_from_forecast", "paint", "world_intensity"]
