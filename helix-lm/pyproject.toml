@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "helix-lm"
-version = "0.1.0"
-description = "HELIX: a linear-scaling sequence architecture that keeps exact long-range recall"
+version = "1.0.0"
+description = "HELIX: a linear-scaling sequence architecture with exact long-range recall, and the engine that trains Helix"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -21,10 +21,12 @@ keywords = [
     "delta-rule",
     "sparse-attention",
     "associative-recall",
+    "coding-agent",
+    "pretraining",
     "pytorch",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
@@ -37,10 +39,21 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Typing :: Typed",
 ]
-dependencies = ["torch>=2.5"]
+dependencies = [
+    "torch>=2.6",
+    "numpy>=1.24",
+    "safetensors>=0.4",
+    "tokenizers>=0.20",
+    "huggingface_hub>=0.25",
+    "pyarrow>=15",
+    "zstandard>=0.22",
+]
 
 [project.optional-dependencies]
+kernels = ["flash-linear-attention>=0.3"]
+eval = ["lm_eval>=0.4.5", "evalplus>=0.3"]
 dev = ["pytest>=7", "ruff>=0.6"]
+all = ["helix-lm[kernels,eval]"]
 
 [project.urls]
 Homepage = "https://github.com/Wisk-inc/transformers/tree/main/helix-lm"
@@ -54,7 +67,7 @@ helix = "helix_lm.cli:main"
 packages = ["src/helix_lm"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/helix_lm", "tests", "README.md", "LICENSE", "NOTICE", "pyproject.toml"]
+include = ["src/helix_lm", "tests", "docs", "README.md", "LICENSE", "NOTICE", "pyproject.toml"]
 
 [tool.ruff]
 line-length = 119

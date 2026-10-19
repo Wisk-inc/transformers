@@ -1,5 +1,5 @@
 # Copyright 2026 Nathan. Licensed under the Apache License, Version 2.0.
-"""Configuration for HELIX."""
+"""Configuration for HELIX, and the named sizes the training ladder is built from."""
 
 from __future__ import annotations
 
@@ -7,6 +7,55 @@ import json
 import math
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
+
+# The named sizes. Every one shares the HELIX geometry below (block of 128 tokens, an exact local window of
+# up to 1,024 tokens on four scales, the index on every other layer reading 16 blocks, a 128-wide matrix
+# state per recurrent head) and differs only in width and depth. Parameter counts are from
+# ``HelixConfig.num_parameters`` with the 65,536-token CorxLabs vocabulary; run ``helix size`` to print them.
+_SIZE_COLUMNS = (
+    "hidden_size",
+    "num_hidden_layers",
+    "num_attention_heads",
+    "num_key_value_heads",
+    "head_dim",
+    "intermediate_size",
+    "num_recurrent_heads",
+)
+_SIZE_ROWS = {
+    #       hidden  layers  heads  kv  head_dim  intermediate  recurrent heads
+    "20m": (256, 4, 4, 2, 64, 704, 2),
+    "350m": (1024, 16, 16, 4, 64, 2816, 4),
+    "1b": (2048, 16, 16, 4, 128, 5632, 8),
+    "3b": (2560, 28, 20, 4, 128, 6912, 10),
+    "7b": (4096, 32, 32, 8, 128, 11008, 16),
+    "23b": (6144, 48, 48, 8, 128, 15360, 24),
+}
+SIZES: dict[str, dict] = {name: dict(zip(_SIZE_COLUMNS, row, strict=True)) for name, row in _SIZE_ROWS.items()}
+
+# What every named size shares. ``vocab_size`` is the CorxLabs tokenizer's; it fits in uint16, which is what
+# keeps 460 billion tokens of training data under a terabyte on disk.
+LADDER_DEFAULTS: dict = {
+    "vocab_size": 65536,
+    "block_size": 128,
+    "local_blocks": 8,
+    "num_window_scales": 4,
+    "index_layer_stride": 2,
+    "landmark_dim": 128,
+    "index_branching": 16,
+    "index_beam_width": 4,
+    "index_topk": 16,
+    "index_max_levels": 8,
+    "recurrent_head_dim": 128,
+    "recurrent_value_head_dim": 128,
+    "recurrent_chunk_size": 64,
+    "conv_kernel_size": 4,
+    "rope_theta": 1_000_000.0,
+    "max_position_embeddings": 1_048_576,
+    "tie_word_embeddings": False,
+    "bos_token_id": 1,
+    "eos_token_id": 0,
+    "pad_token_id": 2,
+}
 
 
 @dataclass
@@ -49,6 +98,23 @@ class HelixConfig:
         index_num_distance_buckets: Logarithmic relative *block* distance buckets biasing the descent.
         attention_tile_blocks: Query blocks attended at once. Caps peak activation memory independently of
             context length; 0 processes the whole sequence in one tile. No effect on the result.
+        attention_backend: How strand L is computed on an uncached, unpadded forward -- the training case.
+            ``"flex"`` is FlexAttention, a fused block-sparse kernel that reads each head's window directly
+            and never copies keys; ``"sdpa"`` is the gathered-block reference; ``"auto"`` picks flex on a
+            GPU and the reference elsewhere. Both give the same result (``tests/test_engine.py``), and
+            decoding always uses the reference path.
+        recurrent_backend: How strand R's chunked delta rule is computed: ``"fla"`` is the Triton kernel from
+            ``flash-linear-attention``, ``"torch"`` the reference, ``"auto"`` fla when it is installed and
+            the tensors are on a GPU.
+        activation_checkpointing: Recompute each block's activations in the backward pass. Trades about a
+            third more compute for activation memory that no longer grows with depth.
+        scale_residual_init: Initialize the three projections that write into the residual stream with
+            ``initializer_range / sqrt(2 * num_hidden_layers)``, so the stream's variance does not grow with
+            depth at initialization.
+        loss_chunk_tokens: With labels, compute the cross-entropy over this many tokens at a time and never
+            hold the whole ``(tokens, vocab)`` logit tensor; 0 computes it in one piece and returns logits.
+        z_loss_weight: Weight of the ``log(sum(exp(logits)))^2`` penalty that keeps logits from drifting;
+            0 disables it.
         num_recurrent_heads: Heads of the delta-rule recurrence.
         recurrent_head_dim: Key dimension of the recurrent matrix state.
         recurrent_value_head_dim: Value dimension of the recurrent matrix state.
@@ -67,6 +133,7 @@ class HelixConfig:
         pad_token_id / bos_token_id / eos_token_id: Special token ids.
         layer_types: Per-layer schedule of ``"helix"`` (L+R+I) or ``"helix_local"`` (L+R). Derived from
             ``index_layer_stride`` when omitted.
+        model_name / organization: Who this checkpoint is, for the model card and the identity data.
     """
 
     vocab_size: int = 32000
@@ -89,6 +156,12 @@ class HelixConfig:
     index_max_levels: int = 8
     index_num_distance_buckets: int = 32
     attention_tile_blocks: int = 64
+    attention_backend: str = "auto"
+    recurrent_backend: str = "auto"
+    activation_checkpointing: bool = False
+    scale_residual_init: bool = True
+    loss_chunk_tokens: int = 0
+    z_loss_weight: float = 0.0
 
     num_recurrent_heads: int = 8
     recurrent_head_dim: int = 128
@@ -111,6 +184,8 @@ class HelixConfig:
     eos_token_id: int | None = 2
 
     layer_types: list[str] = field(default_factory=list)
+    model_name: str = "helix"
+    organization: str = "CorxLabs"
 
     def __post_init__(self) -> None:
         if self.head_dim is None:
@@ -129,6 +204,10 @@ class HelixConfig:
             raise ValueError(f"index_branching must be >= 2, got {self.index_branching}.")
         if self.index_layer_stride < 1:
             raise ValueError(f"index_layer_stride must be >= 1, got {self.index_layer_stride}.")
+        if self.attention_backend not in ("auto", "flex", "sdpa"):
+            raise ValueError(f"attention_backend must be 'auto', 'flex' or 'sdpa', got {self.attention_backend!r}.")
+        if self.recurrent_backend not in ("auto", "fla", "torch"):
+            raise ValueError(f"recurrent_backend must be 'auto', 'fla' or 'torch', got {self.recurrent_backend!r}.")
 
         if not self.layer_types:
             self.layer_types = [
@@ -158,11 +237,24 @@ class HelixConfig:
             # The surprise pool averages the `surprise_kernel_size - 1` positions before the current one,
             # so a width of 1 would leave it with nothing to average.
             ("surprise_kernel_size", 2),
+            ("loss_chunk_tokens", 0),
         ):
             if getattr(self, name) < minimum:
                 raise ValueError(f"`{name}` must be >= {minimum}, got {getattr(self, name)}.")
+        if self.z_loss_weight < 0:
+            raise ValueError(f"z_loss_weight must be >= 0, got {self.z_loss_weight}.")
         self.sliding_window = (self.local_blocks + 1) * self.block_size
         self.number_of_conv_states = 2 if self.use_surprise_gating else 1
+
+    # ------------------------------------------------------------------------------------------ sizes --
+    @classmethod
+    def named(cls, size: str, **overrides) -> HelixConfig:
+        """One of the ladder sizes (``helix size`` lists them), with any field overridden."""
+        key = size.lower()
+        if key not in SIZES:
+            raise ValueError(f"unknown size {size!r}; choose from {', '.join(SIZES)}")
+        values = {**LADDER_DEFAULTS, **SIZES[key], "model_name": f"helix-{key}", **overrides}
+        return cls(**values)
 
     @property
     def local_span(self) -> int:
@@ -180,11 +272,75 @@ class HelixConfig:
             for head in range(self.num_attention_heads)
         ]
 
+    @property
+    def num_index_layers(self) -> int:
+        return sum(1 for t in self.layer_types if t == "helix")
+
     def index_num_levels(self, num_blocks: int) -> int:
         """Landmark-tree levels built *above* the leaves for a memory of ``num_blocks`` blocks."""
         if num_blocks < self.index_branching:
             return 0
         return int(math.log(num_blocks, self.index_branching))
+
+    def num_parameters(self, embeddings: bool = True) -> int:
+        """
+        Parameter count from the shapes alone, so a 23B configuration can be sized without building it.
+        ``tests/test_engine.py`` checks it against the built model.
+        """
+        h, hd, H, KV = self.hidden_size, self.head_dim, self.num_attention_heads, self.num_key_value_heads
+        ld, nh, dk, dv = (
+            self.landmark_dim,
+            self.num_recurrent_heads,
+            self.recurrent_head_dim,
+            self.recurrent_value_head_dim,
+        )
+        key_dim, value_dim = nh * dk, nh * dv
+        conv_dim = 2 * key_dim + value_dim
+
+        braid = 2 * H * hd * h + 2 * KV * hd * h + 2 * hd  # q, o, k, v, q_norm, k_norm
+        index = (
+            (hd + 2 * hd * ld + ld)  # leaf pooler: query, proj, norm
+            + (ld + 2 * ld * ld + ld)  # node pooler
+            + h * KV * ld  # route_q_proj
+            + KV * (self.index_max_levels + 1)  # level_bias
+            + KV * self.index_num_distance_buckets  # distance_bias
+            + h * H * 2  # strand_gate
+        )
+        recurrent = (
+            h * (conv_dim + value_dim)  # in_proj_qkvz
+            + h * 2 * nh  # in_proj_ba
+            + conv_dim * self.conv_kernel_size  # depthwise conv
+            + 3 * nh  # A_log, dt_bias, surprise_gamma
+            + dv  # gated norm
+            + value_dim * h  # out_proj
+        )
+        mlp = 3 * h * self.intermediate_size + (2 * self.intermediate_size + h if self.mlp_bias else 0)
+        per_layer = braid + recurrent + mlp + 2 * h
+        total = per_layer * self.num_hidden_layers + index * self.num_index_layers + h  # + final norm
+        if embeddings:
+            total += self.vocab_size * h * (1 if self.tie_word_embeddings else 2)
+        return int(total)
+
+    def flops_per_token(self) -> float:
+        """
+        Training FLOPs per token (forward + backward), for throughput and MFU reporting: ``6 N`` over the
+        non-embedding weights plus the attention and recurrence terms, which depend on the window sizes
+        rather than on the context length. An estimate, not a measurement.
+        """
+        h, hd, H = self.hidden_size, self.head_dim, self.num_attention_heads
+        weights = 6.0 * self.num_parameters(embeddings=False)
+        lm_head = 6.0 * self.vocab_size * h
+        mean_window = sum(self.local_window_sizes) / H
+        local = 12.0 * H * hd * mean_window * self.num_hidden_layers
+        index = 12.0 * H * hd * self.index_topk * self.block_size * self.num_index_layers
+        nh, dk, dv, c = (
+            self.num_recurrent_heads,
+            self.recurrent_head_dim,
+            self.recurrent_value_head_dim,
+            self.recurrent_chunk_size,
+        )
+        recurrent = 12.0 * nh * (dk * dv + c * (dk + dv)) * self.num_hidden_layers
+        return weights + lm_head + local + index + recurrent
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -198,9 +354,31 @@ class HelixConfig:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / "config.json"
-        path.write_text(json.dumps(self.to_dict(), indent=2) + "\n")
+        path.write_text(json.dumps({"model_type": "helix", **self.to_dict()}, indent=2) + "\n")
         return path
 
     @classmethod
     def from_pretrained(cls, directory: str | Path) -> HelixConfig:
         return cls.from_dict(json.loads((Path(directory) / "config.json").read_text()))
+
+
+def describe_sizes() -> str:
+    """The ladder, one line a size: parameters, and what 20 tokens a parameter (Chinchilla) means."""
+    widths = (
+        ("size", 6),
+        ("params", 8),
+        ("non-embed", 10),
+        ("layers", 6),
+        ("hidden", 6),
+        ("heads", 5),
+        ("tokens x20", 10),
+    )
+    rows = ["  ".join(f"{name:>{width}}" for name, width in widths)]
+    for name in SIZES:
+        config = HelixConfig.named(name)
+        total, body = config.num_parameters(), config.num_parameters(embeddings=False)
+        rows.append(
+            f"{name:>6}  {total / 1e9:7.2f}B  {body / 1e9:9.2f}B  {config.num_hidden_layers:>6}  "
+            f"{config.hidden_size:>6}  {config.num_attention_heads:>5}  {20 * total / 1e9:8.0f}B"
+        )
+    return "\n".join(rows)

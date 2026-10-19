@@ -14,17 +14,57 @@ Read :class:`HelixBraid` for the fusion, :class:`HelixRecurrentStrand` for the r
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed.tensor import DTensor
+from torch.utils.checkpoint import checkpoint
 
 from .cache import HelixCache
 from .config import HelixConfig
 
 ACT2FN = {"silu": F.silu, "gelu": F.gelu, "relu": F.relu, "tanh": torch.tanh}
+
+# ---------------------------------------------------------------------------------- optional kernels --
+# Strand L has a fused block-sparse path (FlexAttention) and strand R a Triton path (flash-linear-attention).
+# Both are optional and both are checked against the reference implementation in `tests/test_engine.py`;
+# the reference is what runs on a CPU, under `float64`, and at decode time.
+try:
+    from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+
+    _FLEX_AVAILABLE = True
+except ImportError:  # pragma: no cover - old torch
+    _FLEX_AVAILABLE = False
+
+try:
+    from fla.ops.gated_delta_rule import chunk_gated_delta_rule as fla_chunk_gated_delta_rule
+
+    _FLA_AVAILABLE = True
+except Exception:  # pragma: no cover - fla is only installed on the training machine
+    fla_chunk_gated_delta_rule = None
+    _FLA_AVAILABLE = False
+
+FLEX_BLOCK = 128
+_compiled_flex = None
+
+
+def _flex_attention_fn(device: torch.device):
+    """FlexAttention is only fast once compiled; on a CPU the eager form is used (tests, tiny models)."""
+    global _compiled_flex
+    if device.type != "cuda":
+        return flex_attention
+    if _compiled_flex is None:
+        _compiled_flex = torch.compile(flex_attention, dynamic=False)
+    return _compiled_flex
+
+
+def kernels_available() -> dict[str, bool]:
+    """Which optional kernels this installation can use."""
+    return {"flex_attention": _FLEX_AVAILABLE, "flash_linear_attention": _FLA_AVAILABLE}
 
 
 class HelixRotaryEmbedding(nn.Module):
@@ -409,6 +449,14 @@ class HelixRecurrentStrand(nn.Module):
         weight[:, :-1] = 1.0 / max(1, self.surprise_kernel_size - 1)
         return weight
 
+    def _use_fla(self, tensor: torch.Tensor) -> bool:
+        backend = self.config.recurrent_backend
+        if backend == "torch" or not _FLA_AVAILABLE or tensor.device.type != "cuda":
+            if backend == "fla":
+                raise RuntimeError("recurrent_backend='fla' needs flash-linear-attention installed and CUDA tensors")
+            return False
+        return True
+
     def _novelty(self, key: torch.Tensor, past_key_values: HelixCache | None, seq_len: int) -> torch.Tensor:
         """Per-head `1 - cos(k_t, mean(k_{t-W..t-1}))`, in `[0, 2]`, computed in parallel over the sequence."""
         key_stream = key.transpose(1, 2)  # (batch, key_dim, seq_len)
@@ -470,6 +518,18 @@ class HelixRecurrentStrand(nn.Module):
                 value,
                 g=g,
                 beta=beta,
+                initial_state=recurrent_state,
+                output_final_state=True,
+                use_qk_l2norm_in_kernel=True,
+            )
+        elif self._use_fla(query):
+            # The Triton kernel: same arguments, same semantics, bf16 in and out with fp32 accumulation.
+            core_out, recurrent_state = fla_chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g=g.to(torch.float32),
+                beta=beta.to(torch.float32),
                 initial_state=recurrent_state,
                 output_final_state=True,
                 use_qk_l2norm_in_kernel=True,
@@ -622,6 +682,7 @@ class HelixBraid(nn.Module):
         self.k_norm = HelixRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         self.local_window_sizes = nn.Buffer(torch.tensor(config.local_window_sizes), persistent=False)
+        self._block_masks: dict[tuple, object] = {}
 
         if self.has_index:
             self.branching = config.index_branching
@@ -795,6 +856,50 @@ class HelixBraid(nn.Module):
         head_mask = (distance >= 0) & (distance < window)
         return self._blocked_attention(query_blocks, keys, values, valid, head_mask.unsqueeze(0), None)
 
+    # ------------------------------------------------------------------------- strand L, fused path --
+    def _use_flex(self, past_key_values: HelixCache | None, padding_mask: torch.Tensor | None, device) -> bool:
+        """The fused path serves the training case: a whole sequence, no cache, no padding."""
+        backend = self.config.attention_backend
+        if backend == "sdpa" or past_key_values is not None or padding_mask is not None:
+            return False
+        if not _FLEX_AVAILABLE:
+            if backend == "flex":
+                raise RuntimeError("attention_backend='flex' needs torch.nn.attention.flex_attention")
+            return False
+        return backend == "flex" or device.type == "cuda"
+
+    def _flex_block_mask(self, length: int, device: torch.device):
+        """The per-head sliding-window mask, built once per sequence length and kept."""
+        key = (length, str(device))
+        if key not in self._block_masks:
+            windows = self.local_window_sizes.to(device)
+
+            def sliding_window(batch, head, q_idx, kv_idx):
+                distance = q_idx - kv_idx
+                return (distance >= 0) & (distance < windows[head])
+
+            self._block_masks[key] = create_block_mask(
+                sliding_window, None, self.num_heads, length, length, device=str(device), BLOCK_SIZE=FLEX_BLOCK
+            )
+        return self._block_masks[key]
+
+    def _flex_local_attention(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+        """
+        Strand L over the whole sequence as one block-sparse kernel: each head reads exactly its window,
+        keys are never gathered or repeated, and the work is `O(N * window)`. Equal to `_local_attention`
+        (the reference staircase) to kernel precision; `tests/test_engine.py` checks that.
+        """
+        length = query.shape[2]
+        padded = -(-length // FLEX_BLOCK) * FLEX_BLOCK
+        if padded != length:
+            # Causality means a real query never reads a padded (later) key, so zero padding is inert.
+            query, key, value = (F.pad(t, (0, 0, 0, padded - length)) for t in (query, key, value))
+        block_mask = self._flex_block_mask(padded, query.device)
+        out = _flex_attention_fn(query.device)(
+            query, key, value, block_mask=block_mask, scale=self.scaling, enable_gqa=self.num_key_value_groups > 1
+        )
+        return out[:, :, :length]
+
     def _blocked_attention(
         self,
         query_blocks: torch.Tensor,
@@ -902,16 +1007,18 @@ class HelixBraid(nn.Module):
         # so tiling turns peak activation memory into a constant while total work stays linear in `N`. It
         # changes nothing numerically -- tiles never interact.
         index_state = self._prepare_index(hidden_states, key_blocks, token_valid, past_key_values, past_len)
+        use_flex = self._use_flex(past_key_values, padding_mask, device)
         tile = self.tile_blocks or num_query_blocks
         local_tiles, index_tiles, live_tiles = [], [], []
         for start in range(0, num_query_blocks, tile):
             stop = min(start + tile, num_query_blocks)
             tile_queries, tile_blocks_ids = query_blocks[:, :, start:stop], query_block[start:stop]
-            local_tiles.append(
-                self._local_attention(
-                    tile_queries, key_blocks, value_blocks, token_valid, tile_blocks_ids, kv_block_offset
+            if not use_flex:
+                local_tiles.append(
+                    self._local_attention(
+                        tile_queries, key_blocks, value_blocks, token_valid, tile_blocks_ids, kv_block_offset
+                    )
                 )
-            )
             if not self.has_index:
                 continue
             if index_state is None:
@@ -932,13 +1039,14 @@ class HelixBraid(nn.Module):
                 index_tiles.append(attended)
                 live_tiles.append(live)
 
-        local_out = torch.cat(local_tiles, dim=2) if len(local_tiles) > 1 else local_tiles[0]
-
         def unpad(blocked: torch.Tensor) -> torch.Tensor:
             flat = blocked.reshape(batch_size, blocked.shape[1], num_query_blocks * block_size, blocked.shape[-1])
             return flat[:, :, left_pad : left_pad + seq_len].transpose(1, 2)
 
-        attn_out = unpad(local_out)
+        if use_flex:
+            attn_out = self._flex_local_attention(query, key, value).transpose(1, 2)
+        else:
+            attn_out = unpad(torch.cat(local_tiles, dim=2) if len(local_tiles) > 1 else local_tiles[0])
         if self.has_index:
             gate = self.strand_gate(hidden_states).view(batch_size, seq_len, self.num_heads, 2).softmax(-1)
             index_out = unpad(torch.cat(index_tiles, dim=2)) * unpad(torch.cat(live_tiles, dim=2)).to(attn_out.dtype)
@@ -1100,12 +1208,13 @@ class HelixDecoderLayer(nn.Module):
 
 @dataclass
 class HelixOutput:
-    """What :meth:`HelixForCausalLM.forward` returns."""
+    """What :meth:`HelixForCausalLM.forward` returns. ``logits`` is ``None`` when the loss was chunked."""
 
-    logits: torch.Tensor
+    logits: torch.Tensor | None
     loss: torch.Tensor | None = None
     past_key_values: HelixCache | None = None
     hidden_states: torch.Tensor | None = None
+    z_loss: torch.Tensor | None = None
 
 
 @torch.no_grad()
@@ -1123,17 +1232,29 @@ def init_weights(module: nn.Module, config: HelixConfig) -> None:
             module.bias.zero_()
     elif isinstance(module, nn.Embedding):
         module.weight.normal_(mean=0.0, std=config.initializer_range)
-        if module.padding_idx is not None:
+        if module.padding_idx is not None and not isinstance(module.weight, DTensor):
             module.weight[module.padding_idx].zero_()
     elif isinstance(module, (HelixRMSNorm, HelixRMSNormGated)):
         module.weight.fill_(1.0)
     elif isinstance(module, HelixRecurrentStrand):
-        module.A_log.copy_(torch.empty(module.num_heads, device=module.A_log.device).uniform_(0.01, 16).log_())
+        module.A_log.uniform_(0.01, 16).log_()
         module.dt_bias.fill_(1.0)
         module.surprise_gamma.zero_()
         module.surprise_weight.copy_(module.build_surprise_weight(module.surprise_weight.device))
     elif isinstance(module, HelixLandmarkPooler):
         module.query.normal_(mean=0.0, std=config.initializer_range)
+    elif isinstance(module, HelixRotaryEmbedding):
+        # Recomputed here so a model materialized from the meta device (`to_empty`) gets real frequencies.
+        module.inv_freq.copy_(
+            1.0
+            / (
+                config.rope_theta
+                ** (
+                    torch.arange(0, config.head_dim, 2, dtype=torch.int64, device=module.inv_freq.device).float()
+                    / config.head_dim
+                )
+            )
+        )
     elif isinstance(module, HelixBraid):
         module.local_window_sizes.copy_(
             torch.tensor(config.local_window_sizes, device=module.local_window_sizes.device)
@@ -1141,6 +1262,22 @@ def init_weights(module: nn.Module, config: HelixConfig) -> None:
         if module.has_index:
             module.level_bias.zero_()
             module.distance_bias.zero_()
+
+
+@torch.no_grad()
+def scale_residual_projections(layers: nn.ModuleList, config: HelixConfig) -> None:
+    """
+    The three projections of every block that write into the residual stream -- attention output, the
+    recurrence's output, the MLP's down projection -- get ``initializer_range / sqrt(2 * num_layers)``.
+    Each block adds two such contributions, so with this the stream's variance is depth-independent at
+    initialization (the GPT-2 / Llama convention) instead of growing with the number of blocks.
+    """
+    if not config.scale_residual_init:
+        return
+    std = config.initializer_range / math.sqrt(2 * config.num_hidden_layers)
+    for layer in layers:
+        for projection in (layer.mixer.o_proj, layer.recurrent.out_proj, layer.mlp.down_proj):
+            projection.weight.normal_(mean=0.0, std=std)
 
 
 class HelixModel(nn.Module):
@@ -1154,6 +1291,7 @@ class HelixModel(nn.Module):
         self.norm = HelixRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = HelixRotaryEmbedding(config)
         self.apply(lambda module: init_weights(module, config))
+        scale_residual_projections(self.layers, config)
 
     def forward(
         self,
@@ -1193,13 +1331,25 @@ class HelixModel(nn.Module):
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        # Recompute each block in the backward pass instead of keeping its activations: the memory of a
+        # training step then stops depending on depth. Only when training without a cache, where it matters.
+        recompute = self.config.activation_checkpointing and self.training and past_key_values is None
         for layer in self.layers:
-            hidden_states = layer(
-                hidden_states,
-                position_embeddings=position_embeddings,
-                past_key_values=past_key_values,
-                padding_mask=attention_mask,
-            )
+            if recompute and torch.is_grad_enabled():
+                hidden_states = checkpoint(
+                    layer,
+                    hidden_states,
+                    position_embeddings=position_embeddings,
+                    padding_mask=attention_mask,
+                    use_reentrant=False,
+                )
+            else:
+                hidden_states = layer(
+                    hidden_states,
+                    position_embeddings=position_embeddings,
+                    past_key_values=past_key_values,
+                    padding_mask=attention_mask,
+                )
         return self.norm(hidden_states), past_key_values
 
 
@@ -1234,13 +1384,52 @@ class HelixForCausalLM(nn.Module):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
         )
-        logits = self.lm_head(hidden_states)
-        loss = None
-        if labels is not None:
-            loss = F.cross_entropy(
-                logits[:, :-1].reshape(-1, logits.shape[-1]).float(), labels[:, 1:].reshape(-1), ignore_index=-100
+        if labels is not None and self.config.loss_chunk_tokens > 0:
+            loss, z_loss = self._chunked_loss(hidden_states, labels)
+            return HelixOutput(
+                logits=None, loss=loss, past_key_values=cache, hidden_states=hidden_states, z_loss=z_loss
             )
-        return HelixOutput(logits=logits, loss=loss, past_key_values=cache, hidden_states=hidden_states)
+        logits = self.lm_head(hidden_states)
+        loss = z_loss = None
+        if labels is not None:
+            shifted = logits[:, :-1].reshape(-1, logits.shape[-1]).float()
+            targets = labels[:, 1:].reshape(-1)
+            loss = F.cross_entropy(shifted, targets, ignore_index=-100)
+            if self.config.z_loss_weight > 0:
+                kept = targets != -100
+                z_loss = torch.logsumexp(shifted[kept], dim=-1).pow(2).mean()
+                loss = loss + self.config.z_loss_weight * z_loss
+        return HelixOutput(logits=logits, loss=loss, past_key_values=cache, hidden_states=hidden_states, z_loss=z_loss)
+
+    def _chunked_loss(self, hidden_states: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Cross-entropy a chunk of tokens at a time, each chunk recomputed in the backward pass, so the full
+        ``(tokens, vocab)`` logit tensor is never held. Same number as the one-piece loss.
+        """
+        hidden = hidden_states[:, :-1].reshape(-1, hidden_states.shape[-1])
+        targets = labels[:, 1:].reshape(-1)
+        count = (targets != -100).sum().clamp(min=1)
+        z_weight = self.config.z_loss_weight
+
+        def chunk_terms(h: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+            logits = self.lm_head(h).float()
+            nll = F.cross_entropy(logits, t, ignore_index=-100, reduction="sum")
+            z = torch.logsumexp(logits, dim=-1).pow(2)[t != -100].sum()
+            return torch.stack([nll, z])
+
+        total = hidden.new_zeros(2, dtype=torch.float32)
+        for start in range(0, hidden.shape[0], self.config.loss_chunk_tokens):
+            stop = start + self.config.loss_chunk_tokens
+            if torch.is_grad_enabled():
+                total = total + checkpoint(chunk_terms, hidden[start:stop], targets[start:stop], use_reentrant=False)
+            else:
+                total = total + chunk_terms(hidden[start:stop], targets[start:stop])
+        nll, z_loss = total[0] / count, total[1] / count
+        return nll + z_weight * z_loss, z_loss
+
+    def flops_per_token(self) -> float:
+        """Training FLOPs per token, estimated from the configuration (see :meth:`HelixConfig.flops_per_token`)."""
+        return self.config.flops_per_token()
 
     @torch.no_grad()
     def generate(
@@ -1290,12 +1479,76 @@ class HelixForCausalLM(nn.Module):
                 break
         return output
 
-    def save_pretrained(self, directory: str | Path) -> Path:
-        """Write ``config.json`` and ``model.pt`` into ``directory``."""
+    def save_pretrained(
+        self,
+        directory: str | Path,
+        state_dict: dict | None = None,
+        safetensors: bool = True,
+        max_shard_bytes: int = 5_000_000_000,
+        dtype: torch.dtype | None = None,
+    ) -> Path:
+        """
+        Write ``config.json`` and the weights into ``directory``: sharded ``model-0000i-of-0000n.safetensors``
+        files with the usual ``model.safetensors.index.json`` (what the Hub previews and other loaders read),
+        or a single ``model.pt`` with ``safetensors=False``. ``state_dict`` lets a trainer pass a gathered
+        copy; ``dtype`` casts on the way out (``torch.bfloat16`` halves a release).
+        """
         directory = Path(directory)
         self.config.save_pretrained(directory)
-        torch.save(self.state_dict(), directory / "model.pt")
+        tensors = state_dict if state_dict is not None else self.state_dict()
+        tensors = {k: v.detach().to("cpu", dtype or v.dtype).contiguous() for k, v in tensors.items()}
+        if self.config.tie_word_embeddings:
+            tensors.pop("lm_head.weight", None)  # the same storage as the embedding; rebuilt on load
+        if not safetensors:
+            torch.save(tensors, directory / "model.pt")
+            return directory
+        from safetensors.torch import save_file
+
+        shards, current, size = [], {}, 0
+        for name, tensor in tensors.items():
+            nbytes = tensor.numel() * tensor.element_size()
+            if current and size + nbytes > max_shard_bytes:
+                shards.append(current)
+                current, size = {}, 0
+            current[name] = tensor
+            size += nbytes
+        if current:
+            shards.append(current)
+        for stale in list(directory.glob("model*.safetensors")) + [directory / "model.safetensors.index.json"]:
+            stale.unlink(missing_ok=True)
+        if len(shards) == 1:
+            save_file(shards[0], directory / "model.safetensors", metadata={"format": "pt"})
+            return directory
+        weight_map = {}
+        for i, shard in enumerate(shards, start=1):
+            filename = f"model-{i:05d}-of-{len(shards):05d}.safetensors"
+            save_file(shard, directory / filename, metadata={"format": "pt"})
+            weight_map.update(dict.fromkeys(shard, filename))
+        total = sum(t.numel() * t.element_size() for t in tensors.values())
+        (directory / "model.safetensors.index.json").write_text(
+            json.dumps({"metadata": {"total_size": total}, "weight_map": weight_map}, indent=2) + "\n"
+        )
         return directory
+
+    @staticmethod
+    def load_state_dict_from(directory: str | Path) -> dict:
+        """The weights saved by :meth:`save_pretrained`, in any of its formats, on the CPU."""
+        directory = Path(directory)
+        index = directory / "model.safetensors.index.json"
+        single, legacy = directory / "model.safetensors", directory / "model.pt"
+        if index.exists() or single.exists():
+            from safetensors.torch import load_file
+
+            files = (
+                sorted(set(json.loads(index.read_text())["weight_map"].values())) if index.exists() else [single.name]
+            )
+            tensors = {}
+            for filename in files:
+                tensors.update(load_file(directory / filename))
+            return tensors
+        if legacy.exists():
+            return torch.load(legacy, map_location="cpu", weights_only=True)
+        raise FileNotFoundError(f"no model.safetensors, sharded safetensors or model.pt in {directory}")
 
     @classmethod
     def from_pretrained(cls, directory: str | Path, **overrides) -> HelixForCausalLM:
@@ -1303,7 +1556,10 @@ class HelixForCausalLM(nn.Module):
         directory = Path(directory)
         config = HelixConfig.from_dict({**json.loads((directory / "config.json").read_text()), **overrides})
         model = cls(config)
-        model.load_state_dict(torch.load(directory / "model.pt", map_location="cpu", weights_only=True))
+        tensors = cls.load_state_dict_from(directory)
+        if config.tie_word_embeddings:
+            tensors.setdefault("lm_head.weight", tensors["model.embed_tokens.weight"])
+        model.load_state_dict(tensors)
         return model
 
     def num_parameters(self, trainable_only: bool = False) -> int:

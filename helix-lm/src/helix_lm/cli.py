@@ -1,5 +1,16 @@
 # Copyright 2026 Nathan. Licensed under the Apache License, Version 2.0.
-"""Command line entry point: ``helix info | demo | bench | recall``."""
+"""
+Command line entry point.
+
+    helix info | demo | bench | recall          the architecture, on a laptop
+    helix size                                  the ladder of named sizes and their parameter counts
+    helix kernels                               which fused kernels this installation can use
+    helix tokenizer train|sample                the CorxLabs tokenizer
+    helix data verify|sample|prepare|status     the pretraining data
+    helix train ...                             pretraining (torchrun for several GPUs)
+    helix sft prepare|train ...                 the coding-agent fine-tune
+    helix eval ...                              benchmarks and the comparison table
+"""
 
 from __future__ import annotations
 
@@ -8,13 +19,14 @@ import math
 import os
 import sys
 import time
+from pathlib import Path
 
 import torch
 
 from . import __author__, __version__
 from .cache import HelixCache
-from .config import HelixConfig
-from .model import HelixBraid, HelixForCausalLM
+from .config import HelixConfig, describe_sizes
+from .model import HelixBraid, HelixForCausalLM, kernels_available
 
 SMALL = {
     "vocab_size": 512,
@@ -60,7 +72,7 @@ def cmd_info(args: argparse.Namespace) -> None:
     print(f"parameters     : {model.num_parameters():,}")
     keys_per_query = (config.local_blocks + 1 + config.index_topk) * config.block_size
     print(f"keys per query : {keys_per_query} on an indexed layer — constant, whatever the context length")
-    print("\nRun `helix demo` to see it generate, `helix bench` for the scaling numbers.")
+    print("\nRun `helix demo` to see it generate, `helix bench` for the scaling numbers, `helix size` for the ladder.")
 
 
 def cmd_demo(args: argparse.Namespace) -> None:
@@ -118,7 +130,8 @@ def _slope(xs: list[int], ys: list[float]) -> float:
 
 def cmd_bench(args: argparse.Namespace) -> None:
     torch.manual_seed(0)
-    model = HelixForCausalLM(HelixConfig(**SMALL)).eval()
+    # The reference path counts attention pairs exactly; the fused path does not expose them.
+    model = HelixForCausalLM(HelixConfig(**SMALL, attention_backend="sdpa")).eval()
     print(_banner())
     print("\nAttention pairs are exact: the query/key products the forward pass actually forms, counted by")
     print("instrumenting the attention call. Flat per-token means linear in the context length.\n")
@@ -155,6 +168,105 @@ def cmd_recall(args: argparse.Namespace) -> None:
     run_recall(steps=args.steps, seq_len=args.seq_len, pairs=args.pairs, batch_size=args.batch_size, seed=args.seed)
 
 
+def cmd_size(args: argparse.Namespace) -> None:
+    print(_banner())
+    print(
+        "\nThe ladder. Parameters from the shapes (65,536-token vocabulary); 'tokens x20' is the Chinchilla budget.\n"
+    )
+    print(describe_sizes())
+    if args.size:
+        config = HelixConfig.named(args.size)
+        flops = config.flops_per_token()
+        print(f"\n{args.size}: {config.num_parameters() / 1e9:.2f}B parameters, {flops:.3e} training FLOPs a token")
+        for gpus, peak, name in ((8, 2.25e15, "B300"), (8, 9.89e14, "H100"), (1, 2.25e15, "B300")):
+            for mfu in (0.35, 0.45):
+                tokens = 20 * config.num_parameters()
+                hours = tokens * flops / (gpus * peak * mfu) / 3600
+                print(
+                    f"  {gpus} x {name} at {mfu:.0%} MFU: {tokens / 1e9:.0f}B tokens in {hours:,.0f} h "
+                    f"({hours / 24:.1f} days)"
+                )
+
+
+def cmd_kernels(args: argparse.Namespace) -> None:
+    print(_banner())
+    for name, available in kernels_available().items():
+        print(f"  {name:24} {'available' if available else 'not installed'}")
+    if torch.cuda.is_available():
+        print(f"  cuda                     {torch.cuda.device_count()} x {torch.cuda.get_device_name(0)}")
+    else:
+        print("  cuda                     no GPU visible")
+
+
+def cmd_tokenizer(args: argparse.Namespace) -> None:
+    from .data.prepare import sample_text
+    from .tokenizer import iter_text_sample, train_tokenizer
+
+    if args.action == "sample":
+        out = sample_text(args.data, bytes_per_source=int(args.bytes_per_source), token=os.environ.get("HF_TOKEN"))
+        print(f"sample written to {out}")
+        return
+    files = [Path(p) for p in args.input] or [Path(args.data) / "tokenizer_sample.txt"]
+    out_dir = Path(args.out or (Path(args.data) / "tokenizer"))
+    print(f"training a {args.vocab_size:,}-token tokenizer on {[str(f) for f in files]} -> {out_dir}")
+    started = time.time()
+    tokenizer = train_tokenizer(
+        (line.replace("\\n", "\n") for line in iter_text_sample(files, int(args.max_bytes))),
+        out_dir, vocab_size=args.vocab_size, show_progress=True,
+    )  # fmt: skip
+    print(f"done in {time.time() - started:.0f}s: {tokenizer.vocab_size:,} tokens")
+
+
+def cmd_data(args: argparse.Namespace) -> None:
+    from .data.catalog import PRETRAIN_SOURCES, SFT_SOURCES, describe_report, verify_sources
+    from .data.prepare import describe_prepared, prepare_all
+
+    token = os.environ.get("HF_TOKEN")
+    if args.action == "verify":
+        print(describe_report(verify_sources(PRETRAIN_SOURCES, token)))
+        print()
+        print(describe_report(verify_sources(SFT_SOURCES, token)))
+    elif args.action == "prepare":
+        tokenizer = args.tokenizer or str(Path(args.data) / "tokenizer")
+        prepared = prepare_all(
+            args.data, tokenizer, int(args.tokens), workers=args.workers, token=token, only=tuple(args.only)
+        )
+        print(f"[data] prepared: {prepared}")
+        print(describe_prepared(args.data))
+        print("[data] PREPARED", flush=True)
+    elif args.action == "status":
+        print(describe_prepared(args.data))
+
+
+def cmd_train(args: argparse.Namespace) -> None:
+    from .train import main as train_main
+
+    raise SystemExit(train_main(args.train_args))
+
+
+def cmd_sft(args: argparse.Namespace) -> None:
+    if args.action == "prepare":
+        from .data.agent import prepare_sft
+
+        tokenizer = args.tokenizer or str(Path(args.data) / "tokenizer")
+        out = prepare_sft(args.data, tokenizer, seq_len=args.seq_len, max_conversations=args.max_conversations,
+                          token=os.environ.get("HF_TOKEN"))  # fmt: skip
+        print(f"[sft] PREPARED {out}", flush=True)
+    else:
+        from .train import main as train_main
+
+        sft_dir = str(Path(args.data) / "sft")
+        extra = ["--data", sft_dir, "--mixture", str(Path(sft_dir) / "mixture.json"), "--tokenizer",
+                 str(Path(sft_dir) / "tokenizer"), *args.train_args]  # fmt: skip
+        raise SystemExit(train_main(extra))
+
+
+def cmd_eval(args: argparse.Namespace) -> None:
+    from .evaluate import evaluate_model
+
+    evaluate_model(args.model, tasks=tuple(args.tasks), evalplus=tuple(args.evalplus), limit=args.limit, out=args.out)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="helix", description=_banner())
     parser.add_argument("--version", action="version", version=f"helix-lm {__version__}")
@@ -182,7 +294,57 @@ def main(argv: list[str] | None = None) -> int:
     recall.add_argument("--seed", type=int, default=0)
     recall.set_defaults(func=cmd_recall)
 
+    size = sub.add_parser("size", help="the named sizes and what they cost to train")
+    size.add_argument("size", nargs="?", default="")
+    size.set_defaults(func=cmd_size)
+
+    sub.add_parser("kernels", help="which fused kernels are available here").set_defaults(func=cmd_kernels)
+
+    tokenizer = sub.add_parser("tokenizer", help="the CorxLabs tokenizer")
+    tokenizer.add_argument("action", choices=["sample", "train"])
+    tokenizer.add_argument("--data", required=True, help="data directory")
+    tokenizer.add_argument("--input", nargs="*", default=[], help="text files (default: <data>/tokenizer_sample.txt)")
+    tokenizer.add_argument("--out", default="", help="output directory (default: <data>/tokenizer)")
+    tokenizer.add_argument("--vocab-size", type=int, default=65536)
+    tokenizer.add_argument("--max-bytes", type=float, default=20e9, help="at most this much text is read")
+    tokenizer.add_argument("--bytes-per-source", type=float, default=400e6, help="for `sample`")
+    tokenizer.set_defaults(func=cmd_tokenizer)
+
+    data = sub.add_parser("data", help="verify, prepare and inspect the pretraining data")
+    data.add_argument("action", choices=["verify", "prepare", "status"])
+    data.add_argument("--data", default="", help="data directory")
+    data.add_argument("--tokenizer", default="")
+    data.add_argument("--tokens", type=float, default=460e9, help="tokens to prepare in total (the run's budget)")
+    data.add_argument("--workers", type=int, default=max(4, (os.cpu_count() or 8) - 4))
+    data.add_argument("--only", nargs="*", default=[], help="only these sources")
+    data.set_defaults(func=cmd_data)
+
+    train = sub.add_parser("train", help="pretrain (see `helix train --help`)")
+    train.add_argument("train_args", nargs=argparse.REMAINDER)
+    train.set_defaults(func=cmd_train)
+
+    sft = sub.add_parser("sft", help="prepare the coding-agent data, or fine-tune on it")
+    sft.add_argument("action", choices=["prepare", "train"])
+    sft.add_argument("--data", required=True, help="data directory (the SFT set lives under <data>/sft)")
+    sft.add_argument("--tokenizer", default="")
+    sft.add_argument("--seq-len", type=int, default=32768)
+    sft.add_argument("--max-conversations", type=int, default=300_000, help="per source")
+    sft.add_argument("train_args", nargs=argparse.REMAINDER, help="for `train`: passed to `helix train`")
+    sft.set_defaults(func=cmd_sft)
+
+    evaluate = sub.add_parser("eval", help="benchmarks and the comparison table")
+    evaluate.add_argument("--model", required=True, help="a saved model directory (an export)")
+    evaluate.add_argument(
+        "--tasks", nargs="*", default=["hellaswag", "arc_challenge", "gsm8k", "mmlu_pro", "humaneval"]
+    )
+    evaluate.add_argument("--evalplus", nargs="*", default=["humaneval", "mbpp"])
+    evaluate.add_argument("--limit", type=int, default=None, help="problems per task (a quick look)")
+    evaluate.add_argument("--out", default="", help="write the results here as JSON")
+    evaluate.set_defaults(func=cmd_eval)
+
     args = parser.parse_args(argv)
+    if getattr(args, "train_args", None) and args.train_args[:1] == ["--"]:
+        args.train_args = args.train_args[1:]
     try:
         args.func(args)
     except BrokenPipeError:

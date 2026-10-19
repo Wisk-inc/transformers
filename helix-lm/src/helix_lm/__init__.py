@@ -16,7 +16,7 @@ Made by Nathan.
 """
 
 from .cache import HelixCache, HelixLayerCache
-from .config import HelixConfig
+from .config import SIZES, HelixConfig, describe_sizes
 from .model import (
     HelixBraid,
     HelixDecoderLayer,
@@ -25,9 +25,11 @@ from .model import (
     HelixModel,
     HelixOutput,
     HelixRecurrentStrand,
+    kernels_available,
 )
+from .tokenizer import HelixTokenizer, train_tokenizer
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 __author__ = "Nathan"
 
 __all__ = [
@@ -41,5 +43,10 @@ __all__ = [
     "HelixModel",
     "HelixOutput",
     "HelixRecurrentStrand",
+    "HelixTokenizer",
+    "SIZES",
     "__version__",
+    "describe_sizes",
+    "kernels_available",
+    "train_tokenizer",
 ]

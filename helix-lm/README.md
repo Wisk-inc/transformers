@@ -149,6 +149,56 @@ HelixConfig(
 )
 ```
 
+## Training Helix (1.0)
+
+1.0 adds the engine that turns the architecture into a model -- **Helix**, CorxLabs' coding agent -- and the
+ladder of named sizes it is trained through. The full plan, with the arithmetic, is in
+[`docs/HELIX_23B_PLAN.md`](docs/HELIX_23B_PLAN.md).
+
+```bash
+pip install "helix-lm[all]"
+helix size 23b                  # the ladder: 350m, 1b, 3b, 7b, 23b -- parameters, FLOPs, hours on 8 x B300
+helix kernels                   # FlexAttention / flash-linear-attention availability
+```
+
+| piece | module | what it does |
+| --- | --- | --- |
+| fused strand L | `model.py` (`attention_backend="flex"`) | each head's sliding window as one block-sparse FlexAttention kernel, no key copies; equal to the reference staircase |
+| Triton strand R | `model.py` (`recurrent_backend="fla"`) | `flash-linear-attention`'s chunked gated delta rule, the reference as fallback |
+| sizes | `config.py` (`HelixConfig.named`) | 350m / 1b / 3b / 7b / 23b with analytic parameter and FLOP counts |
+| tokenizer | `tokenizer.py` | the CorxLabs 65,536-token byte-level BPE (uint16 storage), chat and tool-call format |
+| data | `data/` | verified Hub catalog, streaming prepare to shards, the Jamaica filter and Patois sources, identity documents, a deterministic resumable mixture loader |
+| trainer | `train.py` | FSDP2 bf16, fused AdamW, warmup-stable-decay fitted to `--hours`, sharded checkpoints, bf16 safetensors export pushed to the Hub, resume, MFU |
+| SFT | `data/agent.py` | SWE-agent and SWE-smith trajectories, OpenCodeInstruct, OpenThoughts, smoltalk, tulu into one masked chat format |
+| eval | `evaluate.py` | lm-evaluation-harness adapter, EvalPlus, a table against the published Qwen numbers |
+
+```bash
+# on the training machine (8 GPUs), in this order; every step resumes where it stopped
+helix data verify                                     # sources reachable with $HF_TOKEN
+helix tokenizer sample --data /data/helix             # a text sample of the mixture ...
+helix tokenizer train  --data /data/helix             # ... becomes the 65,536-token tokenizer
+helix data prepare --data /data/helix --tokens 23e9   # shards for a 1b run (23B tokens = 20 x 1.17B)
+torchrun --nproc_per_node=8 -m helix_lm.train --size 1b --data /data/helix --out /data/helix/runs/helix-1b \
+    --hours 7 --hub-repo CorxLabs/Helix-1B
+helix sft prepare --data /data/helix                  # the coding-agent conversations, masked and packed
+helix sft train --data /data/helix -- --size 1b --out /data/helix/runs/helix-1b-sft \
+    --init-from /data/helix/runs/helix-1b/export --seq-len 32768 --hours 2
+helix eval --model /data/helix/runs/helix-1b-sft/export
+```
+
+What the tests check (`pytest`, on a CPU, in about three minutes): the fused local attention equals the
+reference; the chunked loss equals the one-piece loss; recomputation changes nothing; the sharded
+safetensors round-trip; the analytic parameter count matches the built model; the tokenizer round-trips,
+fits in uint16 and masks a chat on the assistant's turns only; files become shards, Jamaica is found,
+the identity is written; the loader is deterministic, striped across ranks, resumable and capped per
+source; a training run checkpoints, exports and **resumes to the same losses and weights**; two
+processes train with FSDP2 and distributed checkpoints and resume; SFT data is masked through packing and
+a fine-tune starts from a saved model; the lm-eval adapter's log-likelihoods match a direct forward.
+
+**Still true: there are no trained checkpoints yet.** 1.0 is the engine, tested at toy scale on a CPU. The
+plan's first rung is a 20-minute smoke run on the real machine and its second a 7-hour 1B pilot; whether
+HELIX trains as well as a transformer on text is what those runs measure.
+
 ## License
 
 Apache-2.0. Portions of the delta-rule and rotary helpers derive from
