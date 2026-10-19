@@ -288,9 +288,14 @@ def _atomic_json(path: Path, payload: dict) -> None:
 
 def stage_month(root: str | Path, year: int, month: int, table: dict | None = None, resolution: float = 0.25,
                 raw_dir: str | Path | None = None, keep_raw: bool = False, mirror: str = "aws",
-                min_observed: float = 0.3, prefetch: int = 4, device: str = "cpu", download: bool = True) -> dict:
+                min_observed: float = 0.3, prefetch: int = 4, device: str = "cpu", download: bool = True,
+                global_frames: bool = True) -> dict:
     """
     Stage one month: its global frames and the storm patches of every storm active in it.
+
+    With ``global_frames`` False only the storm patches are written (the global frames are what the retrieval
+    reads, 0.8 TB for 1980-2021 at a quarter degree; the storm networks need only the patches). The month's
+    ``global/YYYY-MM.json`` is still written, with ``"frames": false``, as the record that the month is done.
 
     Writes ``global/YYYY-MM.npy`` ``(times, 8, H, W)`` uint8 and ``storms/YYYY-MM.npy``
     ``(fixes, 2, 320, 320)`` uint8, each with a ``.json`` written last (so a month with a ``.json`` is
@@ -327,8 +332,9 @@ def stage_month(root: str | Path, year: int, month: int, table: dict | None = No
     storm_slot = {row: i for i, row in enumerate(storm_rows)}
 
     lat, lon = band_axes(resolution)
-    frames = np.lib.format.open_memmap(root / "global" / f"{tag}.npy.part", mode="w+", dtype=np.uint8,
-                                       shape=(len(times), len(GLOBAL_CHANNELS), len(lat), len(lon)))
+    frames = (np.lib.format.open_memmap(root / "global" / f"{tag}.npy.part", mode="w+", dtype=np.uint8,
+                                        shape=(len(times), len(GLOBAL_CHANNELS), len(lat), len(lon)))
+              if global_frames else None)
     patches = np.lib.format.open_memmap(root / "storms" / f"{tag}.npy.part", mode="w+", dtype=np.uint8,
                                         shape=(max(len(storm_rows), 1), 2, STAGED_PATCH_PIXELS, STAGED_PATCH_PIXELS))
     available = np.zeros(len(times), bool)
@@ -364,9 +370,10 @@ def stage_month(root: str | Path, year: int, month: int, table: dict | None = No
                 report["status"] = f"rejected: under {100 * min_observed:.0f}% observed"
                 reports.append(report)
             else:
-                if encoder is None or encoder.source_shape != fields["ir"].shape:
-                    encoder = GlobalFrameEncoder(fields["lat"], fields["lon"], resolution, device)
-                frames[index] = encoder.encode(fields)
+                if frames is not None:
+                    if encoder is None or encoder.source_shape != fields["ir"].shape:
+                        encoder = GlobalFrameEncoder(fields["lat"], fields["lon"], resolution, device)
+                    frames[index] = encoder.encode(fields)
                 available[index] = True
                 wanted = rows_at.get(stamp, [])
                 if wanted:
@@ -380,15 +387,18 @@ def stage_month(root: str | Path, year: int, month: int, table: dict | None = No
             if not keep_raw:
                 path.unlink(missing_ok=True)
 
-    frames.flush()
+    if frames is not None:
+        frames.flush()
     patches.flush()
     del frames, patches
-    os.replace(root / "global" / f"{tag}.npy.part", root / "global" / f"{tag}.npy")
+    if global_frames:
+        os.replace(root / "global" / f"{tag}.npy.part", root / "global" / f"{tag}.npy")
     os.replace(root / "storms" / f"{tag}.npy.part", root / "storms" / f"{tag}.npy")
     _atomic_json(root / "storms" / f"{tag}.json", {"rows": storm_rows, "ok": patch_ok.tolist(),
                                                      "pixels": STAGED_PATCH_PIXELS, "degrees": PATCH_DEGREES})
     summary = {
         "month": tag, "times": seconds.tolist(), "available": available.tolist(), "resolution": resolution,
+        "frames": bool(global_frames),
         "channels": list(GLOBAL_CHANNELS), "shape": [len(lat), len(lon)],
         "observed_times": int(available.sum()), "storm_fixes": len(storm_rows),
         "storm_patches_ok": int(patch_ok.sum()),
@@ -412,7 +422,7 @@ def month_rows(table: dict | None, year: int, month: int) -> dict | None:
 
 def stage_gridsat(root: str | Path, years, table: dict | None = None, workers: int = 32, resolution: float = 0.25,
                   raw_dir: str | Path | None = None, keep_raw: bool = False, mirror: str = "aws",
-                  progress: bool = True) -> list[dict]:
+                  progress: bool = True, global_frames: bool = True) -> list[dict]:
     """
     Stage every month of ``years`` with ``workers`` processes; finished months are skipped.
 
@@ -428,7 +438,8 @@ def stage_gridsat(root: str | Path, years, table: dict | None = None, workers: i
               f"{len(pending)} to go with {workers} workers", flush=True)
     with cf.ProcessPoolExecutor(workers) as pool:
         futures = {pool.submit(stage_month, root, y, m, month_rows(table, y, m), resolution,
-                               None if raw_dir is None else Path(raw_dir) / f"{y:04d}-{m:02d}", keep_raw, mirror): (y, m)
+                               None if raw_dir is None else Path(raw_dir) / f"{y:04d}-{m:02d}", keep_raw, mirror,
+                               global_frames=global_frames): (y, m)
                    for y, m in pending}
         for done, future in enumerate(cf.as_completed(futures), start=1):
             year, month = futures[future]
@@ -479,6 +490,8 @@ def main(argv=None) -> None:
     parser.add_argument("--raw-dir", default=None, help="keep or reuse raw GridSat files here")
     parser.add_argument("--keep-raw", action="store_true")
     parser.add_argument("--mirror", default="aws", choices=("aws", "ncei"))
+    parser.add_argument("--patches-only", action="store_true",
+                        help="write only the storm patches, not the global frames (no retrieval; saves ~0.8 TB)")
     args = parser.parse_args(argv)
     first, last = (int(y) for y in args.years.split("-"))
     root = Path(args.root)
@@ -491,8 +504,12 @@ def main(argv=None) -> None:
         np.savez(table_path, **table)
     print(describe_table(table), flush=True)
     print(staging_plan(range(first, last + 1), args.resolution, len(table["time"])), flush=True)
+    if args.patches_only:
+        print("[satstage] storm patches only: no global frames are written (the retrieval cannot be trained from this "
+              "staging)", flush=True)
     results = stage_gridsat(root, range(first, last + 1), table, workers=args.workers, resolution=args.resolution,
-                            raw_dir=args.raw_dir, keep_raw=args.keep_raw, mirror=args.mirror)
+                            raw_dir=args.raw_dir, keep_raw=args.keep_raw, mirror=args.mirror,
+                            global_frames=not args.patches_only)
     done = sorted(root.glob("global/*.json"))
     print(f"[satstage] {len(done)} months staged in {root}; this run added {len(results)}", flush=True)
 

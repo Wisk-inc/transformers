@@ -67,6 +67,8 @@ class GlobalFrames:
         self.shape = None
         for meta_path in sorted(self.root.glob("*.json")):
             meta = json.loads(meta_path.read_text())
+            if meta.get("frames") is False:                       # staged with --patches-only: no frames this month
+                continue
             self.shape = tuple(meta["shape"])
             for row, (stamp, ok) in enumerate(zip(meta["times"], meta["available"])):
                 if ok:

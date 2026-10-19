@@ -156,6 +156,9 @@ class StormTargets:
             # What it is doing now: intensity and recent motion, the operational predictors.
             "storm_state": torch.tensor(storm_state_vector(track, start), dtype=torch.float32),
             "current_wind_kt": torch.tensor(float(track.max_wind_kt[start]), dtype=torch.float32),
+            # How big it is now -- the 34 / 50 / 64 kt radii at the issue time, NaN where unobserved (NatureV2's size input).
+            "current_wind_radii_nmi": torch.tensor(np.where(np.isfinite(track.wind_radii_nmi[start]),
+                                                            track.wind_radii_nmi[start], np.nan), dtype=torch.float32),
             "track_target": displacement,
             "track_valid": valid,
             "intensity_target": intensity,
@@ -546,13 +549,23 @@ def _satellite_batch(bank, index, device, augment: bool = False):
     codes = images["ir"][index].to(device)
     available = images["available"][index].to(device)
     if augment:
-        turns = int(torch.randint(0, 4, ()).item())
-        codes = torch.rot90(codes, turns, dims=(-2, -1))
-        shift = torch.randint(-3, 4, (2,)).tolist()
-        codes = torch.roll(codes, shifts=shift, dims=(-2, -1))
-        offset = torch.randint(-3, 4, (codes.shape[0], 1, 1, 1), device=device)
-        codes = torch.where(codes > 0, (codes.long() + offset).clamp(1, 255), 0).to(torch.uint8)
+        codes = augment_codes(codes)
     return codes, available
+
+
+def augment_codes(codes: torch.Tensor) -> torch.Tensor:
+    """
+    Training augmentation of storm-centred infrared ``(B, T, P, P)`` uint8: a random quarter turn (a rotation keeps
+    a storm's spiral turning the right way; a mirror image would not), a shift of up to three pixels (the best-track
+    centre is uncertain by about that much), and a brightness offset of up to 2 K per sample (the spread between
+    satellites and calibrations).
+    """
+    turns = int(torch.randint(0, 4, ()).item())
+    codes = torch.rot90(codes, turns, dims=(-2, -1))
+    shift = torch.randint(-3, 4, (2,)).tolist()
+    codes = torch.roll(codes, shifts=shift, dims=(-2, -1))
+    offset = torch.randint(-3, 4, (codes.shape[0], *([1] * (codes.dim() - 1))), device=codes.device)
+    return torch.where(codes > 0, (codes.long() + offset).clamp(1, 255), 0).to(torch.uint8)
 
 
 def ri2_targets(targets: dict, lead_times_hours) -> tuple[torch.Tensor, torch.Tensor]:
@@ -600,7 +613,7 @@ def _bank_loss(model, bank, index, device, augment: bool = False):
     satnet = _satnet_batch(bank, index, device)
     outputs = model.storm_heads(bank["features"][index].to(device), batch["storm_center"], batch["storm_state"],
                                 batch["storm_environment"], batch["track_prior"], batch["pooled_far"], satellite,
-                                satnet, batch.get("storm_physics"))
+                                satnet, batch.get("storm_physics"), storm_ocean=batch.get("storm_ocean"))
     loss, parts = total_loss(outputs, batch, SURFACE_FIELDS)
     if satellite is not None and bool(satellite[1][:, 0].any()):
         batch["storm_satellite"] = satellite
@@ -687,7 +700,8 @@ def train_storm_heads(
             model.mark_trained(parts, {key: batch.get(key) for key in ("storm_center", "storm_state",
                                                                       "storm_environment", "pooled_far",
                                                                       "track_prior", "storm_satellite",
-                                                                      "storm_satnet", "storm_physics")})
+                                                                      "storm_satnet", "storm_physics",
+                                                                      "storm_ocean")})
             running += float(loss.detach()) * len(index)
         entry = {"epoch": epoch, "train": running / count}
         beat(f"storm heads epoch {epoch}")
@@ -769,7 +783,8 @@ def _head_outputs(model, bank: dict, chunk: int = 4096) -> dict[str, torch.Tenso
         pools += [(bank["features_tta"][index, r], bank["features_far_tta"][index, r]) for r in range(max(extra, 0))]
         members = [model.storm_heads(near.to(device), batch["storm_center"], batch["storm_state"],
                                      batch["storm_environment"], prior, far.to(device), satellite, satnet,
-                                     batch.get("storm_physics"), rollout or None) for near, far in pools]
+                                     batch.get("storm_physics"), rollout or None, storm_ocean=batch.get("storm_ocean"))
+                   for near, far in pools]
         out = merge_rotations(members)
         outputs.append({k: v.float().cpu() for k, v in out.items()})
     return {key: torch.cat([o[key] for o in outputs]) for key in outputs[0]}

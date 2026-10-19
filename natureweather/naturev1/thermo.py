@@ -567,7 +567,76 @@ def genesis_map(state: torch.Tensor, variables, normalizer, grid) -> torch.Tenso
     return torch.where(land | (sst < 299.0), torch.zeros_like(gpi), gpi).float()
 
 
+# ------------------------------------------------------------------------------- NatureV2: ocean --
+
+#: NatureV2 (0.17): what the ocean under the storm can give it, and how big the storm is now -- what the 0.15
+#: verification found the rapid-intensification guidance gains from beyond the atmosphere (the World Ocean Atlas 26 C
+#: depth and heat potential with the gale radius lifted the held-out Brier skill of P(RI) from 0.122 to 0.154). This
+#: year's sea-surface anomaly against the climatology says whether the warm layer is likely deeper or shallower than
+#: its average. Scaled to order one; zeros where unknown, with the two flags saying what was.
+STORM_OCEAN_FEATURES = ("d26", "tchp", "sst_anomaly", "gale_radius", "gale_observed", "observed")
+
+
+def storm_ocean(storm_center: torch.Tensor, valid_time, storm_environment: torch.Tensor | None = None,
+                current_radii_nmi: torch.Tensor | None = None) -> torch.Tensor:
+    """
+    The ocean-and-size vector for each storm, ``(B, len(STORM_OCEAN_FEATURES))``.
+
+    Args:
+        storm_center: ``(B, 2)`` degrees.
+        valid_time: the analysis time of each storm, seconds since 1970: ``(B,)`` or one value for all.
+        storm_environment: ``(B, 8)`` from :func:`naturev1.storm_environment` -- its ``ocean_temperature`` is this
+            year's sea surface under the core, compared with the climatology's for the anomaly. Optional.
+        current_radii_nmi: the 34 / 50 / 64 kt wind radii now, ``(B, 3, 4)`` (or the 34 kt quadrants ``(B, 4)``),
+            NaN where unobserved. Optional.
+
+    Returns:
+        D26 / 100 m, heat potential / 100 kJ cm-2, sea-surface anomaly / 2 K, mean 34 kt radius / 100 nmi, whether it
+        was observed, and whether the climatology covered the point. The climatology is the packaged World Ocean
+        Atlas (:class:`naturev1.cyclone.ocean.OceanClimatology`), read at each storm's position and month.
+    """
+    import numpy as np
+
+    from .cyclone.ocean import OceanClimatology
+
+    device = storm_center.device
+    centre = storm_center.detach().to("cpu", torch.float64).numpy()
+    count = centre.shape[0]
+    out = np.zeros((count, len(STORM_OCEAN_FEATURES)), np.float64)
+    seconds = torch.as_tensor(valid_time).detach().to("cpu", torch.float64).reshape(-1).numpy()
+    if seconds.size == 1 and count != 1:
+        seconds = np.full(count, seconds[0])
+    climatology = OceanClimatology.default()
+    known = np.isfinite(centre).all(-1) & np.isfinite(seconds[:count]) if count else np.zeros(0, bool)
+    if climatology is not None and known.any():
+        sst_now = None
+        if storm_environment is not None:
+            env = storm_environment.detach().to("cpu", torch.float64).numpy()
+            sst_now = np.where(env[:, 7] > 0.5, env[:, 6] * 3.0 + 26.5, np.nan)          # degrees C
+        for stamp in np.unique(seconds[known]):
+            rows = np.nonzero(known & (seconds == stamp))[0]
+            sample = climatology.sample(centre[rows, 0], centre[rows, 1], np.datetime64(int(stamp), "s"))
+            d26, tchp = sample["d26_m"], sample["tchp_kj_cm2"]
+            seen = np.isfinite(d26) & np.isfinite(tchp)
+            out[rows, 0] = np.where(seen, np.clip(d26, 0.0, 300.0) / 100.0, 0.0)
+            out[rows, 1] = np.where(seen, np.clip(tchp, 0.0, 300.0) / 100.0, 0.0)
+            out[rows, 5] = seen.astype(np.float64)
+            if sst_now is not None and "sst_c" in sample:
+                anomaly = sst_now[rows] - sample["sst_c"]
+                usable = seen & np.isfinite(anomaly) & (np.abs(anomaly) < 6.0)            # beyond 6 K it is not the sea
+                out[rows, 2] = np.where(usable, anomaly / 2.0, 0.0)
+    if current_radii_nmi is not None:
+        radii = current_radii_nmi.detach().to("cpu", torch.float64).numpy()
+        gale = radii[:, 0, :] if radii.ndim == 3 else radii
+        gale = np.where(np.isfinite(gale) & (gale > 0), gale, np.nan)
+        observed = np.isfinite(gale).any(-1)
+        mean = np.where(observed, np.nanmean(np.where(observed[:, None], gale, 0.0), -1), 0.0) if gale.size else np.zeros(count)
+        out[:, 3] = np.where(observed, np.clip(mean, 0.0, 600.0) / 100.0, 0.0)
+        out[:, 4] = observed.astype(np.float64)
+    return torch.from_numpy(out).to(device, torch.float32)
+
+
 __all__ = ["CK_CD", "STORM_PHYSICS_FEATURES", "GridFields", "cape", "cyclone_phase", "entropy_deficit",
            "equivalent_potential_temperature", "genesis_map", "genesis_potential_index", "moist_entropy",
            "parcel_temperature", "potential_intensity", "relative_humidity", "saturation_mixing_ratio",
-           "storm_physics", "ventilation_index"]
+           "storm_ocean", "storm_physics", "STORM_OCEAN_FEATURES", "ventilation_index"]

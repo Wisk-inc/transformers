@@ -26,6 +26,7 @@ import concurrent.futures as cf
 import csv
 import datetime as dt
 import hashlib
+import math
 import re
 import tarfile
 import tempfile
@@ -476,3 +477,102 @@ def describe_patch(patch: np.ndarray, center_pixels: int = 8) -> str:
     cold = np.nanmean(patch < 213.15) if np.isfinite(patch).any() else float("nan")
     return (f"coldest cloud top near the centre {np.nanmin(core) - 273.15:.0f} C, warmest {np.nanmax(core) - 273.15:.0f} C; "
             f"{100 * cold:.0f}% of the patch colder than -60 C")
+
+
+# ------------------------------------------------------------------------- NatureV2: infrared --
+
+#: NatureV2 (0.17): the infrared structure the operational rapid-intensification guidance reads (Kaplan, DeMaria &
+#: Knaff 2010; :func:`naturev1.swarm.infrared.ir_metrics` for one live scene), computed from the same storm-centred
+#: patches the satellite encoder sees, with their six-hour trend. Order one; zeros when the image is missing.
+STORM_IR_FEATURES = ("min_bt", "pc30", "pc50", "sdo", "mean_bt", "ring_asymmetry", "eye_warm", "d_pc50_6h",
+                     "d_min_bt_6h", "present")
+
+
+def storm_ir_features(codes, available, latitude=None, degrees: float = PATCH_DEGREES):
+    """
+    Explicit infrared predictors from storm-centred patches, ``(B, len(STORM_IR_FEATURES))``.
+
+    Args:
+        codes: ``(B, 2, P, P)`` uint8 brightness temperatures (:func:`encode_bt`): now, and six hours earlier; rows
+            south to north, columns west to east, centred on the storm.
+        available: ``(B, 2)`` whether each image exists.
+        latitude: ``(B,)`` degrees, for the east-west pixel size (cos latitude); None treats pixels as square.
+
+    Returns (in this order): the coldest top within 100 km ((C + 50) / 30), the shares of the 50-200 km annulus colder
+    than -30 and -50 C, the standard deviation 100-300 km (/10 K), the 50-200 km mean ((C + 40) / 30), the spread of
+    the eight 30-100 km octant means (/10 K), how much warmer the inner 25 km is than the 40-80 km ring (/30 K), the
+    six-hour change of the -50 C share and of the coldest top (/10 K) where both images exist, and whether the current
+    image was usable.
+    """
+    import torch
+
+    kelvin = decode_bt(codes)                                                     # (B, 2, P, P), NaN missing
+    batch, pixels = kelvin.shape[0], kelvin.shape[-1]
+    device = kelvin.device
+    step_km = degrees * 111.2
+    offsets = (torch.arange(pixels, device=device, dtype=torch.float32) - (pixels - 1) / 2.0) * step_km
+    north = offsets.view(1, -1, 1).expand(batch, pixels, pixels)
+    scale = torch.ones(batch, device=device)
+    if latitude is not None:
+        scale = torch.cos(torch.deg2rad(torch.nan_to_num(torch.as_tensor(latitude, device=device, dtype=torch.float32)))).clamp_min(0.05)
+    east = offsets.view(1, 1, -1) * scale.view(-1, 1, 1)
+    radius = torch.sqrt(north ** 2 + east ** 2)                                   # (B, P, P) km
+    angle = torch.atan2(north, east)
+    available = torch.as_tensor(available, device=device).bool()
+
+    def stats(image):
+        valid = torch.isfinite(image)
+        filled = torch.nan_to_num(image)
+
+        def mean(mask):
+            m = (mask & valid).float()
+            n = m.sum((-1, -2))
+            return (filled * m).sum((-1, -2)) / n.clamp_min(1.0), n
+
+        def share_below(mask, kelvin_cut):
+            m = (mask & valid).float()
+            n = m.sum((-1, -2))
+            return ((filled < kelvin_cut).float() * m).sum((-1, -2)) / n.clamp_min(1.0), n
+
+        core = radius < 100.0
+        coldest = torch.where(core & valid, filled, torch.full_like(filled, float("inf"))).amin((-1, -2))
+        annulus = (radius >= 50.0) & (radius < 200.0)
+        pc30, n_ann = share_below(annulus, 273.15 - 30.0)
+        pc50, _ = share_below(annulus, 273.15 - 50.0)
+        mean_ann, _ = mean(annulus)
+        outer = (radius >= 100.0) & (radius < 300.0)
+        mo, n_outer = mean(outer)
+        m = (outer & valid).float()
+        variance = (((filled - mo.view(-1, 1, 1)) ** 2) * m).sum((-1, -2)) / n_outer.clamp_min(1.0)
+        sdo = variance.sqrt()
+        ring = (radius >= 30.0) & (radius < 100.0)
+        octants = []
+        for k in range(8):
+            lo = -math.pi + k * math.pi / 4.0
+            sector = ring & (angle >= lo) & (angle < lo + math.pi / 4.0)
+            octants.append(mean(sector)[0])
+        asymmetry = torch.stack(octants, -1).std(-1)
+        eye, _ = mean(radius < 25.0)
+        wall, n_wall = mean((radius >= 40.0) & (radius < 80.0))
+        usable = (n_ann > 50) & torch.isfinite(coldest)
+        return {"coldest": coldest, "pc30": pc30, "pc50": pc50, "mean": mean_ann, "sdo": sdo,
+                "asymmetry": asymmetry, "eye_warm": eye - wall, "usable": usable}
+
+    now = stats(kelvin[:, 0])
+    before = stats(kelvin[:, 1])
+    present = available[:, 0] & now["usable"]
+    both = present & available[:, 1] & before["usable"]
+    zero = torch.zeros(batch, device=device)
+    columns = [
+        torch.where(present, (now["coldest"] - 273.15 + 50.0) / 30.0, zero),
+        torch.where(present, now["pc30"], zero),
+        torch.where(present, now["pc50"], zero),
+        torch.where(present, now["sdo"] / 10.0, zero),
+        torch.where(present, (now["mean"] - 273.15 + 40.0) / 30.0, zero),
+        torch.where(present, now["asymmetry"] / 10.0, zero),
+        torch.where(present, now["eye_warm"] / 30.0, zero),
+        torch.where(both, now["pc50"] - before["pc50"], zero),
+        torch.where(both, (now["coldest"] - before["coldest"]) / 10.0, zero),
+        present.float(),
+    ]
+    return torch.nan_to_num(torch.stack(columns, -1).float(), nan=0.0, posinf=0.0, neginf=0.0)

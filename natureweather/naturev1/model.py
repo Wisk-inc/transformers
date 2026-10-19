@@ -152,6 +152,8 @@ TRACKED_HEADS = (
     "satnet", "retrieval", "ri2", "satnet_fusion", "backbone_tail",
     # 0.12, physics: the thermodynamic and dynamic storm inputs.
     "storm_physics",
+    # 0.17 (NatureV2): the ocean under the storm with its size, and the explicit infrared structure.
+    "storm_ocean", "storm_ir",
 )
 #: Parameters added after 0.7. A checkpoint written before them loads with these freshly initialised --
 #: all of them start as exact no-ops, so the loaded model behaves exactly as it did when it was saved.
@@ -160,7 +162,8 @@ OPTIONAL_STATE = ("head_steps", "storm_position.", "storm_state_embed.", "state_
                   "ri_calibration", "landfall_calibration", "feature_mean", "feature_std", "feature_threshold",
                   "feature_norm_bounds", "state_tendency",
                   "storm_satnet.", "satnet_fusion.", "retrieval.", "ri2_head.", "ri2_calibration",
-                  "intensity_correction", "eyewall_correction", "storm_physics_embed.", "statistics.")
+                  "intensity_correction", "eyewall_correction", "storm_physics_embed.", "statistics.",
+                  "storm_ocean_embed.", "storm_ir_embed.")
 
 #: The storm's physical environment, computed from the state by :func:`naturev1.storm_environment`:
 #: the SHIPS predictors. Deep-layer steering and 200-850 hPa shear over the 200-800 km ring around the
@@ -282,6 +285,9 @@ class NatureConfig:
     hemisphere_frame: bool = False     # storm heads work in a poleward frame (set when trained that way)
     storm_rotations: int = 1           # test-time rotation ensemble for the storm outputs (1: off; chosen on
                                        # held-out seasons by naturev1.stormtrain.select_rotations)
+    # 0.17, NatureV2. Off by default, so every earlier configuration builds exactly the earlier model.
+    storm_ocean: bool = False          # ocean heat content, sea-surface anomaly and storm size into the heads and RI 2.0
+    storm_ir: bool = False             # explicit infrared structure from the storm patches into the heads and RI 2.0
 
     dropout: float = 0.0
     rms_norm_eps: float = 1e-5
@@ -554,21 +560,31 @@ class RapidIntensification2(nn.Module):
     Ordinal logits keep the probabilities consistent, and every logit opens at the global base rate.
     """
 
-    def __init__(self, hidden: int) -> None:
+    def __init__(self, hidden: int, extra: int = 0) -> None:
         super().__init__()
         from .satnet import RI_WINDOWS, init_ordinal
 
-        self.trunk = nn.Sequential(nn.Linear(hidden + RI2_INPUTS, hidden), nn.SiLU(), nn.Linear(hidden, hidden // 2),
-                                   nn.SiLU())
+        # ``extra``: NatureV2's ocean and infrared predictors, appended after the RI2_INPUTS columns.
+        self.extra = int(extra)
+        self.trunk = nn.Sequential(nn.Linear(hidden + RI2_INPUTS + self.extra, hidden), nn.SiLU(),
+                                   nn.Linear(hidden, hidden // 2), nn.SiLU())
         self.level = nn.Linear(hidden // 2, len(RI_WINDOWS))
         self.gaps = nn.Linear(hidden // 2, sum(len(t) for _, t in RI_WINDOWS))
         init_ordinal(self.level, self.gaps)
+        self._silence_extra()
+
+    def _silence_extra(self) -> None:
+        """The NatureV2 columns start with zero weight: the extra predictors change nothing until trained."""
+        if self.extra:
+            with torch.no_grad():
+                self.trunk[0].weight[:, -self.extra:] = 0.0
 
     def reset_priors(self) -> None:
         """Back to the global base rates -- needed after a blanket re-initialisation of the model."""
         from .satnet import init_ordinal
 
         init_ordinal(self.level, self.gaps)
+        self._silence_extra()
 
     def forward(self, summary: torch.Tensor, predictors: torch.Tensor) -> torch.Tensor:
         from .satnet import ordinal_logits
@@ -751,7 +767,7 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         # SHIPS-style regression, logistic growth, climatology-persistence, the corrected intensity consensus,
         # track bias and predicted consensus error -- fitted after training, carried with the weights.
         self.statistics = StatisticalModels(config.lead_times_hours)
-        self.ri2_head = RapidIntensification2(hidden) if config.ri2 else None
+        self.ri2_head = RapidIntensification2(hidden, extra=self._ri2_extra(config)) if config.ri2 else None
         if self.ri2_head is not None:
             self.ri2_head.reset_priors()
         if config.satnet_embed:
@@ -777,6 +793,24 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
                 num_kv_heads=config.num_kv_heads, head_dim=config.head_dim, encode_radius_km=config.encode_radius_km)
         else:
             self.retrieval = None
+        # 0.17, NatureV2: registered after everything else, zero-initialised -- an exact no-op until trained, and
+        # the backbone fingerprint and every earlier weight's initialisation stay where they were.
+        from .stormsat import STORM_IR_FEATURES
+        from .thermo import STORM_OCEAN_FEATURES
+
+        self.storm_ocean_embed = nn.Linear(len(STORM_OCEAN_FEATURES), hidden, bias=False) if config.storm_ocean else None
+        self.storm_ir_embed = nn.Linear(len(STORM_IR_FEATURES), hidden, bias=False) if config.storm_ir else None
+        for layer in (self.storm_ocean_embed, self.storm_ir_embed):
+            if layer is not None:
+                nn.init.zeros_(layer.weight)
+
+    @staticmethod
+    def _ri2_extra(config: NatureConfig) -> int:
+        """How many NatureV2 predictor columns RI 2.0 reads beyond RI2_INPUTS."""
+        from .stormsat import STORM_IR_FEATURES
+        from .thermo import STORM_OCEAN_FEATURES
+
+        return (len(STORM_OCEAN_FEATURES) if config.storm_ocean else 0) + (len(STORM_IR_FEATURES) if config.storm_ir else 0)
 
     def warm_start_retrieval(self) -> list[str]:
         """
@@ -987,6 +1021,7 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         storm_satellite: tuple[torch.Tensor, torch.Tensor] | None = None,
         storm_satnet: dict | None = None,
         storm_physics: torch.Tensor | None = None,
+        storm_ocean: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Args:
@@ -1016,6 +1051,8 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
                 (:meth:`satnet_outputs`), fused into the heads and fed to RI 2.0. Optional.
             storm_physics: ``(B, len(STORM_PHYSICS_FEATURES))`` from :func:`naturev1.thermo.storm_physics`.
                 Optional.
+            storm_ocean: ``(B, len(STORM_OCEAN_FEATURES))`` from :func:`naturev1.thermo.storm_ocean` -- read only by a
+                model built with ``config.storm_ocean`` (NatureV2). Optional.
 
         Returns:
             A dict of forecasts. Gridded entries are ``(B, P, leads, ...)``; storm-scale entries are
@@ -1049,13 +1086,14 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         area = self.latent_grid.weights.to(current.dtype).view(1, -1, 1)
         global_summary = self.summary_pool(self.summary_norm((current * area).sum(1) / area.sum()))
         if (storm_center is None and storm_state is None and storm_environment is None and track_prior is None
-                and storm_satellite is None and storm_satnet is None and storm_physics is None):
+                and storm_satellite is None and storm_satnet is None and storm_physics is None and storm_ocean is None):
             storm = self._storm_outputs(global_summary)
         else:
             far = None if storm_center is None else self.storm_pool(
                 current, storm_center, 2.0 * self.config.storm_pool_radius_km)
             storm = self.storm_heads(self.storm_pool(current, storm_center), storm_center, storm_state,
-                                     storm_environment, track_prior, far, storm_satellite, storm_satnet, storm_physics)
+                                     storm_environment, track_prior, far, storm_satellite, storm_satnet, storm_physics,
+                                     storm_ocean=storm_ocean)
             if self.config.storm_rotations > 1 and not self.training and storm_center is not None:
                 sources = {"satellite": (satellite, satellite_grid), "analysis": (analysis, analysis_grid),
                            "environment": (environment, environment_grid)}
@@ -1063,7 +1101,8 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
                 for degrees in rotation_angles(self.config.storm_rotations):
                     near, wide = self.rotated_pools(sources, calendar, storm_center, degrees, neighbours, member_noise)
                     members.append(self.storm_heads(near, storm_center, storm_state, storm_environment, track_prior,
-                                                    wide, storm_satellite, storm_satnet, storm_physics))
+                                                    wide, storm_satellite, storm_satnet, storm_physics,
+                                                    storm_ocean=storm_ocean))
                 storm = merge_rotations(members)
         enso = self.enso_head(global_summary)
 
@@ -1170,7 +1209,7 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
                     track_prior: torch.Tensor | None = None, pooled_far: torch.Tensor | None = None,
                     storm_satellite: tuple[torch.Tensor, torch.Tensor] | None = None,
                     storm_satnet: dict | None = None, storm_physics: torch.Tensor | None = None,
-                    rollout: dict | None = None,
+                    rollout: dict | None = None, storm_ocean: torch.Tensor | None = None,
                     ) -> dict[str, torch.Tensor]:
         """
         Every storm output, from pooled features plus where the storm is, how strong it is, what the
@@ -1184,6 +1223,11 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         With ``config.hemisphere_frame`` every north-south quantity is mirrored for southern-hemisphere
         storms on the way in and back on the way out, so the heads learn one poleward frame from both
         hemispheres. ``storm_satnet`` (the satellite storm network's outputs) is fused in and feeds RI 2.0.
+
+        NatureV2 (``config.storm_ocean`` / ``config.storm_ir``): ``storm_ocean`` (:func:`naturev1.thermo.storm_ocean`)
+        and the infrared structure computed from ``storm_satellite`` (:func:`naturev1.stormsat.storm_ir_features`) are
+        embedded into the pooled features and appended to RI 2.0's predictors. In the poleward frame a
+        southern-hemisphere storm's images are mirrored north-south, so its spiral turns the way the network learned.
         """
         dtype = pooled.dtype
         original_prior = track_prior
@@ -1234,9 +1278,25 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         if storm_environment is not None:
             pooled = pooled + self.storm_environment_embed(
                 torch.nan_to_num(storm_environment.to(pooled.device, dtype)))
+        ir = None
         if storm_satellite is not None:
             codes, available = storm_satellite
-            pooled = pooled + self.storm_satellite(codes.to(pooled.device), available.to(pooled.device)).to(dtype)
+            codes, available = codes.to(pooled.device), available.to(pooled.device)
+            if sign is not None:
+                # The poleward frame mirrors every north-south quantity; the image too (rows run south to north), so
+                # a southern storm's clockwise spiral reaches the encoder turning like a northern one.
+                south = (sign.to(pooled.device) < 0).view(-1, 1, 1, 1)
+                codes = torch.where(south, codes.flip(-2), codes)
+            pooled = pooled + self.storm_satellite(codes, available).to(dtype)
+            if self.storm_ir_embed is not None:
+                from .stormsat import storm_ir_features
+
+                latitude = None if storm_center is None else storm_center[:, 0].to(pooled.device)
+                ir = storm_ir_features(codes, available, latitude)
+                pooled = pooled + self.storm_ir_embed(ir.to(dtype))
+        if self.storm_ocean_embed is not None and storm_ocean is not None:
+            storm_ocean = torch.nan_to_num(storm_ocean.to(pooled.device, dtype))
+            pooled = pooled + self.storm_ocean_embed(storm_ocean)
         if storm_physics is not None:
             pooled = pooled + self.storm_physics_embed(torch.nan_to_num(storm_physics.to(pooled.device, dtype)))
         if storm_satnet is not None and self.satnet_fusion is not None and "embedding" in storm_satnet:
@@ -1252,6 +1312,18 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         if self.ri2_head is not None:
             predictors = ri2_predictors(summary.shape[0], summary.device, storm_center, storm_state,
                                         storm_environment, storm_satnet, storm_physics)
+            if self.ri2_head.extra:
+                from .stormsat import STORM_IR_FEATURES
+                from .thermo import STORM_OCEAN_FEATURES
+
+                extras = []
+                if self.config.storm_ocean:
+                    extras.append(torch.zeros(summary.shape[0], len(STORM_OCEAN_FEATURES), device=summary.device)
+                                  if storm_ocean is None else storm_ocean.to(summary.device, torch.float32))
+                if self.config.storm_ir:
+                    extras.append(torch.zeros(summary.shape[0], len(STORM_IR_FEATURES), device=summary.device)
+                                  if ir is None else ir.to(summary.device, torch.float32))
+                predictors = torch.cat([predictors] + extras, -1)
             calibration = self.ri2_calibration.to(dtype)
             outputs["ri2_logits"] = self.ri2_head(summary, predictors) * calibration[:, 0] + calibration[:, 1]
         if score is not None:
@@ -1380,7 +1452,8 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
                               ("storm_state", "storm_state"), ("storm_environment", "storm_environment"),
                               ("pooled_far", "storm_far"), ("track_prior", "track_prior"),
                               ("storm_satellite", "storm_satellite"), ("storm_satnet", "satnet_fusion"),
-                              ("storm_physics", "storm_physics")):
+                              ("storm_physics", "storm_physics"), ("storm_ocean", "storm_ocean"),
+                              ("storm_satellite", "storm_ir")):
                 if batch.get(key) is not None:
                     touched.append(name)
             modules.update({"analysis_encoder": self.analysis_encoder,
@@ -1395,10 +1468,13 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
                             "track_prior": self.track_head,
                             "storm_satellite": self.storm_satellite,
                             "satnet_fusion": self.satnet_fusion,
-                            "storm_physics": self.storm_physics_embed})
+                            "storm_physics": self.storm_physics_embed,
+                            "storm_ocean": self.storm_ocean_embed,
+                            "storm_ir": self.storm_ir_embed})
         with torch.no_grad():
             for name in set(touched):
-                if any(p.requires_grad for p in modules[name].parameters()):
+                module = modules.get(name)
+                if module is not None and any(p.requires_grad for p in module.parameters()):
                     self.head_steps[TRACKED_HEADS.index(name)] += 1
 
     def trained_heads(self) -> dict[str, int]:
@@ -1449,7 +1525,8 @@ class NatureV1(GridBound, GradientCheckpointing, nn.Module):
         for module in (self.track_head, self.eyewall_head, self.ri_head, self.landfall_head,
                        self.intensity_head, self.summary_pool, self.summary_norm, self.storm_position,
                        self.storm_state_embed, self.storm_environment_embed, self.storm_far_pool,
-                       self.storm_satellite, self.satnet_fusion, self.ri2_head, self.storm_physics_embed):
+                       self.storm_satellite, self.satnet_fusion, self.ri2_head, self.storm_physics_embed,
+                       self.storm_ocean_embed, self.storm_ir_embed):
             if module is not None:
                 yield from module.parameters()
 

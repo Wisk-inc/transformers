@@ -79,11 +79,15 @@ class StormTimeDataset(torch.utils.data.Dataset):
         table: the label table, to find each storm's row.
         frames, retrieval_share, stale_hours: when ``frames`` is given, samples carry what the retrieval
             needs to replace their newest frame, for a ``retrieval_share`` of samples.
+        patches: the staged storm patches (:class:`naturev1.satdata.StormPatches`, needs ``table``): every storm then
+            carries its storm-centred infrared now and six hours earlier as ``satellite/ir`` ``(MAX_STORMS, 2, 256,
+            256)`` and ``satellite/available`` -- what the in-model satellite encoder and NatureV2's infrared
+            structure read.
     """
 
     def __init__(self, era5: str | Path, items, channels: int, history: int = 6, satnet: dict | None = None,
                  table: dict | None = None, frames=None, retrieval_share: float = 0.0, stale_hours=(6, 12),
-                 seed: int = 0, train: bool = True) -> None:
+                 seed: int = 0, train: bool = True, patches=None) -> None:
         from .era5 import Normalizer
         from .satdata import _Memmaps
 
@@ -94,6 +98,9 @@ class StormTimeDataset(torch.utils.data.Dataset):
         self.items, self.channels, self.history = items, channels, history
         self.satnet, self.frames = satnet, frames
         self.lookup = _table_lookup(table) if table is not None else {}
+        self.patches = patches if table is not None else None
+        self.table_position = (np.asarray(table["lat"], np.float64), np.asarray(table["lon"], np.float64)) \
+            if self.patches is not None else None
         self.retrieval_share, self.stale_hours = retrieval_share, tuple(stale_hours)
         self.seed, self.train, self.epoch = seed, train, 0
         self.maps = _Memmaps()
@@ -138,6 +145,8 @@ class StormTimeDataset(torch.utils.data.Dataset):
                         present[slot] = True
                 sample[f"satnet/{key}"] = block
             sample["satnet_present"] = present
+        if self.patches is not None:
+            sample.update(self._satellite(targets[:MAX_STORMS]))
         use_retrieval = False
         if self.frames is not None and self.retrieval_share > 0:
             rng = np.random.default_rng((self.seed, self.epoch, item))
@@ -159,6 +168,28 @@ class StormTimeDataset(torch.utils.data.Dataset):
             sample["retrieval/stale_hours"] = torch.tensor(float(stale))
         sample["use_retrieval"] = torch.tensor(use_retrieval)
         return sample
+
+
+    def _satellite(self, targets) -> dict:
+        """Storm-centred infrared now and six hours earlier for every storm, cut around its best-track centre."""
+        from .satdata import recentre
+        from .stormsat import PATCH_PIXELS
+
+        codes = np.zeros((MAX_STORMS, 2, PATCH_PIXELS, PATCH_PIXELS), np.uint8)
+        seen = np.zeros((MAX_STORMS, 2), bool)
+        lats, lons = self.table_position
+        for slot, target in enumerate(targets):
+            track, point = target.track, target.point
+            stamp = int(track.time[point].astype("datetime64[s]").astype(np.int64))
+            centre = (float(track.latitude[point]), float(track.longitude[point]))
+            for k, hours in enumerate((0, 6)):
+                row = self.lookup.get((track.storm_id, stamp - hours * 3600), -1)
+                patch = None if row < 0 else self.patches.patch(row)
+                if patch is None:
+                    continue
+                crop, inside = recentre(patch, (float(lats[row]), float(lons[row])), centre, PATCH_PIXELS)
+                codes[slot, k], seen[slot, k] = crop[0], inside > 0.5
+        return {"satellite/ir": torch.from_numpy(codes), "satellite/available": torch.from_numpy(seen)}
 
 
 class StormStep(nn.Module):
@@ -264,8 +295,22 @@ class StormStep(nn.Module):
         targets["sample_weight"] = self.class_weights[wind_class]
         with torch.no_grad():
             physics = storm_physics(now, self.variables, self.stepper.normalizer, self.grid, centres, take("storm_state"))
+        satellite = None
+        if "satellite/ir" in batch:
+            codes = batch["satellite/ir"][b_index, k_index]
+            if self.training:
+                from .storms import augment_codes
+
+                codes = augment_codes(codes)
+            satellite = (codes, batch["satellite/available"][b_index, k_index])
+        ocean = None
+        if getattr(model, "storm_ocean_embed", None) is not None:
+            from .thermo import storm_ocean
+
+            ocean = storm_ocean(centres, batch["valid_time"][b_index], environment, targets.get("current_wind_radii_nmi"))
         outputs = model.storm_heads(near, centres, take("storm_state"), environment,
-                                    prior if model.uses_track_prior() else None, far, None, satnet, physics)
+                                    prior if model.uses_track_prior() else None, far, satellite, satnet, physics,
+                                    storm_ocean=ocean)
         loss, parts = total_loss({k: v.float() for k, v in outputs.items()}, targets, SURFACE_FIELDS)
 
         if self.state_weight and model.state_head is not None:
@@ -286,7 +331,14 @@ class StormStep(nn.Module):
             loss = loss + self.anchor_weight * drift
             parts["anchor"] = float(drift.detach())
         parts["storms"] = float(len(b_index))
-        return loss, parts, {"storm_satnet": satnet} if satnet is not None else {}
+        extra = {}
+        if satnet is not None:
+            extra["storm_satnet"] = satnet
+        if satellite is not None:
+            extra["storm_satellite"] = satellite
+        if ocean is not None:
+            extra["storm_ocean"] = ocean
+        return loss, parts, extra
 
 
 CLASS_EDGES_KT = (63.5, 95.5)
@@ -319,7 +371,8 @@ def _collate(samples: list[dict]) -> dict:
 
 def train_storms(model, settings: EngineSettings, era5: str | Path, stepper, grid, variables, train_items, val_items,
                  satnet: dict | None = None, table: dict | None = None, frames=None, tail: int = 4,
-                 retrieval_share: float = 0.3, tail_lr_scale: float = 0.1, rebalance: bool = True) -> dict:
+                 retrieval_share: float = 0.3, tail_lr_scale: float = 0.1, rebalance: bool = True,
+                 patches=None) -> dict:
     """Stage B. Returns the last held-out losses; see :func:`finalise_storms` for the fitting afterwards."""
     for parameter in model.parameters():
         parameter.requires_grad = False
@@ -338,10 +391,10 @@ def train_storms(model, settings: EngineSettings, era5: str | Path, stepper, gri
     channels = model.config.analysis_channels
     train = StormTimeDataset(era5, train_items, channels, satnet=satnet, table=table, frames=frames,
                              retrieval_share=retrieval_share if model.retrieval is not None else 0.0,
-                             seed=settings.seed, train=True)
+                             seed=settings.seed, train=True, patches=patches)
     held = StormTimeDataset(era5, val_items, channels, satnet=satnet, table=table, frames=frames,
                             retrieval_share=retrieval_share if model.retrieval is not None else 0.0,
-                            seed=settings.seed, train=False)
+                            seed=settings.seed, train=False, patches=patches)
     loader = engine.loader(train, collate_fn=_collate)
     val_loader = engine.loader(held, shuffle=False, drop_last=False, collate_fn=_collate)
     engine.resume()
@@ -387,7 +440,9 @@ def train_storms(model, settings: EngineSettings, era5: str | Path, stepper, gri
                                           "eyewall_rmw", "wind_radii", "ri2", "backbone_tail")}
             model.mark_trained(marks, {"storm_center": True, "storm_state": True, "storm_environment": True,
                                        "pooled_far": True, "track_prior": True if model.uses_track_prior() else None,
-                                       "storm_satnet": extra.get("storm_satnet"), "storm_physics": True})
+                                       "storm_satnet": extra.get("storm_satnet"), "storm_physics": True,
+                                       "storm_satellite": extra.get("storm_satellite"),
+                                       "storm_ocean": extra.get("storm_ocean")})
             stop, save, evaluate = engine.poll()
             if evaluate:
                 with engine.averaged():
@@ -419,7 +474,8 @@ def train_storms(model, settings: EngineSettings, era5: str | Path, stepper, gri
 @torch.no_grad()
 def memmap_feature_bank(model, era5: str | Path, items, stepper, grid, variables, satnet: dict | None = None,
                         table: dict | None = None, rollout: bool = True, precision: str = "bf16",
-                        part: Path | None = None, analog=None, ensemble_members: int = 1, rotations: int = 1) -> dict:
+                        part: Path | None = None, analog=None, ensemble_members: int = 1, rotations: int = 1,
+                        patches=None) -> dict:
     """
     The storm feature bank (:func:`naturev1.storm_feature_bank`'s format) straight from a staged memmap,
     one backbone pass per initial time for all its storms -- plus the storm physics
@@ -441,7 +497,8 @@ def memmap_feature_bank(model, era5: str | Path, items, stepper, grid, variables
     device = next(model.parameters()).device
     rank = dist.get_rank() if dist.is_initialized() else 0
     world = dist.get_world_size() if dist.is_initialized() else 1
-    dataset = StormTimeDataset(era5, items, model.config.analysis_channels, satnet=satnet, table=table, train=False)
+    dataset = StormTimeDataset(era5, items, model.config.analysis_channels, satnet=satnet, table=table, train=False,
+                               patches=patches)
     model.eval()
     leads = model.config.lead_times_hours
     pieces = []
@@ -472,6 +529,15 @@ def memmap_feature_bank(model, era5: str | Path, items, stepper, grid, variables
         piece["track_prior"] = steering_track(now, variables, stepper.normalizer, grid, centres, leads).cpu()
         state_vec = sample["storm/storm_state"][0, :count]
         piece["storm_physics"] = storm_physics(now, variables, stepper.normalizer, grid, centres, state_vec).cpu()
+        if getattr(model, "storm_ocean_embed", None) is not None:
+            from .thermo import storm_ocean
+
+            radii_now = sample["storm/current_wind_radii_nmi"][0, :count] if "storm/current_wind_radii_nmi" in sample else None
+            piece["storm_ocean"] = storm_ocean(centres, sample["valid_time"].expand(count), piece["storm_environment"].to(device),
+                                               radii_now).cpu()
+        if "satellite/ir" in sample:
+            piece["satellite_ir"] = sample["satellite/ir"][0, :count].cpu()
+            piece["satellite_available"] = sample["satellite/available"][0, :count].cpu()
         wind_kt = sample["storm/current_wind_kt"][0, :count].float()
         radii = sample["storm/wind_radii_target"][0, :count, 0, 0, :].float() if "storm/wind_radii_target" in sample else None
         size_km = None
@@ -518,6 +584,8 @@ def memmap_feature_bank(model, era5: str | Path, items, stepper, grid, variables
     stacked["storm_environment"] = torch.cat([p["storm_environment"] for p in pieces])
     stacked["track_prior"] = torch.cat([p["track_prior"] for p in pieces])
     stacked["storm_physics"] = torch.cat([p["storm_physics"] for p in pieces])
+    if pieces and all("storm_ocean" in p for p in pieces):
+        stacked["storm_ocean"] = torch.cat([p["storm_ocean"] for p in pieces])
     for key in ("analog_track", "analog_change_kt", "rollout_steering", "rollout_vortex", "rollout_ensemble",
                 "rollout_ensemble_spread_km", "rollout_pressure_hpa", "rollout_wind_kt", "rollout_phase"):
         if pieces and all(key in p for p in pieces):
@@ -528,6 +596,10 @@ def memmap_feature_bank(model, era5: str | Path, items, stepper, grid, variables
     if rotations > 1 and pieces and all("features_tta" in p for p in pieces):
         bank["features_tta"] = torch.cat([p["features_tta"] for p in pieces])
         bank["features_far_tta"] = torch.cat([p["features_far_tta"] for p in pieces])
+    if pieces and all("satellite_ir" in p for p in pieces):
+        # The storm-centred infrared the in-model encoder reads, in the bank format :func:`naturev1.storms._satellite_batch` uses.
+        bank["satellite"] = {"ir": torch.cat([p["satellite_ir"] for p in pieces]),
+                             "available": torch.cat([p["satellite_available"] for p in pieces])}
     if satnet is not None:
         present = torch.cat([p["satnet_present"] for p in pieces])
         bank["satnet"] = {key: torch.cat([p["satnet"][key] for p in pieces]) for key in SATNET_KEYS}
@@ -818,6 +890,12 @@ def main(argv=None) -> None:
                              "beats a single pass on the held-out seasons")
     parser.add_argument("--monitor-share", type=float, default=0.2,
                         help="share of training times whose features fit the input monitor")
+    parser.add_argument("--patches-in-heads", action="store_true",
+                        help="feed every storm's centred infrared (now and 6 h earlier) to the in-model satellite encoder "
+                             "and, for a NatureV2 base, its infrared structure (needs --root and --table)")
+    parser.add_argument("--compare-to",
+                        help="the released model the release decision is measured against (default: --base with the "
+                             "new paths off -- right for a base whose storm heads were trained, not for a stage-one base)")
     args = parser.parse_args(argv)
 
     from .engine import setup_distributed
@@ -830,7 +908,8 @@ def main(argv=None) -> None:
     rank, _, world, device = setup_distributed()
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
-    model = merged_model(args.base, args.satnet, args.retrieval).to(device)
+    # No trained retrieval, no retrieval: an untrained one in the loop would hand the heads noise for a share of samples.
+    model = merged_model(args.base, args.satnet, args.retrieval, **({} if args.retrieval else {"retrieval_layers": 0})).to(device)
     meta = json.loads(Path(args.era5).with_suffix(".json").read_text())
     variables = list(meta["variables"])
     grid = model._aligned(staged_grid(meta))
@@ -841,7 +920,12 @@ def main(argv=None) -> None:
                            Normalizer.from_dict(meta["statistics"]), grid,
                            variables.index("surface_pressure") if "surface_pressure" in variables else None)
     table = dict(np.load(args.table, allow_pickle=False)) if args.table else None
-    frames = GlobalFrames(args.root) if args.root else None
+    frames = GlobalFrames(args.root) if args.root and model.retrieval is not None and args.retrieval_share > 0 else None
+    patches = None
+    if args.patches_in_heads:
+        if not (args.root and args.table):
+            raise ValueError("--patches-in-heads needs --root (the staged satellite record) and --table (the label table)")
+        patches = StormPatches(args.root)
     satnet = None
     if table is not None and args.root and model.trained_heads()["satnet"] > 0:
         cache = output / "satnet_outputs.pt"
@@ -864,8 +948,14 @@ def main(argv=None) -> None:
     settings = EngineSettings(run="stage-b-storms", output=str(output), hours=args.hours, batch_size=args.batch_size,
                               learning_rate=args.lr, workers=args.workers, hub_repo=args.hub_repo,
                               max_steps=args.max_steps, warmup_steps=200, checkpoint_minutes=20, eval_minutes=30)
+    if is_main():
+        extras = ((["storm-centred infrared into the heads"] if patches is not None else [])
+                  + (["ocean heat content and storm size"] if model.config.storm_ocean else [])
+                  + (["infrared structure"] if model.config.storm_ir and patches is not None else []))
+        print(f"[storms-b] inputs beyond V1: {', '.join(extras) or 'none'}; satellite network outputs "
+              f"{'fused' if satnet is not None else 'absent'}; retrieval {'in the loop' if frames is not None else 'off'}", flush=True)
     train_storms(model, settings, args.era5, stepper, grid, variables, train_items, val_items, satnet=satnet,
-                 table=table, frames=frames, tail=args.tail, retrieval_share=args.retrieval_share)
+                 table=table, frames=frames, tail=args.tail, retrieval_share=args.retrieval_share, patches=patches)
 
     rollout = not args.no_rollout_members
     # Historical analogs from the training seasons only: a held-out storm never finds itself.
@@ -883,11 +973,13 @@ def main(argv=None) -> None:
     for name, chosen in (("val", val_items), ("test", test_items), ("monitor", monitor_items)):
         banks[name] = memmap_feature_bank(model, args.era5, chosen, stepper, grid, variables, satnet=satnet, table=table,
                                           rollout=rollout, part=output / f"bank_{name}", analog=analog,
-                                          ensemble_members=args.ensemble_members, rotations=args.rotations)
+                                          ensemble_members=args.ensemble_members, rotations=args.rotations,
+                                          patches=patches)
     # The model it started from, on the same test storms, for the comparison the release decision uses.
     from .sattrain import build_model
 
-    old = build_model(args.base, satnet_embed=0, retrieval_layers=0, ri2=False, hemisphere_frame=False).to(device)
+    old = build_model(args.compare_to or args.base, satnet_embed=0, retrieval_layers=0, ri2=False,
+                      hemisphere_frame=False).to(device)
     old_bank = memmap_feature_bank(old, args.era5, test_items, stepper, grid, variables, rollout=False,
                                    part=output / "bank_old")
     if is_main():
