@@ -186,13 +186,14 @@ def wind_field(points_lat: torch.Tensor, points_lon: torch.Tensor, centre_lat: t
     return {"speed_kt": total, "u_ms": u, "v_ms": v, "gust_kt": total * gust}
 
 
-def rcliper_rate_mm_h(r_km: torch.Tensor, vmax_kt: torch.Tensor) -> torch.Tensor:
-    """R-CLIPER rain rate (Tuleya et al. 2007): linear to a peak at ``rm``, then exponential decay."""
+def rcliper_rate_mm_h(r_km: torch.Tensor, vmax_kt: torch.Tensor, tail: float = 1.0) -> torch.Tensor:
+    """R-CLIPER rain rate (Tuleya et al. 2007): linear to a peak at ``rm``, then exponential decay with scale ``re``;
+    ``tail`` widens that decay scale (1.5 against gauge-corrected radar: the published profile is too concentrated)."""
     u = 1.0 + (vmax_kt - 35.0) / 33.0
     t0 = (RCLIPER["t0"][0] + RCLIPER["t0"][1] * u).clamp_min(0.0)
     tm = (RCLIPER["tm"][0] + RCLIPER["tm"][1] * u).clamp_min(0.0)
     rm = (RCLIPER["rm"][0] + RCLIPER["rm"][1] * u).clamp_min(10.0)
-    re = (RCLIPER["re"][0] + RCLIPER["re"][1] * u).clamp_min(20.0)
+    re = (RCLIPER["re"][0] + RCLIPER["re"][1] * u).clamp_min(20.0) * float(tail)
     inner = t0 + (tm - t0) * (r_km / rm)
     outer = tm * torch.exp(-(r_km - rm) / re)
     return torch.where(r_km < rm, inner, outer).clamp_min(0.0)

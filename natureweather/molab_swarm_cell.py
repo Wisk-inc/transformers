@@ -22,7 +22,7 @@ import os
 import subprocess
 import sys
 
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "naturev1[swarm]>=0.15.0", "ihelix>=0.6.0"],
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "naturev1[swarm,hub]>=0.16.0", "ihelix>=0.6.0"],
                check=True)
 
 from pathlib import Path

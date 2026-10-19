@@ -20,7 +20,10 @@ landfall        when the centre comes ashore (median and 10-90%), where first, h
                 rain (if hit, and its wettest cell) and arrival times, with dates
 observations    barometer readings fitted to a vortex (a centre fix with uncertainty and a central pressure) and point
                 winds blended into the painted map -- operators for feeds that do not yet exist here
-live            one call from an NHC storm id to an impact report (live, or a replay of what was known at the time)
+live            one call from an NHC storm id to an impact report (live, or a replay of what was known at the time);
+                every cycle saved, the previous one's error fed back
+bulletin        the cycle record (JSON + parish CSV), the history of a storm's cycles, the previous cycle found again
+infrared        GOES band-13 read quantitatively: cold-top share, coldest top, ring symmetry, eye, their trend (diagnostic)
 plot            maps of the swarm, its worldlines and its impacts; the parish-by-parish landfall figure
 ==============  ======================================================================================================
 

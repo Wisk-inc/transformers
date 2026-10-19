@@ -37,6 +37,8 @@ D26_REFERENCE_M = 50.0
 D26_POWER = 0.5
 
 
+# With the climatology present and ``d26_power`` 0 (the shipped value), the depth branch is taken with a factor of exactly 1:
+# the 0.14 surface-temperature warm-water factor is replaced, and the 0.15 refit absorbed the difference.
 def wake_cooling_k(vmax_kt, translation_ms, sst_k, d26_m=None, d26_power: float | None = None) -> np.ndarray:
     """
     Peak cooling of the wake, K: rises with intensity^1.5, falls with translation speed and warm water -- and, when the

@@ -69,6 +69,7 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
     stack = np.stack([out.get(m, nan) for m in table["members"]], 1)[None]
     physics_track = apply_consensus([case], stack, table)[0]
     track = physics_track
+    result_models = 0
     if table.get("model_blend") is not None and out.get("model") is not None:
         from .consensus import blend_with_model
 
@@ -79,9 +80,10 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
     if previous is not None and isinstance(previous, dict) and previous.get("track") is not None:
         from .consensus import apply_track_feedback
 
-        track = apply_track_feedback(case, track, previous["track"], previous.get("time"), leads)
+        track = apply_track_feedback(case, track, previous["track"], previous.get("time"), leads,
+                                     previous_position=(previous["lat"], previous["lon"]) if "lat" in previous and "lon" in previous else None)
     result = {"leads": list(leads), "track": track, "members": out, "consensus_table": table["name"],
-              "n_models": locals().get("result_models", 0)}
+              "n_models": result_models}
     from . import coefficients
 
     # each consensus table has its own cone: the forecast-flow consensus errs less, so its cone is narrower
@@ -174,8 +176,8 @@ def _intensity(case, env, ctx, track, leads, model_extras=None) -> dict:
         ocean = OceanClimatology.default()
     try:
         along = environment_along_track(env, ctx.clean, case, filled, leads, np.nan_to_num(shifor, nan=case.wind_kt), ocean=ocean)
-    except Exception:                                       # missing fields in a live analysis: degrade, don't fail
-        return {"intensity_kt": members, "intensity": shifor}
+    except Exception as error:                              # missing fields in a live analysis: degrade, don't fail
+        return {"intensity_kt": members, "intensity": shifor, "intensity_note": f"environment along the track unavailable ({type(error).__name__}: {error}); SHIFOR only"}
     members["decay_shifor"] = decay_along(case, along, leads, np.nan_to_num(shifor, nan=case.wind_kt))
     members["lgem"] = lgem_intensity(case, along, leads)
     members["trend"] = trend_intensity(case, along, leads)
@@ -195,7 +197,7 @@ def _intensity(case, env, ctx, track, leads, model_extras=None) -> dict:
         if regime is not None:
             # A storm primed for rapid intensification gets the weights fitted on such storms: they lean on LGEM and
             # the trend, and correct the consensus's habit of pulling an intensifying storm back toward the mean.
-            p = ri_probability(case, along, model_dp=model_dp)
+            p = ri_probability(case, along, model_dp=model_dp, leads=leads)
             extra.update({"ri_probability": p, "intensity_regime": "rapid" if p >= regime["cut"] else "normal"})
             if p >= regime["cut"]:
                 table = {**table, "weights": regime["weights"], "bias": regime["bias"]}
@@ -216,9 +218,10 @@ def _intensity(case, env, ctx, track, leads, model_extras=None) -> dict:
     categories = category_probabilities(intensity, extra.get("intensity_regime", "normal"), ri_probability=extra.get("ri_probability"),
                                         ri_intensity=extra.get("intensity_if_ri"))
     try:
-        peak = peak_probability(case, along, intensity, extra.get("ri_probability"), model_dp)
-    except Exception:
+        peak = peak_probability(case, along, intensity, extra.get("ri_probability"), model_dp, leads=leads)
+    except Exception as error:
         peak = {}
+        extra["intensity_note"] = f"peak probability unavailable ({type(error).__name__}: {error})"
     if peak:
         extra["peak_probability"] = peak
     if categories:

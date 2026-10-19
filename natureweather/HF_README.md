@@ -1094,8 +1094,8 @@ and St Catherine instead. `melissa_jamaica.png` shows the four releases side by 
 Install and train, or score, from one cell (marimo, Colab, Jupyter or a plain script):
 
 ```python
-pip install "naturev1[all]"            # 0.10 from PyPI
-pip install "naturev1[all] @ git+https://github.com/Wisk-inc/transformers@claude/linear-context-architecture-a35c6h#subdirectory=natureweather"   # 0.11
+pip install "naturev1[all]"            # 0.16 from PyPI
+pip install "naturev1[all] @ git+https://github.com/Wisk-inc/transformers@claude/linear-context-architecture-a35c6h#subdirectory=natureweather"   # the development branch
 ```
 The complete pipeline is the cell `colab_naturev1.py` shipped with the package; it installs what it needs, stages
 the data, trains in stages, scores itself, and only publishes if it earned it. Every setting is at the top.

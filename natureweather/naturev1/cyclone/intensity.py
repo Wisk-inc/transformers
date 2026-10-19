@@ -433,7 +433,7 @@ RI_OCEAN_FEATURES = ("heat_potential", "warm_depth")
 RI_SIZE_FEATURES = ("size", "has_size")
 
 
-def ri_features(case, along: dict, model_dp=None) -> np.ndarray:
+def ri_features(case, along: dict, model_dp=None, leads=None) -> np.ndarray:
     """
     SHIPS-RII-style predictors over the first 24 hours along the forecast track; with ``model_dp`` (the models' mean
     change in central-pressure deficit at the standard leads, hPa, negative = deepening, from
@@ -455,7 +455,8 @@ def ri_features(case, along: dict, model_dp=None) -> np.ndarray:
         model = np.zeros(3)
     else:
         dp = np.asarray(model_dp, np.float64)
-        k24, k48 = list(LEADS).index(24), list(LEADS).index(48)
+        L = np.asarray(leads if leads is not None else LEADS, np.float64)
+        k24, k48 = int(np.argmin(np.abs(L - 24.0))), int(np.argmin(np.abs(L - 48.0)))
         have = np.isfinite(dp[k24])
         model = np.array([np.nan_to_num(-dp[k24]) / 10.0 if have else 0.0, np.nan_to_num(-dp[k48]) / 20.0 if have else 0.0, float(have)])
     first_day = h <= 24.0
@@ -617,13 +618,13 @@ def fit_ri(cases, alongs: list, threshold_kt: float = 30.0, l2: float = 1e-2, it
             "base_rate": float(y.mean()), "cases": int(len(y))}
 
 
-def ri_probability(case, along: dict, table: dict | None = None, model_dp=None) -> float:
+def ri_probability(case, along: dict, table: dict | None = None, model_dp=None, leads=None) -> float:
     """P(+30 kt in 24 h) for a storm on its forecast track (``coefficients.RI`` by default; a table fitted with the
     model-deepening predictors uses them when ``model_dp`` is given, and counts the model as absent otherwise)."""
     if table is None:
         from .coefficients import RI as table
     w = np.asarray(table["weights"], np.float64)
-    f = _fit_length(ri_features(case, along, model_dp), w)    # a table fitted with fewer predictors ignores the rest
+    f = _fit_length(ri_features(case, along, model_dp, leads), w)    # a table fitted with fewer predictors ignores the rest
     if not np.isfinite(f).all():
         return float(table.get("base_rate", 0.05))
     return float(1.0 / (1.0 + np.exp(-w @ f)))
@@ -644,15 +645,16 @@ def _series_upto(along: dict, key: str, upto_h: float) -> np.ndarray:
     return v[t <= upto_h]
 
 
-def peak_features(case, along: dict, consensus_kt, ri_probability: float, model_dp=None) -> np.ndarray:
+def peak_features(case, along: dict, consensus_kt, ri_probability: float, model_dp=None, leads=None) -> np.ndarray:
     """The :data:`PEAK_FEATURES` row for one case (raw, before the table's standardisation)."""
     from .data import LEADS
 
     cv = np.asarray(consensus_kt, np.float64)
     p = float(np.clip(ri_probability if ri_probability is not None and np.isfinite(ri_probability) else 0.05, 1e-3, 1 - 1e-3))
     pi = _series_upto(along, "pi_warm_kt" if "pi_warm_kt" in along else "pi_kt", 72.0)
-    k24 = list(LEADS).index(24)
-    dp = np.asarray(model_dp, np.float64) if model_dp is not None else np.full(len(LEADS), np.nan)
+    L = np.asarray(leads if leads is not None else LEADS, np.float64)
+    k24 = int(np.argmin(np.abs(L - 24.0)))
+    dp = np.asarray(model_dp, np.float64) if model_dp is not None else np.full(L.size, np.nan)
     has_dp = bool(dp.size > k24 and np.isfinite(dp[k24]))
     tchp = _series_upto(along, "tchp_kj_cm2", 48.0) if "tchp_kj_cm2" in along else np.array([np.nan])
     with np.errstate(all="ignore"):
@@ -662,7 +664,7 @@ def peak_features(case, along: dict, consensus_kt, ri_probability: float, model_
     return np.nan_to_num(np.asarray(row, np.float64))
 
 
-def peak_probability(case, along: dict, consensus_kt, ri_probability: float, model_dp=None, table: dict | None = None) -> dict:
+def peak_probability(case, along: dict, consensus_kt, ri_probability: float, model_dp=None, table: dict | None = None, leads=None) -> dict:
     """
     ``{"thresholds_kt": [64, 96, 113, 137], "probability": [...]}`` -- the probability that the storm's **peak**
     intensity within the forecast window reaches each threshold (hurricane, major, category 4, category 5): a logistic
@@ -676,7 +678,7 @@ def peak_probability(case, along: dict, consensus_kt, ri_probability: float, mod
         table = getattr(coefficients, "PEAK", None)
     if not table:
         return {}
-    x = peak_features(case, along, consensus_kt, ri_probability, model_dp)
+    x = peak_features(case, along, consensus_kt, ri_probability, model_dp, leads)
     mu, sd = np.asarray(table["mean"], np.float64), np.asarray(table["std"], np.float64)
     z = np.concatenate([x[:1], (x[1:] - mu) / np.where(sd > 1e-9, sd, 1.0)])
     out = []

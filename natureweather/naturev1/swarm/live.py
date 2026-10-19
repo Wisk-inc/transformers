@@ -42,7 +42,7 @@ def _gfs_available(gfs: GFSAnalysis, when: np.datetime64) -> bool:
 def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: int = 100_000, device="cpu",
                    region=None, climatology=None, analogs=None, impact_particles: int = 20_000,
                    cache: str | Path = "~/.cache/naturev1", name: str = "", forecast_flow: bool = True,
-                   models=None, previous=None, log=print) -> dict:
+                   models=None, previous="auto", save_runs: bool = True, log=print) -> dict:
     """
     Args:
         storm_id: NHC id, e.g. ``"al132025"`` (Melissa) or ``"ep212026"``.
@@ -55,6 +55,9 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
         models: which models (:data:`naturev1.swarm.models.DEFAULT_MODELS` by default).
         previous: the previous cycle's ``result`` with its analysis time, ``{"time": ..., "track": ...}``: its error
             for the time now analysed is fed back into the new track (small, 12-48 h; see ``apply_track_feedback``).
+            ``"auto"`` (the default) finds the newest saved cycle of this storm under ``cache/runs``; None: no feedback.
+        save_runs: write every cycle under ``cache/runs/<storm>/<time>.json`` (:func:`naturev1.swarm.bulletin.write_bulletin`),
+            which is what the next cycle's ``previous="auto"`` reads and what an operations desk keeps.
 
     Returns:
         ``{"case", "result" (physics_forecast output, swarm included), "impact", "fixes_before", "fixes_after",
@@ -80,7 +83,9 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
         if when is None:
             raise RuntimeError("no recent analysis with both a best-track fix and a GFS run yet")
     when = np.datetime64(when, "m")
-    case = case_from_bdeck(best, when, storm_id.upper(), name, BASINS.get(storm_id[:2].lower(), "NA"))
+    if storm_id[:2].lower() not in BASINS:
+        raise ValueError(f"{storm_id}: NHC storm ids only (al / ep / cp) -- the decks come from the NHC ATCF")
+    case = case_from_bdeck(best, when, storm_id.upper(), name, BASINS[storm_id[:2].lower()])
     env = gfs.environment(when, case.lat, case.lon)
     before = merge(window(fdeck, when - np.timedelta64(24, "h"), when))
     flows = tracks = None
@@ -95,9 +100,17 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
             tracks = {k: v["track"] for k, v in read.items()}
         else:
             log("no model forecast could be read; going ahead on the analysis alone")
+    if isinstance(previous, str) and previous == "auto":
+        from .bulletin import load_previous
+
+        previous = load_previous(cache / "runs", storm_id, when)
+        if previous is not None:
+            log(f"previous cycle {str(previous['time'])[:16]}Z found; its error feeds back into the track")
     result = physics_forecast(case, env, climatology, analogs, swarm=particles, swarm_fixes=before or None,
                               swarm_device=device, forecast_flow=flows, model_track=tracks,
                               model_extras={k: v["extras"] for k, v in read.items()} or None, previous=previous)
+    if "swarm" not in result:
+        raise RuntimeError(f"{storm_id}: the physics context could not be built from the analysis at {when}; no swarm, no impacts")
     model_track = model_mean(case, tracks, result["leads"]) if tracks else None
     after, ess_after = [], None
     if not archive and fdeck:
@@ -111,9 +124,18 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
     r34 = gale_radius_km(at_analysis[0]) if at_analysis else float("nan")
     impact = (impact_from_forecast(region, result, case, particles=impact_particles, device=device, r34_km=r34)
               if region is not None else None)
-    return {"case": case, "result": result, "impact": impact, "fixes_before": before, "fixes_after": after,
-            "best": best, "analysis_time": when, "ess_after": ess_after, "model_track": model_track, "r34_km": r34,
-            "models": {k: {"title": v["title"], "track": v["track"], "extras": v["extras"]} for k, v in read.items()}}
+    run = {"case": case, "result": result, "impact": impact, "fixes_before": before, "fixes_after": after,
+           "best": best, "analysis_time": when, "ess_after": ess_after, "model_track": model_track, "r34_km": r34,
+           "previous_used": previous["time"] if isinstance(previous, dict) and previous.get("time") is not None else None,
+           "models": {k: {"title": v["title"], "track": v["track"], "extras": v["extras"]} for k, v in read.items()}}
+    if save_runs:
+        try:
+            from .bulletin import write_bulletin
+
+            run["bulletin"] = write_bulletin(run, None, cache / "runs", storm_id)["json"]
+        except Exception as error:                 # a record that cannot be written must not lose the forecast
+            log(f"cycle record not written: {type(error).__name__}: {error}")
+    return run
 
 
 def goes_scene(lat: float, lon: float, directory: str | Path = "~/.cache/naturev1/goes", half_deg: float = 8.0,

@@ -19,8 +19,10 @@ from test_landfall import _island_run
 def _along(hours=121, pi=150.0, tchp=90.0, shear=5.0, rh=0.70, land=0.0):
     six = np.arange(0.0, hours, 6.0)
     return {"hours": np.arange(float(hours)), "six_hours": six, "pi_kt": np.full(six.size, pi), "pi_warm_kt": np.full(six.size, pi),
-            "tchp_kj_cm2": np.full(six.size, tchp), "shear_ms": np.full(six.size, shear), "rh_mid": np.full(six.size, rh),
-            "land": np.full(hours, land), "height_m": np.zeros(hours)}
+            "tchp_kj_cm2": np.full(hours, tchp), "shear_ms": np.full(six.size, shear), "shear_mid_ms": np.full(six.size, 0.8 * shear),
+            "rh_mid": np.full(six.size, rh), "land": np.full(hours, land), "height_m": np.zeros(hours), "speed_ms": np.full(hours, 5.0),
+            "sst_k": np.full(hours, 302.0), "sst_eff_k": np.full(hours, 301.0), "sst_clim_c": np.full(six.size, 28.5),
+            "d26_m": np.full(hours, 60.0), "landfall_hour": float("nan")}
 
 
 def test_peak_probability_is_calibrated_to_the_table_and_monotonic():
@@ -94,7 +96,7 @@ def test_rescaling_the_worlds_about_the_consensus_scales_their_spread_exactly():
     fc = result["swarm"]["forecast"]
     leads = np.asarray(LEADS, float)
     ref = np.asarray(result["track"], float)
-    before_pos, before_track = fc.positions.copy(), fc.track.copy()
+    before_track = fc.track.copy()
     d0 = np.array([geo.great_circle_km(ref[k, 0], ref[k, 1], fc.positions[:, k, 0], fc.positions[:, k, 1]) for k in range(len(LEADS))])
     factor = np.array([1.0, 1.0, 0.5, 0.5, 2.0, 1.0, 1.0, 1.0])
     rescale_worlds(fc, case, ref, LEADS, factor)

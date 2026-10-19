@@ -183,7 +183,7 @@ def blend_with_model(case, track: np.ndarray, model_track: np.ndarray, spec: dic
 
 
 
-def apply_track_feedback(case, track, previous_track, previous_time, leads, table: dict | None = None):
+def apply_track_feedback(case, track, previous_track, previous_time, leads, table: dict | None = None, previous_position=None):
     """
     Error feedback from the storm's own previous cycle (``coefficients.TRACK_FEEDBACK``): the previous forecast's
     position for the time now being analysed, minus the analysis, is an error known at analysis time; a fitted share
@@ -196,6 +196,8 @@ def apply_track_feedback(case, track, previous_track, previous_time, leads, tabl
         track: the new blended track ``(L, 2)``.
         previous_track: the previous cycle's blended track ``(L, 2)`` at the same ``leads``.
         previous_time: the previous cycle's analysis time (numpy datetime64 or ISO string).
+        previous_position: that cycle's analysis ``(lat, lon)``, so a gap shorter than the first lead interpolates
+            from the right place.
     Returns the corrected track; the input unchanged when the previous cycle is not usable.
     """
     if table is None:
@@ -209,8 +211,12 @@ def apply_track_feedback(case, track, previous_track, previous_time, leads, tabl
     prev = np.asarray(previous_track, np.float64)
     if gap_h <= 0 or gap_h > 48 or not np.isfinite(prev[:, 0]).any():
         return track
-    pl = np.interp(gap_h, leads[np.isfinite(prev[:, 0])], prev[np.isfinite(prev[:, 0]), 0])
-    po = np.degrees(np.interp(gap_h, leads[np.isfinite(prev[:, 0])], np.unwrap(np.radians(prev[np.isfinite(prev[:, 0]), 1]))))
+    fin = np.isfinite(prev[:, 0])
+    knots, plat, plon = leads[fin], prev[fin, 0], prev[fin, 1]
+    if previous_position is not None and np.all(np.isfinite(previous_position)):       # the previous analysis: lead 0
+        knots, plat, plon = np.r_[0.0, knots], np.r_[previous_position[0], plat], np.r_[previous_position[1], plon]
+    pl = np.interp(gap_h, knots, plat)
+    po = np.degrees(np.interp(gap_h, knots, np.unwrap(np.radians(plon))))
     e_prev, n_prev = geometry.local_displacement_km(case.lat, case.lon, pl, po)              # the previous error, km
     keys = sorted(table["beta"], key=lambda k: abs(float(k) - gap_h))
     beta = np.interp(leads, table["leads"], table["beta"][keys[0]])

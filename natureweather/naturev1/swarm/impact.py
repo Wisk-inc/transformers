@@ -30,6 +30,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import math
+
 import numpy as np
 import torch
 
@@ -46,18 +48,24 @@ WIND_KT = (34.0, 50.0, 64.0)
 RAIN_MM = (100.0, 250.0)
 
 
-def _rain_scale_default() -> float:
-    """The R-CLIPER multiplier calibrated against gauge-corrected radar (``coefficients.RAIN_SCALE``), 1 when absent."""
+def _rain_default(key: str, fallback: float) -> float:
+    """A rain-shape coefficient calibrated against gauge-corrected radar (``coefficients.RAIN_SCALE``), or its fallback."""
     try:
         from ..cyclone import coefficients
 
-        return float(getattr(coefficients, "RAIN_SCALE", {}).get("multiplier", 1.0))
+        return float(getattr(coefficients, "RAIN_SCALE", {}).get(key, fallback))
     except Exception:
-        return 1.0
+        return fallback
 
 
 #: R-CLIPER rain rates are multiplied by this (see :data:`naturev1.cyclone.coefficients.RAIN_SCALE`).
-RAIN_SCALE = _rain_scale_default()
+RAIN_SCALE = _rain_default("multiplier", 1.0)
+#: the exponential tail of the R-CLIPER profile is widened by this (the published profile is too concentrated near the core)
+RAIN_TAIL = _rain_default("tail", 1.0)
+#: wavenumber-1 asymmetry of the rain about the storm's heading: amplitude and the compass phase of the maximum
+#: relative to the heading (45 = front-right in the northern hemisphere; mirrored in the southern)
+RAIN_ASYMMETRY = _rain_default("asymmetry", 0.0)
+RAIN_ASYMMETRY_PHASE = _rain_default("asymmetry_phase_deg", 45.0)
 
 
 @dataclass
@@ -71,6 +79,10 @@ class ImpactSettings:
     orographic_cap: float = OROGRAPHIC_CAP
     #: multiplier on the R-CLIPER rain rate (calibrated against radar for US landfalls; 1 = Tuleya et al. as published)
     rain_scale: float = RAIN_SCALE
+    #: widening of the profile's exponential tail, and the motion-relative asymmetry (amplitude, phase in degrees)
+    rain_tail: float = RAIN_TAIL
+    rain_asymmetry: float = RAIN_ASYMMETRY
+    rain_asymmetry_phase_deg: float = RAIN_ASYMMETRY_PHASE
     steep_slope: float = STEEP_SLOPE
     land_decay: bool = True              # False when the intensities already include it (a best track)
     cell_stride: int = 1                 # paint every n-th cell in each direction (2 on a CPU: 4x faster)
@@ -282,7 +294,15 @@ def paint(region: RegionMap, tracks: np.ndarray, hours: np.ndarray, forecast_kt,
                     factor = (1.0 + st.terrain_speedup_per_slope * along_slope).clamp(0.7, 1.5)
                     speed = speed * factor
                     g = g * factor
-                rate = rcliper_rate_mm_h(r, vk.to(dt32).view(-1, 1)).masked_fill(far, 0.0)
+                rate = rcliper_rate_mm_h(r, vk.to(dt32).view(-1, 1), tail=float(st.rain_tail)).masked_fill(far, 0.0)
+                if st.rain_asymmetry:
+                    # more rain ahead and to the right of the heading (left in the southern hemisphere), as the radar
+                    # climatology shows; a stationary storm has no heading, so the amplitude fades below 5 m/s
+                    mv = motion_t[ix, k].to(dt32)
+                    heading = torch.atan2(mv[:, 0], mv[:, 1]).view(-1, 1)
+                    amp = float(st.rain_asymmetry) * (torch.sqrt(mv[:, 0] ** 2 + mv[:, 1] ** 2) / 5.0).clamp(0.0, 1.0).view(-1, 1)
+                    phase = math.radians(float(st.rain_asymmetry_phase_deg)) * torch.sign(la32).view(-1, 1)
+                    rate = rate * (1.0 + amp * torch.cos(torch.atan2(east, north) - heading - phase))
                 ascent = (wf["u_ms"] * sx[idx] + wf["v_ms"] * sy[idx]).clamp_min(0.0)
                 rate = rate * (1.0 + st.orographic_per_ms * ascent).clamp(max=st.orographic_cap) * float(st.rain_scale)
                 rows, cols = ix.view(-1, 1), idx.view(1, -1)
@@ -443,4 +463,4 @@ def impact_from_forecast(region: RegionMap, result: dict, case, particles: int |
     return paint(region, tracks, hours, f_kt, f_hours, weights, settings, device, seed=seed)
 
 
-__all__ = ["AREA_SHARE", "RAIN_SCALE", "ImpactResult", "ImpactSettings", "hourly", "impact_from_forecast", "paint", "world_intensity"]
+__all__ = ["AREA_SHARE", "RAIN_ASYMMETRY", "RAIN_SCALE", "RAIN_TAIL", "ImpactResult", "ImpactSettings", "hourly", "impact_from_forecast", "paint", "world_intensity"]

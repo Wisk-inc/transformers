@@ -715,6 +715,7 @@ def rescale_worlds(fc, case, ref_track: np.ndarray, leads, factor: np.ndarray) -
     factor = np.asarray(factor, np.float64)
     e, n = local_displacement_km(ref_track[None, :, 0], ref_track[None, :, 1], fc.positions[..., 0], fc.positions[..., 1])
     la, lo = move(ref_track[None, :, 0], ref_track[None, :, 1], e * factor[None, :], n * factor[None, :])
+    lo = ref_track[None, :, 1] + ((lo - ref_track[None, :, 1] + 180.0) % 360.0 - 180.0)      # stay in the swarm's continuous frame
     fc.positions = np.stack([la, lo], -1)
     if getattr(fc, "track", None) is not None:
         hours = np.concatenate([[0.0], np.asarray(leads, float)])
@@ -723,6 +724,7 @@ def rescale_worlds(fc, case, ref_track: np.ndarray, leads, factor: np.ndarray) -
         lon_h = np.degrees(np.interp(fc.track_hours, hours, np.unwrap(np.radians(np.concatenate([[case.lon], ref_track[:, 1]])))))
         e, n = local_displacement_km(lat_h[None, :], lon_h[None, :], fc.track[..., 0], fc.track[..., 1])
         la, lo = move(lat_h[None, :], lon_h[None, :], e * f_h[None, :], n * f_h[None, :])
+        lo = lon_h[None, :] + ((lo - lon_h[None, :] + 180.0) % 360.0 - 180.0)
         fc.track = np.stack([la, lo], -1)
 
 
@@ -737,8 +739,8 @@ def swarm_products(case, ctx, track: np.ndarray, leads, particles: int = 20000, 
     (``coefficients.SWARM``, or ``SWARM_FF`` when the worlds are steered by a forecast flow).
 
     ``target_cone_km`` (per lead) sharpens or widens the swarm to a cone sized for *this* forecast: the worlds'
-    displacements about the consensus are rescaled per lead so the swarm's 67% radius equals it (clipped to 0.5-1.5
-    times the swarm's own). With the flow-dependent cone (``CONE_FLOW``, verified on held-out seasons) the swarm is
+    displacements about the consensus are rescaled per lead so the swarm's 67% radius equals it (the factor clipped
+    to 0.2-2.0). With the flow-dependent cone (``CONE_FLOW``, verified on held-out seasons) the swarm is
     tight when the models agree and wide when they do not, and every product built on the worlds -- strike
     probabilities, landfall timing and probability, the parish numbers -- sharpens with it. The scenario
     probabilities are read before the rescaling (they are about the worlds' shapes).
