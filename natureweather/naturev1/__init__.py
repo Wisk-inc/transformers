@@ -166,7 +166,7 @@ from .wb2 import (
 
 from . import stormsat  # noqa: E402
 
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 #: 0.12 names, imported from their modules on first use -- so ``import naturev1`` costs nothing extra and
 #: works with ihelix 0.5, and only the satellite networks themselves ask for ihelix 0.6.
@@ -184,7 +184,8 @@ _LAZY = {
     "track_vortex": "tracker", "find_storms": "tracker", "rollout_member_tracks": "tracker",
     "vortex_centre": "tracker",
     "fit_intensity_correction": "storms", "ri2_report": "storms", "intensity_by_category": "storms",
-    "hardware_preflight": "hardware", "publish_release": "b300",
+    "hardware_preflight": "hardware", "gpu_plan": "hardware", "describe_gpu_plan": "hardware", "publish_release": "b300",
+    "HighResDecoder": "highres", "load_highres": "highres",
     "select_rotations": "stormtrain", "class_weights": "stormtrain", "refine_centre": "satnet",
     "potential_intensity": "thermo", "storm_physics": "thermo", "cyclone_phase": "thermo", "genesis_map": "thermo",
     "STORM_PHYSICS_FEATURES": "thermo",

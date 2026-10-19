@@ -161,6 +161,12 @@ def lr_factor(step: int, elapsed: float, budget: float, warmup: int, floor: floa
     return warm * (floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress)))
 
 
+def stop_requested() -> bool:
+    """Whether a stop was asked for: the file ``NATUREV1_STOP_FILE`` names exists (the runbook writes it)."""
+    path = os.environ.get("NATUREV1_STOP_FILE")
+    return bool(path) and os.path.exists(path)
+
+
 class CheckpointPusher:
     """
     Uploads checkpoints to the Hub in order, on one background thread, never dropping one.
@@ -328,12 +334,31 @@ class Engine:
         flags = [self.elapsed >= self.budget_seconds
                  or (self.settings.max_steps is not None and self.step >= self.settings.max_steps),
                  now - self.last_checkpoint >= self.settings.checkpoint_minutes * 60.0,
-                 now - self.last_eval >= self.settings.eval_minutes * 60.0]
+                 now - self.last_eval >= self.settings.eval_minutes * 60.0,
+                 is_main() and stop_requested()]
         if dist.is_initialized():
             tensor = torch.tensor([float(f) for f in flags], device=self.device)
             dist.broadcast(tensor, 0)
             flags = [bool(v) for v in tensor.tolist()]
+        if flags[3]:
+            self.halt()
         return flags[0], flags[1], flags[2]
+
+    def halt(self, upload_timeout: float = 900.0) -> None:
+        """
+        Stop on request (the file named by ``NATUREV1_STOP_FILE`` exists): save a checkpoint, give its upload up to
+        ``upload_timeout`` to land, and exit -- without the end-of-run evaluation, so the run is not mistaken for a
+        finished one. Started again, it resumes from this checkpoint with the time already spent counted.
+        """
+        self.checkpoint({"stopped_on_request": True})
+        if is_main() and self.settings.hub_repo:
+            self.pusher.wait(upload_timeout)
+        if is_main():
+            print(f"[{self.settings.run}] stopped on request at step {self.step:,}: checkpoint saved"
+                  + (" and pushed" if self.settings.hub_repo and not self.pusher.failed else "")
+                  + "; start it again to continue", flush=True)
+        barrier()
+        raise SystemExit(3)
 
     def should_stop(self) -> bool:
         local = self.elapsed >= self.budget_seconds or (
@@ -375,8 +400,13 @@ class Engine:
         if is_main():
             left = max(self.budget_seconds - self.elapsed, 0.0) / 60
             text = "  ".join(f"{k} {v:.4f}" for k, v in sorted(means.items()))
+            memory = ""
+            if self.device.type == "cuda":
+                # How full the card runs: the plan aims batches at ~90% of it.
+                total = torch.cuda.get_device_properties(self.device).total_memory / 1e9
+                memory = f"  VRAM peak {torch.cuda.max_memory_allocated(self.device) / 1e9:.0f}/{total:.0f} GB"
             print(f"[{self.settings.run}] step {self.step:,}  {text}  lr x{factor:.3f}  "
-                  f"{left:.0f} min left", flush=True)
+                  f"{left:.0f} min left{memory}", flush=True)
 
     def averaged(self):
         """Context: the trained parameters replaced by their moving average, and put back on exit."""
@@ -433,6 +463,12 @@ class Engine:
             self.pusher.submit([(path, f"{remote}/latest.pt"), (self.directory / "state.json", f"{remote}/state.json"),
                                 (weights, f"{remote}/history/{weights.name}")],
                                f"{self.settings.run} step {self.step}" + (" (final)" if final else ""))
+            keep = int(os.environ.get("NATUREV1_KEEP_HISTORY", "0") or 0)
+            if keep > 0:
+                # A small disk: the weight snapshots go to the Hub (the pusher copied this one already); only the
+                # newest ``keep`` stay here. latest.pt, the one a resume needs, is never touched.
+                for old in sorted(weights.parent.glob("step_*.safetensors"))[:-keep]:
+                    old.unlink(missing_ok=True)
             print(f"[{self.settings.run}] checkpoint at step {self.step:,} ({self.elapsed / 60:.0f} min)"
                   + (" -- queued for the Hub" if self.settings.hub_repo else ""), flush=True)
         barrier()

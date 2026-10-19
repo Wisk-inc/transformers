@@ -40,13 +40,14 @@ def wanted_variables(channels: list[str]) -> dict:
 
 
 def stage_teacher(name: str, year: int, channels: list[str], normalizer, root: str | Path, leads=DEFAULT_LEADS,
-                  inits=None, log=print) -> Path:
+                  inits=None, log=print, init_hours=None) -> Path:
     """Write ``root/<name>_<year>/{mean.npy, var.npy?, meta.json}``; returns the directory."""
     directory = Path(root) / f"{name}_{year}"
     directory.mkdir(parents=True, exist_ok=True)
     meta_path = directory / "meta.json"
     source = ArchiveTeacher(name, year)
-    times = [t for t in source.times if int(str(t)[11:13]) in TEACHERS[name].init_hours and int(str(t)[:4]) == year]
+    hours = TEACHERS[name].init_hours if init_hours is None else [h for h in init_hours if h in TEACHERS[name].init_hours]
+    times = [t for t in source.times if int(str(t)[11:13]) in hours and int(str(t)[:4]) == year]
     if inits is not None:
         allowed = set(np.asarray(inits, "datetime64[s]").tolist())
         times = [t for t in times if t.tolist() in allowed]

@@ -198,4 +198,88 @@ def hardware_preflight(data_dir: str | Path, hub_repo: str | None = None, need_t
     return ok
 
 
-__all__ = ["hardware_preflight"]
+# ---------------------------------------------------------------------------- sizing to the GPU --
+
+# Memory per sample of each stage (GB, bf16 with activation checkpointing) -- the anchors the plan scales from.
+# The distillation figure is measured (an 8-step rollout at batch 2 peaks near 60 GB on the full 1.5-degree grid);
+# the others are each stage's default batch on an 80-96 GB card. A plan that overshoots on some card is not fatal:
+# the runbook halves the batch on an out-of-memory exit and the run resumes from its last checkpoint.
+PER_SAMPLE_GB = {"distill": 30.0, "storm": 16.0, "satnet": 0.5, "retrieval": 8.0}
+HIGHRES_GB_PER_100K_POINTS = 20.0
+HIGHRES_FULL_GRID = 721 * 1440
+DEFAULTS = {"satnet": (128, 4e-4), "retrieval": (8, 2e-4), "storm": (8, 3e-4), "distill": (2, 5e-5)}
+KNOWN_GPUS = ("B300", "GB300", "B200", "GB200", "H200", "H100", "H800", "A100", "L40S", "L40", "RTX PRO 6000",
+              "A6000", "RTX 6000", "5090", "4090", "A10")
+
+
+def _scaled_lr(stage: str, batch: int) -> float:
+    base_batch, base_lr = DEFAULTS[stage]
+    return float(base_lr * min(max(batch / base_batch, 0.25), 4.0) ** 0.5)
+
+
+def gpu_plan(vram_gb: float | None = None, count: int | None = None, name: str | None = None,
+             cpu_cores: int | None = None, fill: float = 0.9) -> dict:
+    """
+    Every stage sized to the GPUs present, so a big card is filled rather than idled: batch sizes (with the learning
+    rate scaled by the square root of the batch), rollout horizon, 0.25-degree points per step, ensemble members, the
+    swarm's worlds, DataLoader workers. ``fill`` is the share of each card's memory the batches aim at -- 0.9, not 1.0:
+    the last tenth is what the allocator's fragmentation and the optimizer's first step need, and a run that aims at
+    100% dies at the first unlucky batch. Compute is used in full either way: bf16 tensor cores, TF32 matmuls,
+    fused AdamW, one process per GPU.
+
+    Measured from the machine unless given (the arguments exist for tests and for planning another machine).
+    """
+    if vram_gb is None or count is None or name is None:
+        if torch.cuda.is_available():
+            count = torch.cuda.device_count() if count is None else count
+            props = [torch.cuda.get_device_properties(i) for i in range(torch.cuda.device_count())]
+            vram_gb = min(p.total_memory for p in props) / 1e9 if vram_gb is None else vram_gb
+            name = props[0].name if name is None else name
+        else:
+            count, vram_gb, name = (count or 0), (vram_gb or 0.0), (name or "CPU")
+    cores = cpu_cores or os.cpu_count() or 8
+    tier = next((g for g in KNOWN_GPUS if g.lower() in str(name).lower()), "other")
+    usable = max(vram_gb * fill - 2.0, 0.0)                     # weights, optimizer and CUDA context: ~2 GB
+
+    def batch(stage: str, cap: int) -> int:
+        return int(max(1, min(cap, usable // PER_SAMPLE_GB[stage])))
+
+    plan = {"gpus": int(count), "name": str(name), "tier": tier, "vram_gb": float(vram_gb), "fill": fill,
+            "cpu_cores": int(cores)}
+    plan["satnet_batch"] = max(1, batch("satnet", 512) // 8 * 8 or batch("satnet", 512))
+    plan["retrieval_batch"] = batch("retrieval", 64)
+    plan["storm_batch"] = batch("storm", 32)
+    plan["distill_batch"] = batch("distill", 16)
+    plan["distill_horizon"] = 8 if vram_gb >= 60 else 4
+    for stage in ("satnet", "retrieval", "storm", "distill"):
+        plan[f"{stage}_lr"] = _scaled_lr(stage, plan[f"{stage}_batch"])
+    points = int(usable / HIGHRES_GB_PER_100K_POINTS * 100_000)
+    plan["highres_points"] = int(max(20_000, min(HIGHRES_FULL_GRID, points)))
+    plan["ensemble_members"] = 4 if vram_gb >= 140 else 2 if vram_gb >= 80 else 1
+    plan["rotations"] = 4
+    plan["swarm_particles"] = (4_000_000 if vram_gb >= 250 else 2_000_000 if vram_gb >= 140 else 1_000_000
+                               if vram_gb >= 40 else 300_000 if count else 50_000)
+    plan["impact_worlds"] = (160_000 if vram_gb >= 250 else 80_000 if vram_gb >= 140 else 40_000
+                             if vram_gb >= 40 else 10_000 if count else 2_000)
+    plan["workers"] = int(max(2, min(16, (cores - 4) // max(count, 1))))
+    plan["staging_workers"] = int(max(4, min(64, cores - 4)))
+    plan["env"] = {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
+    return plan
+
+
+def describe_gpu_plan(plan: dict) -> str:
+    rows = [f"{plan['gpus']} x {plan['name']} ({plan['tier']}), {plan['vram_gb']:.0f} GB each, {plan['cpu_cores']} CPU cores; "
+            f"batches aim at {plan['fill']:.0%} of each card",
+            f"  satellite storm network  batch {plan['satnet_batch']:>5} per GPU   lr {plan['satnet_lr']:.1e}",
+            f"  satellite retrieval      batch {plan['retrieval_batch']:>5} per GPU   lr {plan['retrieval_lr']:.1e}",
+            f"  distillation             batch {plan['distill_batch']:>5} per GPU   lr {plan['distill_lr']:.1e}, "
+            f"{plan['distill_horizon']}-step rollouts",
+            f"  storm stage              batch {plan['storm_batch']:>5} per GPU   lr {plan['storm_lr']:.1e}",
+            f"  0.25-degree path         {plan['highres_points']:,} points a step"
+            + (" (the whole globe)" if plan["highres_points"] >= HIGHRES_FULL_GRID else ""),
+            f"  ensemble members {plan['ensemble_members']}, rotations {plan['rotations']}; swarm "
+            f"{plan['swarm_particles']:,} worlds, {plan['impact_worlds']:,} painted; {plan['workers']} loader workers per GPU"]
+    return "\n".join(rows)
+
+
+__all__ = ["describe_gpu_plan", "gpu_plan", "hardware_preflight"]

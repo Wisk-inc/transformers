@@ -18,7 +18,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-import torch
 
 
 def _years(text: str) -> list[int]:
@@ -67,7 +66,10 @@ def main(argv=None) -> None:
     parser.add_argument("--stage-only", action="store_true")
     parser.add_argument("--train-only", action="store_true")
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--init-hours", default="0,12",
+                        help="teacher initial times to stage and train on; '0' halves the disk (~13 GB a teacher-year)")
     args = parser.parse_args(argv)
+    init_hours = [int(h) for h in str(args.init_hours).split(",") if h.strip()]
 
     from ..era5 import Normalizer
     from .catalog import TEACHERS
@@ -85,7 +87,7 @@ def main(argv=None) -> None:
             for year in years:
                 if year not in TEACHERS[name].archive_1p5:
                     continue
-                dirs.append(stage_teacher(name, year, channels, normalizer, args.root, leads))
+                dirs.append(stage_teacher(name, year, channels, normalizer, args.root, leads, init_hours=init_hours))
     else:
         dirs = sorted(p for p in Path(args.root).iterdir() if (p / "meta.json").exists()
                       and p.name.split("_")[0] in names)
@@ -112,7 +114,7 @@ def main(argv=None) -> None:
                            variables.index("surface_pressure") if "surface_pressure" in variables else None)
     times = np.asarray(meta["time"], np.int64)
     year_of = lambda t: int(str(np.datetime64(int(t), "s"))[:4])
-    synoptic = [int(t) for t in times if (int(t) // 3600) % 12 == 0]
+    synoptic = [int(t) for t in times if (int(t) // 3600) % 24 in init_hours]
     train_years, val_years = set(_years(args.train_years)), set(_years(args.val_years))
     train_inits = [np.datetime64(t, "s") for t in synoptic if year_of(t) in train_years]
     val_inits = [np.datetime64(t, "s") for t in synoptic if year_of(t) in val_years]
@@ -122,9 +124,13 @@ def main(argv=None) -> None:
                               warmup_steps=200, checkpoint_minutes=20, eval_minutes=30)
     report = train_distillation(model, settings, args.era5, [str(d) for d in dirs], stepper, train_inits, val_inits,
                                 max_horizon=args.horizon, alpha=args.alpha, storms=storms)
-    print("[distill] final held-out:", json.dumps(report), flush=True)
-    torch.save({"model": model.state_dict(), "config": model.config.to_dict(), "report": report},
-               Path(args.output) / "distill" / "distilled.pt")
+    from ..engine import is_main
+    from ..safeio import atomic_torch_save
+
+    if is_main():                       # under torchrun every rank holds the same weights; one writes them
+        atomic_torch_save({"model": model.state_dict(), "config": model.config.to_dict(), "report": report},
+                          Path(args.output) / "distill" / "distilled.pt")
+        print("[distill] final held-out:", json.dumps(report), flush=True)
 
 
 if __name__ == "__main__":
