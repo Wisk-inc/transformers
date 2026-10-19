@@ -1143,6 +1143,37 @@ LGEM, GFS, GEFS mean), the archived models' track errors (HRES, Pangu, GraphCast
 extrapolation. `naturev1.cyclone.verify.compare` scores a new forecast against it on the same storms with the
 storm-block bootstrap. One long table, one scoring function: a claim about a hurricane model can be checked on it.
 
+**Melissa replayed with 0.16** (the same three cycles as 4.16; the GFS rain member and the NHC guidance in, 20,000-world
+swarm; "own" is our blend before the aids, "official" the NHC forecast from the same cycle):
+
+| forecast from | before landfall | P(landfall, Jamaica) | centre ashore, median (10-90%) | consensus landfall | intensity then (10-90%) | the RI branch (its probability) | P(peak ≥ cat 4 / cat 5) | track error 24 / 48 / 72 h: 0.16 (own; official) |
+|---|---|---|---|---|---|---|---|---|
+| 26 Oct 00 UTC | 65 h | 72% | 28 Oct 09 UTC (27 Oct 21 → 28 Oct 21) | 28 Oct 06 UTC, Clarendon | 96 kt (64-132) | 124 kt at landfall, peak 130 (23%) | 62% / 28% | 44 / 121 / 195 km (42 / 158 / 277; 34 / 123 / 124) |
+| 26 Oct 12 UTC | 53 h | 83% | 28 Oct 12 UTC (06 → 21) | 28 Oct 11 UTC, St Elizabeth | 101 kt (71-136) | 151 kt, peak 152 (19%) | 100% / 31% | 42 / 72 / 147 km (15 / 53 / 161; 40 / 54 / 73) |
+| 27 Oct 00 UTC | 41 h | 83% | 28 Oct 15 UTC (09 → 21) | 28 Oct 14 UTC, St Elizabeth, 18.06N 77.72W | 98 kt (78-121) | 149 kt, peak 160 (8%) | 100% / 23% | 54 / 71 / 212 km (38 / 69 / 215; 79 / 79 / 164) |
+
+![Melissa over Jamaica, parish by parish, from 27 October 00 UTC, 0.16](melissa_landfall.png)
+
+What moved against 4.16: the landfall probability (76 → 83% at 41 h), the far-west rain (Westmoreland 413 mm if hit
+against the 309 mm gauge where 0.15 said 689; Hanover 407 against 146 where 0.15 said 603; Manchester 584 / 865 against
+817, St Catherine 468 / 666 against 668, Kingston 466 against 567 -- the GFS's own rain pulls the total off the fast
+western crossing and onto the parishes that got it), the landfall point and time (14 UTC against about 17, the median
+15 UTC inside a 12-hour band, as before). What moved the wrong way, said plainly: Melissa was not the archive. On the
+two earlier cycles the NHC guidance was worse than our standalone blend at 24-48 h -- at 26 Oct 12 UTC HCCA sat 70 km
+off at 24 h where our blend had 15 km, so the mean sat at 42; the intensity aids were all low on this storm and pulled
+the 48 h intensity from 110 to 100 kt (26 Oct 12 UTC) and from 106 to 85 kt (27 Oct 00 UTC) against a truth of 165 and
+105 -- and the mean inherits what its members do. That is the price of a rule that lowers the error 11-13% over 626
+held-out cases; the parish Brier against the swath went from 0.061 to 0.073 at 41 h. The remedy a reader would ask for
+-- weights earned from the previous cycle, so that the member that caught the last turn keeps its vote -- was fitted
+on the tuning seasons and verified on held-out: it buys 0.9-1.1% at 12-24 h (significant at 12 h) and nothing from 36 h
+on, because on the fifth of held-out cases where the two disagree most it is our standalone that is wrong more often
+(24 h mean 133 km for ours alone, 93 for HCCA, 94 for the mean; the mean beats both at 48 and 72 h). The branch that
+was the storm -- 149-151 kt at landfall, peak 152-160 -- stayed on the page from 26 October with its probability, and
+the 95% peak quantile sat at 133-140 kt against the 165 kt that happened: the explosive case is still a tail event to
+this engine, as to the official forecast (140 kt at 24 h against 155). Parish timing still ran about four hours early
+(hurricane force into St Elizabeth at 08:20 UTC, the peak at 12:42, against an eyewall that arrived mid-afternoon), as
+the arrival window in the report now says it can. `melissa_jamaica.png` shows the four releases side by side.
+
 ## 5. Limitations
 
 - **Resolution.** 1.5° (~165 km) cannot resolve an eyewall, so intensity is the weakest output. The explicit

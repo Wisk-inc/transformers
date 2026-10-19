@@ -329,6 +329,19 @@ reference's forecast on it is published as `benchmark_heldout_atlantic_2018_2020
 repository, with the scoring code, so that a new model can be checked on the same storms. Full tables in the model
 card, section 4.17.
 
+**Melissa, 27 October 00 UTC, 41 hours before landfall, replayed with 0.16:** Jamaica landfall probability 83% (0.15: 76%),
+the consensus ashore at 18.06N 77.72W on 28 October 14 UTC (actual: New Hope, 18.09N 77.97W, about 17 UTC), the swarm's
+median 15 UTC inside a 12-hour band; St Elizabeth 77%, Manchester 69%, Westmoreland 60%, Clarendon 54% for
+hurricane-force wind, the eastern parishes 10-15%; the far-west rain that 0.15 overdid is now near the gauges
+(Westmoreland 413 mm if hit against 309, Hanover 407 against 146) with Manchester 584 / 865 against 817 and St Catherine
+468 / 666 against 668. Said plainly, this storm was not the archive: on the two earlier cycles the NHC guidance was
+worse than our standalone blend at 24-48 h (26 Oct 12 UTC: HCCA 70 km off at 24 h where our blend had 15 km, so the mean
+sat at 42; the aids pulled the 48 h intensity from 110 to 100 kt against a truth of 165), and the mean inherits that --
+the price of a rule that is 11-13% better over 626 held-out cases. An adaptive weight earned from the previous cycle's
+verified error was fitted and verified on the archive: it buys 0.9-1.1% at 12-24 h and nothing beyond, because on the
+held-out cases where the two disagree most it is our standalone that is wrong more often (mean 94 km at 24 h against
+133 for ours alone and 93 for HCCA). ![](melissa_landfall.png)
+
 ## Not trained
 
 No weights here have seen real data. The architecture, losses, ingest and training loop are complete and
