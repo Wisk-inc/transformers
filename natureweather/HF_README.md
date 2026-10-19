@@ -1163,16 +1163,40 @@ two earlier cycles the NHC guidance was worse than our standalone blend at 24-48
 off at 24 h where our blend had 15 km, so the mean sat at 42; the intensity aids were all low on this storm and pulled
 the 48 h intensity from 110 to 100 kt (26 Oct 12 UTC) and from 106 to 85 kt (27 Oct 00 UTC) against a truth of 165 and
 105 -- and the mean inherits what its members do. That is the price of a rule that lowers the error 11-13% over 626
-held-out cases; the parish Brier against the swath went from 0.061 to 0.073 at 41 h. The remedy a reader would ask for
--- weights earned from the previous cycle, so that the member that caught the last turn keeps its vote -- was fitted
-on the tuning seasons and verified on held-out: it buys 0.9-1.1% at 12-24 h (significant at 12 h) and nothing from 36 h
-on, because on the fifth of held-out cases where the two disagree most it is our standalone that is wrong more often
-(24 h mean 133 km for ours alone, 93 for HCCA, 94 for the mean; the mean beats both at 48 and 72 h). The branch that
+held-out cases; the parish Brier against the swath went from 0.061 to 0.073 at 41 h. The averaging penalty, taken to
+the archive (the table below), and what ships for it, is in the next paragraph. The branch that
 was the storm -- 149-151 kt at landfall, peak 152-160 -- stayed on the page from 26 October with its probability, and
 the 95% peak quantile sat at 133-140 kt against the 165 kt that happened: the explosive case is still a tail event to
 this engine, as to the official forecast (140 kt at 24 h against 155). Parish timing still ran about four hours early
 (hurricane force into St Elizabeth at 08:20 UTC, the peak at 12:42, against an eyewall that arrived mid-afternoon), as
 the arrival window in the report now says it can. `melissa_jamaica.png` shows the four releases side by side.
+
+**The averaging penalty.** A fixed 50/50 mean drags a member that caught a turn toward one that did not -- the 26 Oct
+12 UTC cycle above. Whether that is the rule or the exception is a question for the archive, not for one storm. On the
+held-out Atlantic cases, split by how far our blend and HCCA sit apart at 24 h:
+
+| held-out cases | n | ours alone | HCCA | TVCN | 50/50 mean | ours closer than HCCA | ours the outlier against TVCN |
+|---|---|---|---|---|---|---|---|
+| all with HCCA | 641 | 62 km | 60 | 63 | 54 | -- | -- |
+| the 20% that disagree most (≥ 92 km apart) | 159 | 133 | 93 | 95 | 94 | 31% | 97% |
+| the 10% that disagree most (≥ 128 km apart) | 80 | 220 | 101 | 106 | 138 | 16% | 100% |
+
+When the two disagree strongly it is our standalone that is wrong two times in three, and the mean is a hedge that
+costs little when ours is right and saves a great deal when it is not. Every remedy that trusts the standalone in a
+disagreement was tried on the tuning seasons and lost there (ours 2/3, a disagreement gate toward ours, the median and
+the trimmed mean of ours, HCCA and TVCN). Two rules survived and ship in `ADECK_TRACK`: (1) **weights earned from the
+previous cycle** -- at issue time the previous cycle's forecasts of ours and of HCCA are verified against the position
+just analysed, and the split follows `sigmoid(0.5 · log(e_HCCA / e_ours))` within 25-75% at 6-24 h (chosen per lead on
+the tuning seasons; nothing to earn beyond 24 h, so the split stays fixed there); (2) **the outlier gate** -- once the
+two sit more than 1.5 cone radii apart, up to 10% of the pair's weight moves away from whichever of them is further
+from TVCN (a tie with the plain mean on the tuning seasons, a loss at 6 h in every season, so it starts at 12 h).
+Together on held-out: 1.4% / 2.5% / 1.1% / 0.7% / 1.0% / 1.9% / 2.3% lower error at 12 / 24 / 36 / 48 / 72 / 96 / 120 h,
+every lead significant; in the most-disagreeing fifth, 94 → 89 km at 24 h. For the Melissa cycle that raised the
+question the earned split would have given ours 54% at 24 h (its previous 12 h forecast was 22 km off, HCCA's 33) and
+the gate nothing (the two were less than 1.5 cone radii apart) -- a few km back, not the 27 km lost, because the
+archive says that cycle was the exception. The disagreement is now reported per lead (`aids_track["disagreement_km"]`),
+the cell says when the two sit further apart than the cone, and both tracks are in the record for the forecaster who
+has reason to believe the standalone this time.
 
 ## 5. Limitations
 

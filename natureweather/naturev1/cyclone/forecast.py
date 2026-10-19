@@ -90,22 +90,8 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
 
         track = apply_track_feedback(case, track, previous["track"], previous.get("time"), leads,
                                      previous_position=(previous["lat"], previous["lon"]) if "lat" in previous and "lon" in previous else None)
-    track_ours = used_aids = None
-    if aids and aids.get("track"):
-        from . import coefficients as _coefficients
-
-        if getattr(_coefficients, "ADECK_TRACK", None):
-            from .aids import blend_track
-
-            blended_track, used_aids = blend_track(case, track, aids["track"], leads, _coefficients.ADECK_TRACK,
-                                                   previous_errors=aids.get("previous_errors"))
-            if used_aids:
-                track_ours, track = track, blended_track
     result = {"leads": list(leads), "track": track, "members": out, "consensus_table": table["name"],
               "n_models": result_models}
-    if track_ours is not None:
-        result["track_ours"] = track_ours
-        result["aids_track"] = used_aids
     from . import coefficients
 
     # each consensus table has its own cone: the forecast-flow consensus errs less, so its cone is narrower
@@ -133,6 +119,17 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
         from .multimodel import model_spread_km
 
         result["model_spread_km"] = model_spread_km(case, model_track)
+    if aids and aids.get("track") and getattr(coefficients, "ADECK_TRACK", None):
+        # the NHC guidance blended in after the cone is known: the split between ours and HCCA is earned from the
+        # previous cycle and moved away from the member that stands alone beyond the cone (cyclone.aids)
+        from .aids import blend_track
+
+        blended_track, used_aids = blend_track(case, track, aids["track"], leads, coefficients.ADECK_TRACK,
+                                               previous_errors=aids.get("previous_errors"), cone_km=result.get("cone_km"))
+        if used_aids:
+            result["track_ours"], result["aids_track"] = track, used_aids
+            track = blended_track
+            result["track"] = track
     if ctx is not None:
         stall = stall_diagnostics(ctx.flows["med"], np.where(np.isfinite(track), track, case.lat), leads, case.lat, case.lon)
         ridge = ridge_diagnostics(ctx.clean, case.lat, case.lon)

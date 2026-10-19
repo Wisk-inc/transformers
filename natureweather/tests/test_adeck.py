@@ -174,3 +174,39 @@ def test_the_shipped_adaptive_entry_is_the_one_chosen_on_the_tuning_seasons():
 
     a = coefficients.ADECK_TRACK["adaptive"]
     assert a["b"] == [0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0] and a["cap"] == 0.75 and a["eps_km"] == 5.0
+
+
+def test_the_gate_moves_weight_away_from_the_member_that_stands_alone_and_only_beyond_the_cone():
+    from naturev1.cyclone.aids import outlier_gate
+
+    class Now:
+        lat, lon = 17.0, -78.0
+
+    leads = [6, 12, 24]
+    table = {"members": ["ours", "HCCA", "TVCN"], "leads": leads, "weights": [[0.5, 0.5, 0.0]] * 3,
+             "gate": {"gamma": 0.1, "start_cone_radii": 1.5, "min_lead_h": 12, "tiebreaker": "TVCN"}}
+    ours = np.array([[17.3, -78.1], [17.6, -78.2], [18.2, -79.4]])        # at 24 h ours sits ~1 degree west of the other two
+    hcca = np.array([[17.3, -78.1], [17.6, -77.9], [18.2, -78.0]])
+    tvcn = np.array([[17.3, -78.1], [17.6, -77.95], [18.2, -78.1]])
+    cone = np.array([20.0, 30.0, 50.0])
+    out, used = blend_track(Now(), ours, {"HCCA": hcca, "TVCN": tvcn}, leads, table, cone_km=cone)
+    shift = used["gate_shift"]
+    assert shift[0] == 0.0                                                # 6 h: below min_lead_h
+    assert shift[1] == 0.0                                                # 12 h: ~30 km apart, 1 cone radius, below the start
+    assert shift[2] == pytest.approx(-0.1)                                # 24 h: ~150 km apart (3 radii), ours the outlier: the full 10% away from ours
+    assert used["weight_share"]["ours"] == pytest.approx((0.5 + 0.5 + 0.4) / 3)
+    # HCCA the outlier: the shift goes the other way
+    out2, used2 = blend_track(Now(), ours, {"HCCA": np.array([[17.3, -78.1], [17.6, -77.9], [18.2, -76.6]]), "TVCN": np.array([[17.3, -78.1], [17.6, -77.95], [18.2, -79.3]])}, leads, table, cone_km=cone)
+    assert used2["gate_shift"][2] == pytest.approx(+0.1)
+    # no cone, no tie-breaker: no gate, the plain split
+    _, used3 = blend_track(Now(), ours, {"HCCA": hcca, "TVCN": tvcn}, leads, table)
+    _, used4 = blend_track(Now(), ours, {"HCCA": hcca}, leads, table, cone_km=cone)
+    assert "gate_shift" not in used3 and "gate_shift" not in used4
+    assert outlier_gate({**table, "gate": None}, leads, np.zeros((3, 3, 2)), cone) is None
+
+
+def test_the_shipped_gate_entry():
+    from naturev1.cyclone import coefficients
+
+    g = coefficients.ADECK_TRACK["gate"]
+    assert g["gamma"] == 0.1 and g["start_cone_radii"] == 1.5 and g["min_lead_h"] == 12 and g["tiebreaker"] == "TVCN"

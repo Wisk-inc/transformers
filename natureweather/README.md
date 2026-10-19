@@ -337,10 +337,14 @@ hurricane-force wind, the eastern parishes 10-15%; the far-west rain that 0.15 o
 468 / 666 against 668. Said plainly, this storm was not the archive: on the two earlier cycles the NHC guidance was
 worse than our standalone blend at 24-48 h (26 Oct 12 UTC: HCCA 70 km off at 24 h where our blend had 15 km, so the mean
 sat at 42; the aids pulled the 48 h intensity from 110 to 100 kt against a truth of 165), and the mean inherits that --
-the price of a rule that is 11-13% better over 626 held-out cases. An adaptive weight earned from the previous cycle's
-verified error was fitted and verified on the archive: it buys 0.9-1.1% at 12-24 h and nothing beyond, because on the
-held-out cases where the two disagree most it is our standalone that is wrong more often (mean 94 km at 24 h against
-133 for ours alone and 93 for HCCA). ![](melissa_landfall.png)
+the price of a rule that is 11-13% better over 626 held-out cases. The averaging penalty was then taken to the archive: on the fifth of held-out cases where our blend and
+HCCA disagree most at 24 h, ours alone is 133 km off, HCCA 93 and the mean 94 -- ours is the one that is wrong in 69%
+of them (84% in the most extreme tenth, where TVCN sides with HCCA every time), so no rule that trusts the standalone
+in a disagreement survives. Two rules do, and ship: the split between ours and HCCA is earned from the previous cycle's
+verified errors at 6-24 h (the member that caught the last turn keeps more of its vote), and beyond 1.5 cone radii of
+disagreement up to 10% of the pair's weight moves away from whichever member stands alone against TVCN; together
+1.4-2.5% lower held-out error at 12-36 h and 1-2% at 48-120 h, every lead significant, and the disagreement itself
+is reported per lead with both tracks in the record. ![](melissa_landfall.png)
 
 ## Not trained
 

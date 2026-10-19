@@ -100,7 +100,34 @@ def adaptive_weights(table: dict, leads, previous: dict | None) -> np.ndarray | 
     return np.clip(1.0 / (1.0 + np.exp(-b * r)), 1.0 - cap, cap)
 
 
-def blend_track(case, track, aids: dict, leads, table: dict, previous_errors: dict | None = None) -> tuple[np.ndarray, dict | None]:
+def outlier_gate(table: dict, leads, X: np.ndarray, cone_km) -> np.ndarray | None:
+    """
+    The disagreement gate: when ours and the first aid sit further apart than ``start`` cone radii, up to ``gamma`` of
+    the pair's weight moves away from whichever of the two is further from the tie-breaker aid (TVCN) -- on the
+    tuning seasons a tie, on held-out 1-2% at 12-120 h, a loss at 6 h, so it starts at ``min_lead_h``. Returns the
+    signed shift of ours' share per lead (negative: away from ours), or None without the table entry, the
+    tie-breaker or the cone.
+    """
+    gate = table.get("gate")
+    if not gate or cone_km is None:
+        return None
+    members = list(table["members"])
+    tb = gate.get("tiebreaker", "TVCN")
+    if len(members) < 2 or tb not in members:
+        return None
+    k = members.index(tb)
+    cone = np.asarray(cone_km, np.float64)
+    if cone.shape != (len(leads),):
+        return None
+    d_oh = np.hypot(X[:, 0, 0] - X[:, 1, 0], X[:, 0, 1] - X[:, 1, 1])
+    d_ot = np.hypot(X[:, 0, 0] - X[:, k, 0], X[:, 0, 1] - X[:, k, 1])
+    d_ht = np.hypot(X[:, 1, 0] - X[:, k, 0], X[:, 1, 1] - X[:, k, 1])
+    ok = np.isfinite(d_oh) & np.isfinite(d_ot) & np.isfinite(d_ht) & np.isfinite(cone) & (cone > 0) & (np.asarray(leads, np.float64) >= float(gate.get("min_lead_h", 12)))
+    shift = float(gate.get("gamma", 0.1)) * np.clip(np.where(ok, d_oh / np.maximum(cone, 1e-6), 0.0) - float(gate.get("start_cone_radii", 1.5)), 0.0, 1.0)
+    return np.where(ok, np.where(d_ot > d_ht, -shift, shift), 0.0)
+
+
+def blend_track(case, track, aids: dict, leads, table: dict, previous_errors: dict | None = None, cone_km=None) -> tuple[np.ndarray, dict | None]:
     """
     Our track blended with the aids' tracks in local displacement space (km east and north of the analysis
     position), weights per lead renormalised over the members present at that lead.
@@ -112,11 +139,13 @@ def blend_track(case, track, aids: dict, leads, table: dict, previous_errors: di
             "adaptive": {"b": per lead, "cap", "eps_km"}}``.
         previous_errors: ``{member: km}`` from :func:`previous_errors` -- with the table's ``adaptive`` entry the
             split between ours and the first aid is earned from them (the other aids keep their table weights).
+        cone_km: this forecast's cone radius per lead -- with the table's ``gate`` entry the split also moves away
+            from whichever of ours and the first aid stands alone against the tie-breaker (:func:`outlier_gate`).
 
     Returns:
         ``(track, used)``: the blended track and ``{"members", "substituted", "weight_share", "disagreement_km"
-        (ours against the first aid, per lead), "adaptive_w_ours" (when earned)}``, or ``(track unchanged, None)``
-        when none of the table's aids is present.
+        (ours against the first aid, per lead), "adaptive_w_ours" (when earned), "gate_shift" (when applied)}``, or
+        ``(track unchanged, None)`` when none of the table's aids is present.
     """
     members = list(table["members"])
     chosen, subs = resolve(aids or {}, members, table.get("substitutes"))
@@ -134,12 +163,19 @@ def blend_track(case, track, aids: dict, leads, table: dict, previous_errors: di
         X[:, j, 0], X[:, j, 1] = e, n
     W = _weights(table, leads).copy()
     used: dict = {"members": [m for m in members if m in chosen], "substituted": subs}
-    w_ours = adaptive_weights(table, leads, previous_errors)
-    if w_ours is not None and M > 1:
-        pair = W[:, 0] + W[:, 1]                               # the ours / first-aid share is split by what was earned
-        W[:, 0], W[:, 1] = pair * w_ours, pair * (1.0 - w_ours)
-        used["adaptive_w_ours"] = w_ours
-        used["previous_errors_km"] = dict(previous_errors)
+    if M > 1:
+        pair = W[:, 0] + W[:, 1]                               # the ours / first-aid share, split by what was earned ...
+        split = np.where(pair > 0, W[:, 0] / np.maximum(pair, 1e-9), 0.5)
+        w_ours = adaptive_weights(table, leads, previous_errors)
+        if w_ours is not None:
+            split = w_ours
+            used["adaptive_w_ours"] = w_ours
+            used["previous_errors_km"] = dict(previous_errors)
+        shift = outlier_gate(table, leads, X, cone_km)          # ... and moved away from the member that stands alone
+        if shift is not None and np.any(shift != 0):
+            split = np.clip(split + shift, 0.0, 1.0)
+            used["gate_shift"] = shift
+        W[:, 0], W[:, 1] = pair * split, pair * (1.0 - split)
     ok = np.isfinite(X).all(-1)
     w = np.where(ok, W, 0.0)
     s = w.sum(-1)
@@ -174,4 +210,4 @@ def blend_intensity(intensity, aids: dict, leads, table: dict) -> tuple[np.ndarr
     return out, {"members": [m for m in members if m in chosen], "substituted": subs, "weight_share": _share(members, w, s)}
 
 
-__all__ = ["adaptive_weights", "blend_intensity", "blend_track", "previous_errors", "resolve"]
+__all__ = ["adaptive_weights", "blend_intensity", "blend_track", "outlier_gate", "previous_errors", "resolve"]
