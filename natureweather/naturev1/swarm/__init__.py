@@ -26,6 +26,8 @@ bulletin        the cycle record (JSON + parish CSV), the history of a storm's c
 infrared        GOES band-13 read quantitatively: cold-top share, coldest top, ring symmetry, eye, their trend (diagnostic)
 adeck           the NHC's operational guidance: a-deck aids interpolated to the leads (blended in by cyclone.aids), the RI probabilities
 plot            maps of the swarm, its worldlines and its impacts; the parish-by-parish landfall figure
+naturev2        the trained NatureV2 on a live storm: GFS turned into its 89-channel training state, NHC's best track,
+                GOES-East / West storm patches, and its storm heads and full-state rollout run beside the swarm
 ==============  ======================================================================================================
 
 It works with :func:`naturev1.cyclone.physics_forecast` (``swarm=N``): the physics consensus stays the best single
