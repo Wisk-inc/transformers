@@ -168,9 +168,8 @@ fc = physics_forecast(case, environment)            # shear profile, intensity a
 
 Also in 0.13: `naturev1.distill` (multi-teacher distillation with spatial / vertical / temporal alignment of every
 teacher into NatureV1's space), `naturev1.assimilation` (bias correction, quality control, local optimal
-interpolation for live inputs), `naturev1.highres` (decoding the latent mesh at 0.25 degrees), and
-`molab_naturev1.py`, the runbook for one 96 GB GPU. Distillation and the 0.25-degree decoder are tested on CPU,
-not yet trained.
+interpolation for live inputs), `naturev1.highres` (decoding the latent mesh at 0.25 degrees).
+Distillation and the 0.25-degree decoder are tested on CPU, not yet trained.
 
 ## 0.13: the swarm sandbox, the satellite path and Caribbean impacts
 
@@ -201,7 +200,7 @@ On unseen seasons, its stall probabilities are skilful (Brier +0.08 over climato
 reliable. Its cone is not better than the fixed one, and its own mean track is worse than the consensus, which stays
 the track. On Melissa the consensus missed the northward turn. The swarm kept western Jamaica at risk, but at 13-20%
 for hurricane-force wind where the storm brought it to most of the island, because a 160 kt Category 5 was forecast
-at 111-125 kt. `molab_swarm_cell.py` is the one-cell molab runbook for live storms.
+at 111-125 kt.
 
 ## 0.13.1: the turns, and rapid intensification
 

@@ -579,8 +579,8 @@ every teacher resampled into NatureV1's grid, levels, steps and channels before 
 targets with an honest variance; rollout loss with an ERA5 anchor and extra weight near active cyclones), data
 assimilation for live inputs (`naturev1.assimilation`: bias correction, gross/background/buddy checks, local
 optimal interpolation with NatureV1's own predicted variance as the background error), and a 0.25-degree decoder
-(`naturev1.highres`) that reads the latent mesh directly. The molab runbook (`molab_naturev1.py`) runs all of it on
-one 96 GB GPU and publishes only if the distilled model beats the physics-only consensus.
+(`naturev1.highres`) that reads the latent mesh directly. A one-GPU runbook runs all of it and publishes only if
+the distilled model beats the physics-only consensus.
 
 ### 4.13 0.13: the swarm sandbox, the satellite path and Caribbean impacts
 
@@ -630,8 +630,7 @@ the best track to then, and the 21 merged satellite, recon, microwave and scatte
 
 Section 4.14 shows the same forecast after the 0.13.1 upgrade, which fixes the missed turn.
 
-The molab cell (`molab_swarm_cell.py`) runs all of this for every active NHC storm, or replays any storm since
-2021, on one GPU. Research model, not an operational forecast: storm surge is not modelled. Boundaries are from
+One notebook cell runs all of this for every active NHC storm, or replays any storm since 2021, on one GPU. Research model, not an operational forecast: storm surge is not modelled. Boundaries are from
 geoBoundaries (OpenStreetMap and others; attribution travels with the map) and terrain from the Terrarium tiles
 on AWS Open Data.
 
@@ -1233,7 +1232,7 @@ Install and train, or score, from one cell (marimo, Colab, Jupyter or a plain sc
 pip install "naturev1[all]"            # 0.16 from PyPI
 pip install "naturev1[all] @ git+https://github.com/Wisk-inc/transformers@claude/linear-context-architecture-a35c6h#subdirectory=natureweather"   # the development branch
 ```
-The complete pipeline is the cell `colab_naturev1.py` shipped with the package; it installs what it needs, stages
+The complete pipeline is one notebook cell; it installs what it needs, stages
 the data, trains in stages, scores itself, and only publishes if it earned it. Every setting is at the top.
 
 Load the released model (weights, config and the normalisation statistics it was trained with):

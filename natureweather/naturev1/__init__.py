@@ -166,7 +166,7 @@ from .wb2 import (
 
 from . import stormsat  # noqa: E402
 
-__version__ = "0.16.0"
+__version__ = "0.16.1"
 
 #: 0.12 names, imported from their modules on first use -- so ``import naturev1`` costs nothing extra and
 #: works with ihelix 0.5, and only the satellite networks themselves ask for ihelix 0.6.

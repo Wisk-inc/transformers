@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "naturev1"
-version = "0.16.0"
+version = "0.16.1"
 description = "Probabilistic weather and hurricane model: geometric-attention backbone, tropical-cyclone physics that beats extrapolation, a satellite-fed particle swarm with Caribbean parish impacts, multi-teacher distillation, data assimilation"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -35,3 +35,6 @@ Source = "https://github.com/Wisk-inc/transformers/tree/main/natureweather"
 
 [tool.hatch.build.targets.wheel]
 packages = ["naturev1"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["naturev1", "pyproject.toml", "README.md", "LICENSE", "NOTICE"]
