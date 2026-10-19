@@ -137,3 +137,40 @@ def test_the_ships_text_matrix_and_the_e_deck_rows_give_the_30_kt_24_h_probabili
     ri = parse_edeck_ri(EDECK)[np.datetime64("2025-10-18T12:00")]
     assert ri["RIOC"][(24, 30.0)] == pytest.approx(0.07) and ri["RIOC"][(12, 20.0)] == pytest.approx(0.03)
     assert ri["RIOD"][(24, 30.0)] == pytest.approx(0.14) and "IVCN" not in ri
+
+
+def test_weights_are_earned_from_the_previous_cycle_and_the_disagreement_is_reported():
+    from naturev1.cyclone.aids import adaptive_weights, previous_errors
+
+    class Now:
+        lat, lon, time = 17.0, -78.0, np.datetime64("2025-10-27T00:00")
+
+    leads = [6, 12, 24]
+    # the previous cycle (12 h earlier) said: ours would be exactly here, HCCA 1 degree of longitude east
+    prev = {"ours": np.array([[16.7, -77.9], [17.0, -78.0], [17.6, -78.2]]), "HCCA": np.array([[16.7, -77.4], [17.0, -77.0], [17.6, -77.2]])}
+    e = previous_errors(Now(), np.datetime64("2025-10-26T12:00"), prev, leads)
+    assert e["ours"] == pytest.approx(0.0, abs=1e-6) and 100 < e["HCCA"] < 110
+    assert previous_errors(Now(), np.datetime64("2025-10-24T12:00"), prev, leads) == {}        # too long ago
+    table = {"members": ["ours", "HCCA", "TVCN"], "leads": leads, "weights": [[0.5, 0.5, 0.0]] * 3,
+             "adaptive": {"b": [0.5, 0.5, 0.0], "cap": 0.75, "eps_km": 5.0}}
+    w = adaptive_weights(table, leads, e)
+    assert w[0] == pytest.approx(w[1]) and 0.5 < w[0] <= 0.75 and w[2] == pytest.approx(0.5)      # earned at 6-12 h, fixed at 24 h
+    assert w[0] == pytest.approx(min(0.75, 1 / (1 + np.exp(-0.5 * np.log((e["HCCA"] + 5) / 5)))))
+    assert adaptive_weights(table, leads, {"ours": 10.0}) is None and adaptive_weights({**table, "adaptive": None}, leads, e) is None
+    ours = np.array([[17.3, -78.1], [17.6, -78.2], [18.2, -78.4]])
+    hcca = np.array([[17.3, -78.1], [17.6, -77.9], [18.2, -77.6]])
+    fixed, used_fixed = blend_track(Now(), ours, {"HCCA": hcca}, leads, table)
+    earned, used = blend_track(Now(), ours, {"HCCA": hcca}, leads, table, previous_errors=e)
+    assert "adaptive_w_ours" not in used_fixed and np.allclose(used["adaptive_w_ours"], w)
+    # at 12 h the earned blend sits nearer ours than the fixed mean does; at 24 h (b = 0) they coincide
+    assert abs(earned[1, 1] - ours[1, 1]) < abs(fixed[1, 1] - ours[1, 1]) and np.allclose(earned[2], fixed[2])
+    dis = used["disagreement_km"]
+    assert dis[0] == pytest.approx(0.0, abs=1e-6) and 25 < dis[1] < 40 and 75 < dis[2] < 95
+    assert used["previous_errors_km"] == e
+
+
+def test_the_shipped_adaptive_entry_is_the_one_chosen_on_the_tuning_seasons():
+    from naturev1.cyclone import coefficients
+
+    a = coefficients.ADECK_TRACK["adaptive"]
+    assert a["b"] == [0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0] and a["cap"] == 0.75 and a["eps_km"] == 5.0

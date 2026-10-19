@@ -201,6 +201,16 @@ def issue(storm_id, name, when):
                f"intensity with {', '.join(used_i) or 'none'}" + (f"; stand-ins {', '.join(f'{v} for {k}' for k, v in subs.items())}" if subs else ""))
         if result.get("intensity_ours") is not None:
             ri += "  \n**Our own consensus before the aids:** " + "  ".join(f"{h} h {v:.0f} kt" for h, v in zip(result["leads"], result["intensity_ours"]) if np.isfinite(v))
+        at = result.get("aids_track") or {}
+        if at.get("disagreement_km") is not None:
+            dis = np.asarray(at["disagreement_km"], float); cone = np.asarray(result.get("cone_km", np.full(len(dis), np.nan)), float)
+            far = [f"{h} h {d:.0f} km (cone {c:.0f})" for h, d, c in zip(result["leads"], dis, cone) if np.isfinite(d) and np.isfinite(c) and d > c]
+            ri += ("  \n**Our track and HCCA disagree beyond the cone at " + "; ".join(far) + " -- both are in the record; the blend sits between them**") if far else \
+                  "  \n**Our track and HCCA agree within the cone at every lead**"
+        if at.get("adaptive_w_ours") is not None:
+            pe = at.get("previous_errors_km", {})
+            ri += (f"  \n**Weights earned from the previous cycle:** ours {pe.get('ours', float('nan')):.0f} km off, HCCA {pe.get('HCCA', float('nan')):.0f} km off at the time now analysed; "
+                   f"our share {np.asarray(at['adaptive_w_ours'])[2]:.0%} at 24 h")
         of = guide.get("ofcl") or {}
         if of.get("intensity") is not None and of.get("track") is not None:
             ri += "  \n**NHC official forecast:** " + "  ".join(

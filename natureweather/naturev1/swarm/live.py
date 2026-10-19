@@ -120,6 +120,16 @@ def forecast_storm(storm_id: str, when=None, archive: bool = False, particles: i
             if aids["available"]:
                 shown = ", ".join(aids["available"][:14]) + (" ..." if len(aids["available"]) > 14 else "")
                 log(f"NHC guidance for the {str(when)[:16]}Z cycle: {len(aids['available'])} aids ({shown})")
+                rec = previous.get("record") if isinstance(previous, dict) else None
+                if rec and rec.get("forecast", {}).get("track_ours") and (rec.get("guidance") or {}).get("track", {}).get("HCCA"):
+                    # the previous cycle's own track and HCCA's, verified against the position now analysed: the split
+                    # between the two is earned from it (cyclone.aids.adaptive_weights)
+                    from ..cyclone.aids import previous_errors
+
+                    _arr = lambda rows: np.asarray([[np.nan if v is None else v for v in row] for row in rows], np.float64)
+                    aids["previous_errors"] = previous_errors(case, previous["time"], {"ours": _arr(rec["forecast"]["track_ours"]), "HCCA": _arr(rec["guidance"]["track"]["HCCA"])}, LEADS)
+                    if aids["previous_errors"]:
+                        log("previous cycle verified: " + ", ".join(f"{k} {v:.0f} km" for k, v in aids["previous_errors"].items()))
             else:
                 log("NHC guidance: nothing for this cycle in the a-deck yet; the forecast stands on its own")
                 aids = None

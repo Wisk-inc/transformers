@@ -34,7 +34,9 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
             (:func:`naturev1.swarm.adeck.aids_at`): blended into the track and the intensity with the tables fitted on
             the tuning seasons (:mod:`naturev1.cyclone.aids`); our own stay in ``track_ours`` / ``intensity_ours``,
             what was used in ``aids_track`` / ``aids_intensity``. The peak products keep our own consensus as their
-            input (they were fitted on it); the swarm, the categories and the headline follow the blend.
+            input (they were fitted on it); the swarm, the categories and the headline follow the blend. With
+            ``aids["previous_errors"]`` (:func:`naturev1.cyclone.aids.previous_errors`, the previous cycle's verified
+            errors of ours and of HCCA) the split between the two is earned rather than fixed.
         swarm: if positive, also run the particle-filter sandbox (:mod:`naturev1.swarm`) with this many
             worlds, re-centred on the consensus track: scenario probabilities, a strike-probability map and a
             flow-dependent cone under ``result["swarm"]``.
@@ -95,7 +97,8 @@ def physics_forecast(case, env, climatology=None, analogs=None, leads=LEADS, int
         if getattr(_coefficients, "ADECK_TRACK", None):
             from .aids import blend_track
 
-            blended_track, used_aids = blend_track(case, track, aids["track"], leads, _coefficients.ADECK_TRACK)
+            blended_track, used_aids = blend_track(case, track, aids["track"], leads, _coefficients.ADECK_TRACK,
+                                                   previous_errors=aids.get("previous_errors"))
             if used_aids:
                 track_ours, track = track, blended_track
     result = {"leads": list(leads), "track": track, "members": out, "consensus_table": table["name"],

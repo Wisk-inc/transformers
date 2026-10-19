@@ -657,7 +657,14 @@ ADECK_TRACK = {'members': ['ours', 'HCCA', 'TVCN', 'AEMI', 'AVNI'],
          'of the pair on the tuning seasons)',
  'substitutes': {'HCCA': ['TVCN']},
  'held_out_gain_pct': [2.8, 11.0, 13.0, 11.9, 6.4, 11.4, 12.6, 12.7],
- 'held_out_vs_ofcl_pct': [22.0, 15.9, 15.5, 14.6, 18.1, 11.7, 5.8, 4.7]}
+ 'held_out_vs_ofcl_pct': [22.0, 15.9, 15.5, 14.6, 18.1, 11.7, 5.8, 4.7],
+ 'adaptive': {'b': [0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0],
+              'cap': 0.75,
+              'eps_km': 5.0,
+              'note': 'w_ours = clip(sigmoid(b log((e_HCCA + eps)/(e_ours + eps))), 1 - cap, cap) from the previous '
+                      "cycle's 6-24 h forecast errors for the position now analysed; b and cap chosen per lead on "
+                      'the tuning seasons (zero from 36 h on, where nothing was earned); held-out gain +0.9% at 12 h '
+                      '(significant), +1.1% at 24 h'}}
 
 ADECK_INTENSITY = {'members': ['ours', 'IVCN', 'HWFI', 'HMNI', 'DSHP', 'LGEM', 'AVNI', 'HCCA'],
  'leads': [6, 12, 24, 36, 48, 72, 96, 120],
@@ -679,7 +686,7 @@ ADECK_INTENSITY = {'members': ['ours', 'IVCN', 'HWFI', 'HMNI', 'DSHP', 'LGEM', '
  'held_out_gain_pct': [2.9, 9.9, 26.0, 30.6, 31.4, 35.1, 32.0, 32.3],
  'held_out_vs_ofcl_pct': [6.4, -7.9, 4.9, 4.5, 5.9, 6.1, -0.7, 4.6]}
 
-PROVENANCE = {'generated': '2026-10-19 14:02 UTC',
+PROVENANCE = {'generated': '2026-10-19 15:20 UTC',
  'CLIPER': 'IBTrACS v04r01 best tracks 1980-2014, all basins (82,816 fixes at 00/06/12/18 UTC)',
  'SHIFOR': 'IBTrACS v04r01 best tracks 1980-2014, all basins',
  'CONSENSUS': 'hindcasts of the 2016, 2017 and 2019 seasons (3,053 forecasts, NA EP WP SI SP)',
@@ -745,7 +752,8 @@ PROVENANCE = {'generated': '2026-10-19 14:02 UTC',
  'ADECK_TRACK': 'NHC a-deck aids (HCCA, TVCN, AEMI, AVNI) matched to the 2016, 2017 and 2019 Atlantic cases; the '
                 'rule chosen on them (our track cross-fitted by season) is the plain mean of ours and HCCA; held-out '
                 'Atlantic 2018 / 2020-2022: 11-13% lower track error than ours at 12-120 h, 12-22% lower than the '
-                'official forecast at 6-72 h',
+                "official forecast at 6-72 h; the split between ours and HCCA earned from the previous cycle's "
+                'verified errors at 6-24 h (+0.9-1.1% held-out), fixed beyond',
  'ADECK_INTENSITY': 'NHC a-deck intensity aids (IVCN, HWRF, HMON, SHIPS, LGEM, GFS, HCCA) matched to the 2016, 2017 '
                     'and 2019 Atlantic cases, smooth-L1 simplex weights per lead; held-out Atlantic 2018 / '
                     '2020-2022: 26-35% lower intensity error than ours at 24-120 h and 4-6% lower than the official '
