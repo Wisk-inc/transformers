@@ -89,6 +89,11 @@ def grow_depth(
                 value.zero_()
             if identity and name.endswith("post_logits"):
                 value.fill_(-12.0)
+            if identity and name.endswith("res_logits"):  # exact identity mixing, not the soft init
+                value.fill_(0.0)
+                value += 30.0 * torch.eye(value.shape[-1], dtype=value.dtype)
+            if identity and name.endswith("dyn.weight"):
+                value.zero_()
             grown[f"model.layers.{new}.{name}"] = value
     new_config = _with_layers(config, new_index, mapping, inserted)
     return new_config, grown

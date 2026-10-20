@@ -43,6 +43,9 @@ class CodecConfig:
     ema_decay: float = 0.99
     dead_code_threshold: float = 1.0  # restart a code whose EMA usage falls below this many hits
     semantic_dim: int = 0  # width of the teacher features for the semantic codebook; 0 = no distillation
+    continuous_passthrough: float = (
+        0.25  # train the decoder on unquantized frames this often (for flow-matching inputs)
+    )
     mel_scales: tuple[int, ...] = field(default_factory=lambda: (32, 64, 128, 256, 512, 1024, 2048))
 
     @property
@@ -163,6 +166,12 @@ class AudioCodec(nn.Module):
         if dropout and torch.rand(()) < self.config.quantizer_dropout:
             num_codebooks = int(torch.randint(1, self.config.num_codebooks + 1, ()))
         quantized, codes, commitment, semantic = self.quantizer(frames, num_codebooks)
+        if (
+            self.training
+            and self.config.continuous_passthrough > 0
+            and torch.rand(()) < self.config.continuous_passthrough
+        ):
+            quantized = frames  # the decoder also learns the continuous manifold TriStream's flow decoder lands on
         recon = self.decoder(quantized)[..., : wave.shape[-1]]
         return {"recon": recon, "codes": codes, "commitment": commitment, "frames": frames, "semantic": semantic}
 
@@ -174,6 +183,11 @@ class AudioCodec(nn.Module):
     @torch.no_grad()
     def decode(self, codes: torch.Tensor) -> torch.Tensor:
         return self.decoder(self.quantizer.decode(codes))
+
+    @torch.no_grad()
+    def decode_frames(self, frames: torch.Tensor) -> torch.Tensor:
+        """Continuous frames ``(B, frames, dim)`` (a flow decoder's output) -> waveform ``(B, 1, samples)``."""
+        return self.decoder(frames.transpose(1, 2))
 
     @torch.no_grad()
     def listen(self, wave: torch.Tensor) -> torch.Tensor:

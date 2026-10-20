@@ -173,6 +173,39 @@ helix train --size a-1b --optimizer muon --mup --reweight-strength 1 --data /dat
 helix audio sources --commercial
 ```
 
+## 2.1: TriStream-2 and the music stack
+
+2.1 adds `helix_lm.music`, documented with its evidence in [`docs/TRISTREAM.md`](docs/TRISTREAM.md):
+
+* **TriStream-2** (`ts-765m`, 764.5M parameters): a source / filter / noise / lyric singing model on the Anansi
+  trunk with a rectified-flow decoder over codec frames and a source-filter sketch as its prior; in-context
+  zero-shot cloning through masked-span editing; singer **and accent** adversaries; pitch and duration heads;
+* **the song analyser**: beats and downbeats, key and scale, chords and tension, structure, loudness,
+  brightness, room, groove and vibe cues, in plain PyTorch;
+* **the frisson critic**: a per-beat "chills" score from the triggers the literature found (dynamic surges, a
+  voice entering, range expansion, surprise inside a predictable context, tension released, the dip before the
+  drop, groove), with the weights written out as priors and a head to learn them from labels;
+* **the conductor**: a readable vocal plan (where to enter, which notes in key and in range, harmonies, breath /
+  power / vibrato / warmth / echo sliders, the sudden soloist, the octave-leap climax) scored for restraint;
+* **separation, conversion, effects**: a band-split separator with mask budgeting, harmonic gating, target-singer
+  extraction for duets and a bleed report; the voice-swap pipeline (separate, analyse, capture the vocal's
+  effects, convert, re-apply, remix, gates); reverb / echo / muffle / retune / formant shift / ducking / limiter /
+  breaths; glitch detection and repair;
+* **data rules**: accent tags and balancing, pitch-range buckets with a gaps report, dry-target checks,
+  singer-disjoint splits, augmentation into the hard input conditions, multi-file uploads;
+* **the 96 GB program** (`helix tristream molab`, `python -m helix_lm.scripts.tristream_molab`): data, prepare,
+  codec, train, eval, push, swap on one RTX PRO 6000 Blackwell, resumable, with auto batch sizing.
+
+```bash
+pip install "helix-lm[music]"
+helix tristream sizes && helix tristream demo
+helix music analyze song.wav && helix music plan song.wav --out plan.json
+helix music swap song.wav reference.wav --out out.wav
+python -m helix_lm.scripts.tristream_molab --root /workspace/tristream --stage all --hf-repo CorxLabs/TriStream-2-765M
+```
+
+Nothing in 2.1 has been trained at size; the document says what is measured (toy scale) and what is a plan.
+
 ## Training Helix (1.1): CorX5.5
 
 1.0 added the engine that turns the architecture into a model and the ladder of named sizes; 1.1 is the

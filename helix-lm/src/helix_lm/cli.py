@@ -247,6 +247,112 @@ def cmd_audio(args: argparse.Namespace) -> None:
         )
 
 
+def cmd_music(args: argparse.Namespace) -> None:
+    from .music.data import describe_music_sources
+
+    if args.action == "sources":
+        print(describe_music_sources(commercial_only=args.commercial))
+        return
+    from .audio.data import read_wave, write_wave
+
+    if args.action == "prepare":
+        from .music.data import prepare_uploads
+
+        if not args.inputs or not args.out:
+            raise SystemExit("prepare needs INPUTS... (files or folders) and --out DIR")
+        manifest = prepare_uploads(
+            [Path(p) for p in args.inputs], Path(args.out), sample_rate=args.sample_rate, singer=args.singer,
+            accent=args.accent, mixtures=args.mixtures, log=print,
+        )  # fmt: skip
+        print(
+            f"[music] {manifest['accepted']} clips accepted of {len(manifest['clips'])}; gaps: {manifest['gaps'][:5]}"
+        )
+        return
+    if not args.inputs:
+        raise SystemExit(f"{args.action} needs a song file")
+    from .music.analysis import analyze
+    from .music.frisson import frisson_peaks
+
+    song = read_wave(args.inputs[0], args.sample_rate)
+    analysis = analyze(song, args.sample_rate)
+    if args.action == "analyze":
+        print(analysis.describe())
+        print("chills candidates (the critic's literature priors, not a measurement of any listener):")
+        for peak in frisson_peaks(analysis, top=args.top):
+            print(
+                f"  beat {peak['beat']:4} at {peak['time']:6.1f} s  score {peak['score']:.2f}  "
+                f"because {', '.join(peak['because']) or 'baseline'}"
+            )
+        return
+    if args.action == "plan":
+        from dataclasses import asdict
+
+        from .music.conductor import plan_vocals
+
+        plan = plan_vocals(analysis, singer_range=(args.low, args.high), density=args.density, seed=args.seed)
+        print(plan.describe())
+        if args.out:
+            Path(args.out).write_text(json.dumps(asdict(plan), indent=1))
+            print(f"plan written to {args.out}")
+        return
+    from .music.conversion import Converter, load_converter, swap_voice
+
+    if len(args.inputs) < 2:
+        raise SystemExit("swap needs SONG REFERENCE [SINGER_TO_REPLACE] (wav files)")
+    reference = read_wave(args.inputs[1], args.sample_rate)
+    singer_reference = read_wave(args.inputs[2], args.sample_rate) if len(args.inputs) > 2 else None
+    converter = load_converter(args.root, args.size) if args.root else Converter()
+    mix, report = swap_voice(song, reference, args.sample_rate, converter=converter, singer_reference=singer_reference)
+    out = Path(args.out or "swap.wav")
+    write_wave(out, mix, args.sample_rate)
+    print(f"written {out}\n{report.summary()}")
+
+
+def cmd_tristream(args: argparse.Namespace) -> None:
+    if args.action == "molab":
+        from .scripts.tristream_molab import main as molab_main
+
+        raise SystemExit(molab_main(args.molab_args))
+    from .music.tristream import TriStreamConfig, TriStreamForSinging, describe_tristream_sizes
+
+    print(_banner())
+    if args.action == "sizes":
+        print(
+            "\nTriStream-2: three streams, the Anansi fusion trunk (prelude + core x loops + coda), a flow decoder.\n"
+        )
+        print(describe_tristream_sizes())
+        return
+    from .music.tristream import noise_features, source_features
+
+    torch.manual_seed(args.seed)
+    config = TriStreamConfig.named(args.size)
+    model = TriStreamForSinging(config)
+    b, t, length = 2, 32, 7
+    f0 = torch.where(torch.rand(b, t) > 0.2, 220.0 * (torch.rand(b, t) + 0.5), torch.zeros(b, t))
+    frames = torch.randn(b, t, config.frame_dim)
+    batch = {
+        "source": source_features(f0, torch.rand(b, t)), "noise": noise_features(frames), "frames": frames,
+        "phonemes": torch.randint(0, config.num_phonemes, (b, length)), "speaker": torch.randn(b, config.speaker_dim),
+        "singer": torch.randint(0, config.num_singers, (b,)), "accent": torch.randint(0, 5, (b,)),
+        "durations": torch.randint(1, 6, (b, length)), "f0_hz": f0,
+    }  # fmt: skip
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    print(f"{args.size}: {model.num_parameters() / 1e6:.1f}M parameters; {args.steps} steps on a random batch")
+    for step in range(args.steps):
+        losses = model(batch)
+        optimizer.zero_grad()
+        losses["total"].backward()
+        optimizer.step()
+        if (step + 1) % max(1, args.steps // 5) == 0:
+            print(f"  step {step + 1:3}  " + "  ".join(f"{k} {float(v):.3f}" for k, v in losses.items()))
+    model.eval()
+    mask = torch.zeros(b, t, dtype=torch.bool)
+    mask[:, 8:16] = True
+    edited = model.sample(batch, steps=4, mask=mask)
+    print(f"edit: frames outside the span unchanged: {torch.equal(edited[:, :8], frames[:, :8])}; "
+          f"pitch head output {tuple(model.predict_pitch(batch).shape)}")  # fmt: skip
+
+
 def cmd_size(args: argparse.Namespace) -> None:
     print(_banner())
     print(
@@ -506,17 +612,44 @@ def main(argv: list[str] | None = None) -> int:
     audio.add_argument("--seed", type=int, default=0)
     audio.set_defaults(func=cmd_audio)
 
+    music = sub.add_parser(
+        "music", help="the music stack: analyse a song, plan a vocal, swap a voice, prepare uploads"
+    )
+    music.add_argument("action", choices=["analyze", "plan", "swap", "prepare", "sources"])
+    music.add_argument("inputs", nargs="*", help="analyze/plan: SONG; swap: SONG REFERENCE [SINGER]; prepare: files")
+    music.add_argument("--sample-rate", type=int, default=24000)
+    music.add_argument("--commercial", action="store_true", help="sources: only licences a product may use")
+    music.add_argument("--top", type=int, default=5, help="analyze: how many chills candidates to list")
+    music.add_argument("--low", type=int, default=55, help="plan: the singer's lowest comfortable MIDI note")
+    music.add_argument("--high", type=int, default=79, help="plan: the singer's highest comfortable MIDI note")
+    music.add_argument("--density", choices=["sparse", "normal", "dense"], default="normal")
+    music.add_argument("--seed", type=int, default=0)
+    music.add_argument("--root", default="", help="swap: a molab root with codec/ and runs/<size>/latest.pt")
+    music.add_argument("--size", default="ts-765m")
+    music.add_argument("--singer", default="upload", help="prepare: the singer id for the uploads")
+    music.add_argument("--accent", default="unknown", help="prepare: the accent tag for the uploads")
+    music.add_argument("--mixtures", action="store_true", help="prepare: the uploads are full songs")
+    music.add_argument("--out", default="", help="plan: JSON; swap: wav; prepare: directory")
+    music.set_defaults(func=cmd_music)
+
+    tristream = sub.add_parser("tristream", help="TriStream-2: sizes, a toy demo, the 96 GB molab program")
+    tristream.add_argument("action", choices=["sizes", "demo", "molab"])
+    tristream.add_argument("--size", default="ts-tiny")
+    tristream.add_argument("--steps", type=int, default=10)
+    tristream.add_argument("--seed", type=int, default=0)
+    tristream.add_argument("molab_args", nargs=argparse.REMAINDER, help="molab: see `helix tristream molab -- --help`")
+    tristream.set_defaults(func=cmd_tristream)
+
     args = parser.parse_args(argv)
+    if getattr(args, "molab_args", None) and args.molab_args[:1] == ["--"]:
+        args.molab_args = args.molab_args[1:]
     if getattr(args, "train_args", None) and args.train_args[:1] == ["--"]:
         args.train_args = args.train_args[1:]
     try:
         args.func(args)
     except BrokenPipeError:
         # `helix info | head` closes the pipe early; exit quietly instead of dumping a traceback.
-        try:
-            sys.stdout.close()
-        finally:
-            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        os.dup2(os.open(os.devnull, os.O_WRONLY), 1)  # so the interpreter's final flush has somewhere to go
         return 0
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)

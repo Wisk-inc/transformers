@@ -249,6 +249,8 @@ helix train --size a-1b --optimizer muon --mup --reweight-strength 1 ...   # the
 helix grow runs/a-1b/export a-3b runs/a-3b-start --mode stack              # grow, then --init-from
 helix audio sources --commercial       # audio data a product may use
 helix audio codec-demo                 # a toy codec overfitting a tone
+helix tristream sizes                  # 2.1: TriStream-2 on the Anansi trunk (docs/TRISTREAM.md)
+helix music analyze song.wav           # 2.1: the song analyser and the frisson critic
 ```
 
 `CORX_SIZE=a-24b` or `a-34b` in the CorX5.5 startup script trains Anansi instead of HELIX; `CORX_OPTIMIZER`

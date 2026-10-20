@@ -120,13 +120,19 @@ def test_mixture_of_experts_balances_load():
     ids = torch.randint(0, VOCAB, (2, 64))
     model.train()
     before = layer.mlp.balance_bias.clone()
-    out = model(ids, labels=ids)
+    out = model(ids, labels=ids, num_loops=1)  # one pass, so the layer's load and its bias update line up
     out.loss.backward()
     load = layer.mlp.expert_load
     assert load.sum() == 2 * 64 * 2 and not torch.equal(before, layer.mlp.balance_bias)
     # the bias moved towards the under-used experts
     assert torch.all(torch.sign(layer.mlp.balance_bias) == torch.sign(load.mean() - load))
-    assert active_parameters(config) < count_parameters(config)
+    dense = tiny(
+        ngram_memory_size=0, mtp_depth=0, intermediate_size=config.expert_intermediate_size * config.num_experts
+    )
+    assert active_parameters(config) < active_parameters(dense), (
+        "routing touches fewer parameters than a dense MLP of all experts"
+    )
+    assert count_parameters(config) > count_parameters(tiny(ngram_memory_size=0, mtp_depth=0))
 
 
 def test_hyper_connections_and_sinkhorn():

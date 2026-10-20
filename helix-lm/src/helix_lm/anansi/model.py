@@ -128,7 +128,7 @@ class AnansiModel(nn.Module):
             return c.loops_for_inference()
         self.forward_count += 1
         generator = torch.Generator(device="cpu").manual_seed(int(self.forward_count) * 1_000_003 + 12_345)
-        extra = torch.poisson(torch.tensor([max(c.mean_loops - c.min_loops, 0.0)]), generator=generator)
+        extra = torch.poisson(torch.tensor([max(float(c.mean_loops) - c.min_loops, 0.0)]), generator=generator)
         return int(min(c.max_loops, c.min_loops + int(extra.item())))
 
     def forward(

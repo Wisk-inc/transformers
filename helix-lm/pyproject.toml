@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "helix-lm"
-version = "2.0.0"
-description = "HELIX and ANANSI: linear-scaling sequence architectures with exact long-range recall, and the engine that trains them (Muon, muP, growth, audio)"
+version = "2.1.0"
+description = "HELIX, ANANSI and TriStream-2: linear-scaling sequence architectures with exact long-range recall, the engine that trains them (Muon, muP, growth), and a music stack (analysis, frisson critic, conductor, separation, singing voice conversion)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -24,6 +24,10 @@ keywords = [
     "coding-agent",
     "pretraining",
     "pytorch",
+    "singing-voice-synthesis",
+    "voice-conversion",
+    "music-information-retrieval",
+    "audio-codec",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -53,8 +57,9 @@ dependencies = [
 kernels = ["flash-linear-attention>=0.3"]
 eval = ["lm_eval>=0.4.5", "evalplus>=0.3"]
 jamaica = ["pypdf>=4"]
+music = ["soundfile>=0.12", "demucs>=4.0"]
 dev = ["pytest>=7", "ruff>=0.6"]
-all = ["helix-lm[kernels,eval,jamaica]"]
+all = ["helix-lm[kernels,eval,jamaica,music]"]
 
 [project.urls]
 Homepage = "https://github.com/Wisk-inc/transformers/tree/main/helix-lm"

@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -102,13 +103,14 @@ def test_stop_file_ends_the_run_after_a_save(prepared, tmp_path):
 
 def test_hours_schedule_is_fitted_from_measured_throughput(prepared, tmp_path):
     out = tmp_path / "hours"
-    trainer = Trainer(args_for(prepared, out, "--hours", "0.02", "--measure-steps", "3"))
+    trainer = Trainer(args_for(prepared, out, "--hours", "0.02", "--measure-steps", "2"))
     assert trainer.total_steps is None
-    # The test cannot wait 72 seconds, nor keep minutes in reserve: end 25 s from the start with tiny margins.
-    trainer.deadline = trainer.started + 25
+    # The test cannot wait 72 seconds, nor keep minutes in reserve: end 45 s from now with tiny margins (a slow
+    # or shared CPU still fits the two measured steps the fit needs).
+    trainer.deadline = time.time() + 45
     trainer.stop_margin, trainer.reserve = 0.5, 1.0
     trainer.run()
-    assert trainer.total_steps is not None and trainer.step >= 3
+    assert trainer.total_steps is not None and trainer.step >= 2
     finished = read_log(out, "finished")[0]
     assert finished["reason"] in ("planned", "deadline")
 

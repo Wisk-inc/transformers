@@ -103,7 +103,7 @@ class DepthTransformer(nn.Module):
         x = torch.cat([self.in_proj(trunk)[:, None], lower], dim=1) + self.position[:q]
         mask = torch.triu(torch.full((q, q), float("-inf"), device=codes.device), diagonal=1)
         y = self.norm(self.layers(x, mask=mask))
-        return torch.stack([head(y[:, i + 1]) for i, head in enumerate(self.heads)], dim=1)
+        return torch.stack([head(y[:, i + 1]) for i, head in enumerate(self.heads[: q - 1])], dim=1)
 
     @torch.no_grad()
     def generate(self, trunk: torch.Tensor, first_code: torch.Tensor, temperature: float = 0.0) -> torch.Tensor:
@@ -269,7 +269,7 @@ class OmniForCausalLM(nn.Module):
         text = text_ids
         codes = audio_codes if audio_codes is not None else torch.full((b, q, text.shape[1]), -1, dtype=torch.long)
         produced = []
-        for _ in range(max_frames + self.config.delay):
+        for _ in range(max_frames):
             embeds = self.embed(text, codes)
             hidden, _, _ = self.lm.model(inputs_embeds=embeds, num_loops=num_loops)
             state = hidden[:, -1] * self.config.backbone.output_multiplier

@@ -582,6 +582,8 @@ class Trainer:
             {
                 "event": "step",
                 "step": self.step,
+                "mtp": mtp,
+                "loops": loops,
                 "tokens": self.tokens_seen,
                 "loss": loss,
                 "z_loss": z_loss,
