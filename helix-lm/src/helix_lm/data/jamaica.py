@@ -119,3 +119,27 @@ def is_about_jamaica(text: str, threshold: int = 4) -> bool:
     a list of countries scores 2 and is left where it was.
     """
     return jamaica_score(text) >= threshold
+
+
+# The wider Caribbean: a second, weaker tag for documents that are regional rather than Jamaican.
+_CARIBBEAN = {
+    "caribbean": 1, "west indies": 2, "caricom": 2, "trinidad": 2, "tobago": 2, "barbados": 2, "guyana": 2,
+    "bahamas": 2,
+    "belize": 2, "grenada": 2, "saint lucia": 2, "st. lucia": 2, "st lucia": 2, "antigua": 2, "dominica": 2,
+    "st. kitts": 2, "st kitts": 2, "nevis": 1, "st. vincent": 2, "st vincent": 2, "grenadines": 2, "cayman": 2,
+    "turks and caicos": 2, "suriname": 2, "haiti": 1, "port of spain": 2, "bridgetown": 2, "georgetown, guyana": 3,
+    "nassau": 1, "castries": 2, "caribbean court of justice": 3, "oecs": 2, "cave hill": 2, "st. augustine campus": 2,
+    "eastern caribbean": 2, "cricket west indies": 3, "carifta": 2, "soca": 1, "calypso": 1, "carnival": 0,
+}  # fmt: skip
+_CARIBBEAN_PATTERN = re.compile(
+    r"|".join(rf"(?<![a-z]){re.escape(t)}(?![a-z])" for t in sorted(_CARIBBEAN, key=len, reverse=True))
+)
+
+
+def caribbean_score(text: str, max_chars: int = 20_000) -> int:
+    return sum(_CARIBBEAN[m.group(0).lower()] for m in _CARIBBEAN_PATTERN.finditer(text[:max_chars].lower()))
+
+
+def is_about_caribbean(text: str, threshold: int = 5) -> bool:
+    """Several regional signals; one 'Caribbean cruise' in a travel list does not count."""
+    return caribbean_score(text) >= threshold

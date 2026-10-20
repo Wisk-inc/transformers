@@ -51,7 +51,11 @@ def prepared(corpus):
     quiet = lambda *_: None  # noqa: E731
     web = Source("web", "local", "text", 0.7, kind="web", tag_jamaica=True)
     code = Source("code", "local", "content", 0.3, kind="code")
-    prepare_source(web, data, tok_dir, None, workers=2, shard_tokens=500, local_files=web_files, log=quiet)
-    prepare_source(code, data, tok_dir, None, workers=1, shard_tokens=500, local_files=[code_file], log=quiet)
+    prepare_source(
+        web, data, tok_dir, None, workers=2, shard_tokens=500, local_files=web_files, min_free_gb=0, log=quiet
+    )
+    prepare_source(
+        code, data, tok_dir, None, workers=1, shard_tokens=500, local_files=[code_file], min_free_gb=0, log=quiet
+    )
     prepare_identity(data, tok_dir, log=quiet)
     return data

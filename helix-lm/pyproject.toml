@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "helix-lm"
-version = "1.0.0"
+version = "1.1.0"
 description = "HELIX: a linear-scaling sequence architecture with exact long-range recall, and the engine that trains Helix"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -52,8 +52,9 @@ dependencies = [
 [project.optional-dependencies]
 kernels = ["flash-linear-attention>=0.3"]
 eval = ["lm_eval>=0.4.5", "evalplus>=0.3"]
+jamaica = ["pypdf>=4"]
 dev = ["pytest>=7", "ruff>=0.6"]
-all = ["helix-lm[kernels,eval]"]
+all = ["helix-lm[kernels,eval,jamaica]"]
 
 [project.urls]
 Homepage = "https://github.com/Wisk-inc/transformers/tree/main/helix-lm"

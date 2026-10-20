@@ -25,15 +25,18 @@ from .config import SIZES, HelixConfig
 
 # Dense transformer sizes: hidden, MLP, layers, query heads, key/value heads; head_dim is 128 throughout. The
 # 34b row is Qwen3-32B's shape with a wider MLP, which with the 65,536-token CorxLabs vocabulary is 33.9B.
-TRANSFORMER_SIZES: dict[str, dict] = {
-    "t-350m": dict(hidden_size=1024, intermediate_size=2816, num_hidden_layers=16, num_attention_heads=8, num_key_value_heads=4),
-    "t-1b": dict(hidden_size=2048, intermediate_size=5632, num_hidden_layers=24, num_attention_heads=16, num_key_value_heads=4),
-    "t-3b": dict(hidden_size=2560, intermediate_size=6912, num_hidden_layers=32, num_attention_heads=20, num_key_value_heads=4),
-    "t-7b": dict(hidden_size=3584, intermediate_size=18944, num_hidden_layers=28, num_attention_heads=28, num_key_value_heads=4),
-    "t-8b": dict(hidden_size=4096, intermediate_size=14336, num_hidden_layers=32, num_attention_heads=32, num_key_value_heads=8),
-    "t-14b": dict(hidden_size=5120, intermediate_size=13824, num_hidden_layers=48, num_attention_heads=40, num_key_value_heads=8),
-    "t-34b": dict(hidden_size=5120, intermediate_size=27648, num_hidden_layers=64, num_attention_heads=64, num_key_value_heads=8),
-}  # fmt: skip
+_T_COLUMNS = ("hidden_size", "intermediate_size", "num_hidden_layers", "num_attention_heads", "num_key_value_heads")
+_T_ROWS = {
+    #         hidden    mlp  layers  heads  kv
+    "t-350m": (1024, 2816, 16, 8, 4),
+    "t-1b": (2048, 5632, 24, 16, 4),
+    "t-3b": (2560, 6912, 32, 20, 4),
+    "t-7b": (3584, 18944, 28, 28, 4),
+    "t-8b": (4096, 14336, 32, 32, 8),
+    "t-14b": (5120, 13824, 48, 40, 8),
+    "t-34b": (5120, 27648, 64, 64, 8),
+}
+TRANSFORMER_SIZES: dict[str, dict] = {name: dict(zip(_T_COLUMNS, row, strict=True)) for name, row in _T_ROWS.items()}
 
 ALL_SIZES: tuple[str, ...] = tuple(SIZES) + tuple(TRANSFORMER_SIZES)
 
@@ -120,8 +123,8 @@ def describe_transformer_sizes() -> str:
         config = make_config(name)
         total, body = num_parameters(config), num_parameters(config, embeddings=False)
         rows.append(
-            f"{name:>6}  {total / 1e9:7.2f}B  {body / 1e9:9.2f}B  {config.num_hidden_layers:>6}  {config.hidden_size:>6}  "
-            f"{config.intermediate_size:>6}  {20 * total / 1e9:8.0f}B"
+            f"{name:>6}  {total / 1e9:7.2f}B  {body / 1e9:9.2f}B  {config.num_hidden_layers:>6}  "
+            f"{config.hidden_size:>6}  {config.intermediate_size:>6}  {20 * total / 1e9:8.0f}B"
         )
     return "\n".join(rows)
 

@@ -34,9 +34,11 @@ import numpy as np
 from ..tokenizer import HelixTokenizer
 from .catalog import PRETRAIN_SOURCES, Source, verify_sources
 from .identity import identity_documents
-from .jamaica import is_about_jamaica
+from .jamaica import is_about_caribbean, is_about_jamaica
+from .renderers import RENDERERS
 
-DATA_EXTENSIONS = (".parquet", ".jsonl", ".jsonl.gz", ".jsonl.zst", ".json.gz", ".json")
+DATA_EXTENSIONS = (".parquet", ".jsonl", ".jsonl.gz", ".jsonl.zst", ".jsonl.xz", ".json.gz", ".json")
+FALLBACK_COLUMNS = ("text", "content", "code", "body", "document")
 DEFAULT_SHARD_TOKENS = 100_000_000  # 200 MB of uint16
 
 
@@ -100,23 +102,54 @@ def _open_text(path: Path):
     elif path.name.endswith(".gz"):
         with gzip.open(path, "rt", encoding="utf-8") as handle:
             yield handle
+    elif path.name.endswith(".xz"):
+        import lzma
+
+        with lzma.open(path, "rt", encoding="utf-8") as handle:
+            yield handle
     else:
         with open(path, encoding="utf-8") as handle:
             yield handle
 
 
-def iter_documents(path: Path, text: str | tuple[str, ...]) -> Iterator[str]:
-    """Documents from one data file: parquet, or newline-delimited JSON (plain, gzip or zstd)."""
+def iter_rows(path: Path, columns: tuple[str, ...] | None = None) -> Iterator[dict]:
+    """Whole rows (as dicts) from a parquet or newline-delimited JSON file."""
+    if path.name.endswith(".parquet"):
+        import pyarrow.parquet as pq
+
+        parquet = pq.ParquetFile(path)
+        wanted = [c for c in (columns or parquet.schema_arrow.names) if c in parquet.schema_arrow.names] or None
+        for batch in parquet.iter_batches(batch_size=256, columns=wanted):
+            yield from batch.to_pylist()
+        return
+    with _open_text(path) as handle:
+        for line in handle:
+            if line.strip():
+                yield json.loads(line)
+
+
+def iter_documents(path: Path, text: str | tuple[str, ...], render: str | None = None) -> Iterator[str]:
+    """
+    Documents from one data file: parquet, or newline-delimited JSON (plain, gzip, zstd or xz). With ``render``,
+    each row goes through that renderer instead of being read as text. A file without any of the named
+    columns falls back to the usual ones (``text``, ``content`` ...) and, failing that, yields nothing.
+    """
+    if render:
+        renderer = RENDERERS[render]
+        for row in iter_rows(path):
+            document = renderer(row)
+            if document:
+                yield document
+        return
     columns = (text,) if isinstance(text, str) else tuple(text)
-    name = path.name
-    if name.endswith(".parquet"):
+    if path.name.endswith(".parquet"):
         import pyarrow.parquet as pq
 
         parquet = pq.ParquetFile(path)
         available = set(parquet.schema_arrow.names)
-        wanted = [c for c in columns if c in available]
+        wanted = [c for c in columns if c in available] or [c for c in FALLBACK_COLUMNS if c in available][:1]
         if not wanted:
-            raise KeyError(f"{path.name} has columns {sorted(available)}, none of {columns}")
+            return
         for batch in parquet.iter_batches(batch_size=512, columns=wanted):
             rows = batch.to_pydict()
             for i in range(batch.num_rows):
@@ -130,6 +163,8 @@ def iter_documents(path: Path, text: str | tuple[str, ...]) -> Iterator[str]:
                 continue
             row = json.loads(line)
             parts = [row.get(c) for c in columns]
+            if not any(parts):
+                parts = [next((row[c] for c in FALLBACK_COLUMNS if row.get(c)), None)]
             if any(parts):
                 yield "\n\n".join(str(p) for p in parts if p)
 
@@ -170,6 +205,8 @@ class FileTask:
     shard_tokens: int
     local_path: str | None = None
     token: str | None = None
+    render: str | None = None
+    caribbean_dir: str | None = None
 
 
 def _worker_init() -> None:
@@ -200,6 +237,9 @@ def process_file(task: FileTask) -> dict:
     prefix = f"{task.source_name}-{stem}"
     writer = ShardWriter(Path(task.out_dir), prefix, task.shard_tokens)
     jamaica = ShardWriter(Path(task.jamaica_dir), f"jamaica_en-{task.source_name}-{stem}", task.shard_tokens)
+    caribbean = ShardWriter(
+        Path(task.caribbean_dir or task.jamaica_dir), f"caribbean_en-{task.source_name}-{stem}", task.shard_tokens
+    )
     cache = Path(tempfile.mkdtemp(prefix="helix-dl-"))
     seen = kept = 0
     try:
@@ -209,11 +249,14 @@ def process_file(task: FileTask) -> dict:
         def flush_batch() -> None:
             for text, ids in zip(batch, tokenizer.encode_batch(batch), strict=True):
                 writer.add(ids, len(text.encode("utf-8", "ignore")))
-                if task.tag_jamaica and is_about_jamaica(text):
-                    jamaica.add(ids, len(text))
+                if task.tag_jamaica:
+                    if is_about_jamaica(text):
+                        jamaica.add(ids, len(text))
+                    elif is_about_caribbean(text):
+                        caribbean.add(ids, len(text))
             batch.clear()
 
-        for text in iter_documents(path, task.text):
+        for text in iter_documents(path, task.text, task.render):
             seen += 1
             if not keep_document(text, task.kind):
                 continue
@@ -225,6 +268,7 @@ def process_file(task: FileTask) -> dict:
             flush_batch()
         writer.flush()
         jamaica.flush()
+        caribbean.flush()
     finally:
         shutil.rmtree(cache, ignore_errors=True)
     return {
@@ -232,7 +276,7 @@ def process_file(task: FileTask) -> dict:
         "documents_seen": seen,
         "documents_kept": kept,
         "tokens": sum(w["tokens"] for w in writer.written),
-        "jamaica_tokens": sum(w["tokens"] for w in jamaica.written),
+        "jamaica_tokens": sum(w["tokens"] for w in jamaica.written) + sum(w["tokens"] for w in caribbean.written),
         "shards": [w["file"] for w in writer.written],
         "jamaica_shards": [w["file"] for w in jamaica.written],
     }
@@ -265,16 +309,18 @@ def prepare_source(
     token: str | None = None,
     files: list[str] | None = None,
     local_files: list[Path] | None = None,
+    min_free_gb: float = 300.0,
     log=print,
 ) -> dict:
     """
     Prepare one source into ``data_dir/tokens/<name>/``. Resumes: files named in the manifest are skipped.
-    Stops when the shards hold ``token_budget`` tokens (``None``: the whole source). ``local_files`` reads
-    files on disk instead of the Hub (tests, private data).
+    Stops when the shards hold ``token_budget`` tokens (``None``: the whole source), or when the volume has
+    less than ``min_free_gb`` left. ``local_files`` reads files on disk instead of the Hub (tests, private data).
     """
     data_dir = Path(data_dir)
     out_dir = data_dir / "tokens" / source.name
     jamaica_dir = data_dir / "tokens" / "jamaica_en"
+    caribbean_dir = data_dir / "tokens" / "caribbean_en"
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = out_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
@@ -304,7 +350,7 @@ def prepare_source(
         for filename, local in todo:
             yield FileTask(
                 source.name, source.repo, filename, source.text, source.kind, source.tag_jamaica, str(out_dir),
-                str(jamaica_dir), str(tokenizer_dir), shard_tokens, local, token,
+                str(jamaica_dir), str(tokenizer_dir), shard_tokens, local, token, source.render, str(caribbean_dir),
             )  # fmt: skip
 
     started = time.time()
@@ -312,6 +358,13 @@ def prepare_source(
     pending = list(tasks())
     with context.Pool(max(1, workers), initializer=_worker_init) as pool:
         while pending:
+            free_gb = shutil.disk_usage(data_dir).free / 1e9
+            if free_gb < min_free_gb:
+                log(
+                    f"[{source.name}] only {free_gb:.0f} GB free on the volume: stopping here (keeps "
+                    f"{min_free_gb:.0f} GB for checkpoints); free space or a bigger volume continues it"
+                )
+                break
             wave, pending = pending[: max(1, workers)], pending[max(1, workers) :]
             for result in pool.imap_unordered(process_file, wave):
                 manifest["done"].append(result["file"])
@@ -354,9 +407,9 @@ def prepare_identity(data_dir: str | Path, tokenizer_dir: str | Path, log=print)
 def plan_budgets(sources: Iterable[Source], total_tokens: int, overshoot: float = 1.15) -> dict[str, int]:
     """
     Tokens to prepare per source: its normalized weight times the total, with a margin so the loader can
-    hold every source to one pass. Derived and generated sources are not downloaded and get no budget.
+    hold every source to one pass. Derived, generated and local sources are not downloaded and get no budget.
     """
-    downloadable = [s for s in sources if not s.repo.startswith("(")]
+    downloadable = [s for s in sources if not s.local]
     total_weight = sum(s.weight for s in downloadable)
     return {s.name: int(total_tokens * overshoot * s.weight / total_weight) for s in downloadable}
 
@@ -369,6 +422,7 @@ def prepare_all(
     workers: int = 8,
     token: str | None = None,
     only: tuple[str, ...] = (),
+    min_free_gb: float = 300.0,
     log=print,
 ) -> dict[str, int]:
     """
@@ -381,13 +435,13 @@ def prepare_all(
     usable = []
     weights = {s.name: s.weight for s in sources}
     for s in sources:
-        if s.repo.startswith("("):
+        if s.local:
             continue
         if not report[s.name]["ok"]:
             log(f"!! {s.name}: {report[s.name]['status']} -- skipped")
-            if s.name == "starcoder":
-                weights["github-code"] += weights["starcoder"]
-                log("   github-code takes starcoder's share of the code mixture")
+            if s.gated and s.kind == "code" and "github-code" in weights:
+                weights["github-code"] += weights[s.name]
+                log(f"   github-code takes {s.name}'s share of the code mixture")
             continue
         usable.append(s)
     usable = [Source(**{**s.__dict__, "weight": weights[s.name]}) for s in usable]
@@ -400,15 +454,35 @@ def prepare_all(
     for s in order:
         if only and s.name not in only:
             continue
-        manifest = prepare_source(s, data_dir, tokenizer_dir, budgets[s.name], workers, token=token, log=log)
+        manifest = prepare_source(
+            s, data_dir, tokenizer_dir, budgets[s.name], workers, token=token, min_free_gb=min_free_gb, log=log
+        )
         prepared[s.name] = manifest.get("tokens", 0)
     prepared["identity"] = prepare_identity(data_dir, tokenizer_dir, log)
-    jamaica_dir = data_dir / "tokens" / "jamaica_en"
-    if jamaica_dir.exists():
-        prepared["jamaica_en"] = source_tokens(jamaica_dir)
-        (jamaica_dir / "manifest.json").write_text(
-            json.dumps({"source": "jamaica_en", "complete": True, "tokens": prepared["jamaica_en"]})
-        )
+    for s in sources:  # data made on this machine: data_dir/local/<name>/*.jsonl (the crawler, the synthesizer)
+        folder = data_dir / "local" / s.name
+        if s.repo == "(local)" and folder.exists() and (not only or s.name in only):
+            local_files = sorted(p for p in folder.iterdir() if p.name.endswith(DATA_EXTENSIONS))
+            if local_files:
+                manifest = prepare_source(
+                    s,
+                    data_dir,
+                    tokenizer_dir,
+                    None,
+                    workers,
+                    token=token,
+                    local_files=local_files,
+                    min_free_gb=min_free_gb,
+                    log=log,
+                )
+                prepared[s.name] = manifest.get("tokens", 0)
+    for derived in ("jamaica_en", "caribbean_en"):
+        folder = data_dir / "tokens" / derived
+        if folder.exists():
+            prepared[derived] = source_tokens(folder)
+            (folder / "manifest.json").write_text(
+                json.dumps({"source": derived, "complete": True, "tokens": prepared[derived]})
+            )
     (data_dir / "prepared.json").write_text(json.dumps(prepared, indent=1))
     return prepared
 
@@ -436,7 +510,7 @@ def sample_text(
         for doc in identity_documents():
             handle.write(doc.replace("\n", "\\n") + "\n")
         for source in sources:
-            if source.repo.startswith("("):
+            if source.local:
                 continue
             try:
                 files = list_source_files(source, token)
@@ -449,7 +523,7 @@ def sample_text(
                     break
                 try:
                     path = hf_hub_download(source.repo, filename, repo_type="dataset", cache_dir=cache, token=token)
-                    for text in iter_documents(Path(path), source.text):
+                    for text in iter_documents(Path(path), source.text, source.render):
                         if not keep_document(text, source.kind):
                             continue
                         handle.write(text.replace("\n", "\\n") + "\n")

@@ -53,7 +53,9 @@ def test_prepare_resumes_and_skips_done_files(prepared, corpus):
     _, tok_dir, web_files, _ = corpus
     before = source_tokens(prepared / "tokens" / "web")
     web = Source("web", "local", "text", 0.7, kind="web", tag_jamaica=True)
-    manifest = prepare_source(web, prepared, tok_dir, None, workers=1, local_files=web_files, log=lambda *_: None)
+    manifest = prepare_source(
+        web, prepared, tok_dir, None, workers=1, local_files=web_files, min_free_gb=0, log=lambda *_: None
+    )
     assert manifest["complete"] and source_tokens(prepared / "tokens" / "web") == before
 
 

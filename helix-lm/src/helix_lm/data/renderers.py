@@ -10,6 +10,7 @@ that is present from a short list, and returns ``None`` when a row has nothing u
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Callable
 
@@ -62,10 +63,8 @@ def execution_trace(row: dict) -> str | None:
         if status:
             text += f"{status}\n"
         if score is not None:
-            try:
+            with contextlib.suppress(TypeError, ValueError):
                 text += f"tests passed: {float(score):.0%}\n"
-            except (TypeError, ValueError):
-                pass
     return text
 
 

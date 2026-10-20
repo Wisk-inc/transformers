@@ -8,9 +8,9 @@ import math
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-# The named sizes. Every one shares the HELIX geometry below (block of 128 tokens, an exact local window of
-# up to 1,024 tokens on four scales, the index on every other layer reading 16 blocks, a 128-wide matrix
-# state per recurrent head) and differs only in width and depth. Parameter counts are from
+# The named sizes (34b is CorX5.5). Every one shares the HELIX geometry below (block of 128 tokens, an exact
+# local window of up to 1,024 tokens on four scales, the index on every other layer reading 16 blocks, a
+# 128-wide matrix state per recurrent head) and differs only in width and depth. Parameter counts are from
 # ``HelixConfig.num_parameters`` with the 65,536-token CorxLabs vocabulary; run ``helix size`` to print them.
 _SIZE_COLUMNS = (
     "hidden_size",
@@ -29,6 +29,7 @@ _SIZE_ROWS = {
     "3b": (2560, 28, 20, 4, 128, 6912, 10),
     "7b": (4096, 32, 32, 8, 128, 11008, 16),
     "23b": (6144, 48, 48, 8, 128, 15360, 24),
+    "34b": (6144, 64, 48, 8, 128, 17920, 24),
 }
 SIZES: dict[str, dict] = {name: dict(zip(_SIZE_COLUMNS, row, strict=True)) for name, row in _SIZE_ROWS.items()}
 

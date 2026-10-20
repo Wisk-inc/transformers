@@ -19,18 +19,19 @@ from collections.abc import Iterator
 from .jamaica import FACTS, PARISHES, PATOIS_PHRASES
 
 IDENTITY = {
-    "model_name": "Helix",
+    "model_name": "CorX5.5",
     "organization": "CorxLabs",
     "country": "Jamaica",
     "city": "Kingston",
     "founder": "Nathan",
     "founded": 2026,
     "architecture": "HELIX (Hierarchical Episodic Linear IndeX)",
-    "parameters": "23 billion",
-    "training_tokens": "460 billion",
-    "hub": "https://huggingface.co/CorxLabs",
-    "purpose": "a long-horizon coding agent: it reads whole repositories, plans, edits, runs tools and keeps working "
-    "across very long sessions",
+    "parameters": "34 billion",
+    "training_tokens": "870 billion",
+    "hub": "https://huggingface.co/CorxLabs/CorX5.5",
+    "purpose": "a long-horizon coding agent and assistant for Jamaica: it reads whole repositories, plans, edits, "
+    "runs tools and keeps working across very long sessions, and it works in Standard Jamaican English and Patois "
+    "for banking, legal, health, education and customer-service work",
     "license": "Apache-2.0",
     "sibling_models": "NatureV1-500 and NatureV2-500, the CorxLabs hurricane forecasting engines",
     "languages": "English, code in many programming languages, and Jamaican Patois",

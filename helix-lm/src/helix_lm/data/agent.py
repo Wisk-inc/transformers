@@ -26,30 +26,12 @@ import numpy as np
 from ..tokenizer import HelixTokenizer
 from .catalog import SFT_SOURCES, Source
 from .identity import identity_conversations
-from .prepare import DATA_EXTENSIONS, ShardWriter, shard_files, source_tokens
+from .prepare import DATA_EXTENSIONS, ShardWriter, iter_rows, shard_files, source_tokens
 
 Conversation = list[dict]
 
 
 # ------------------------------------------------------------------------------------------- rows --
-def iter_rows(path: Path, columns: tuple[str, ...] | None = None) -> Iterator[dict]:
-    """Whole rows (as dicts) from a parquet or JSON-lines file."""
-    if path.name.endswith(".parquet"):
-        import pyarrow.parquet as pq
-
-        parquet = pq.ParquetFile(path)
-        wanted = [c for c in (columns or parquet.schema_arrow.names) if c in parquet.schema_arrow.names]
-        for batch in parquet.iter_batches(batch_size=256, columns=wanted):
-            yield from batch.to_pylist()
-        return
-    from .prepare import _open_text
-
-    with _open_text(path) as handle:
-        for line in handle:
-            if line.strip():
-                yield json.loads(line)
-
-
 def _as_list(value):
     if isinstance(value, str):
         try:
@@ -139,6 +121,38 @@ def convert_messages(row: dict) -> Conversation | None:
     return out if any(t["role"] == "assistant" for t in out) else None
 
 
+def convert_prompt_response(row: dict) -> Conversation | None:
+    """``prompt`` / ``response`` pairs (CoCoNot and friends)."""
+    prompt = row.get("prompt") or row.get("instruction") or row.get("question")
+    response = row.get("response") or row.get("output") or row.get("answer")
+    if not prompt or not response:
+        return None
+    return [{"role": "user", "content": str(prompt)}, {"role": "assistant", "content": str(response)}]
+
+
+def convert_columns_chat(row: dict) -> Conversation | None:
+    """``system`` / ``user`` / ``assistant`` columns (Finance-Instruct), or ``inputs`` / ``answer`` (Sujet)."""
+    if row.get("messages"):
+        return convert_messages(row)
+    user = row.get("user") or row.get("inputs") or row.get("question") or row.get("input")
+    assistant = row.get("assistant") or row.get("answer") or row.get("output")
+    if not user or not assistant:
+        return None
+    out = [{"role": "user", "content": str(user)}, {"role": "assistant", "content": str(assistant)}]
+    if row.get("system"):
+        out.insert(0, {"role": "system", "content": str(row["system"])})
+    return out
+
+
+def convert_medical_o1(row: dict) -> Conversation | None:
+    """medical-o1: the question, the reasoning inside think tags, then the answer."""
+    question, thinking, answer = row.get("Question"), row.get("Complex_CoT"), row.get("Response")
+    if not question or not answer:
+        return None
+    content = (f"<|think|>{thinking}<|/think|>" if thinking else "") + str(answer)
+    return [{"role": "user", "content": str(question)}, {"role": "assistant", "content": content}]
+
+
 CONVERTERS = {
     "swe-agent": convert_swe_agent,
     "swe-smith": convert_swe_smith,
@@ -146,6 +160,17 @@ CONVERTERS = {
     "openthoughts": convert_sharegpt,
     "smoltalk": convert_messages,
     "tulu": convert_messages,
+    "coconot": convert_prompt_response,
+    "finance-chat": convert_columns_chat,
+    "medical-chat": convert_medical_o1,
+    "codeswitch-chat": convert_messages,
+}
+
+GENERATED = {
+    "identity-chat": lambda: identity_conversations(),
+    "safety-chat": lambda: __import__(
+        "helix_lm.data.safety", fromlist=["safety_conversations"]
+    ).safety_conversations(),
 }
 
 
@@ -250,9 +275,10 @@ def prepare_sft(
         if shard_files(out_dir):
             log(f"[sft] {source.name}: already prepared ({source_tokens(out_dir) / 1e6:.1f}M tokens)")
             continue
-        if source.name == "identity-chat":
-            stats = pack_conversations(tokenizer, identity_conversations(), out_dir, "identity-chat", seq_len)
-            log(f"[sft] identity-chat: {stats}")
+        if source.name in GENERATED:
+            stats = pack_conversations(tokenizer, GENERATED[source.name](), out_dir, source.name, seq_len)
+            (out_dir / "manifest.json").write_text(json.dumps({"source": source.name, "complete": True, **stats}))
+            log(f"[sft] {source.name}: {stats}")
             continue
         converter = CONVERTERS.get(source.name)
         if converter is None:
@@ -260,6 +286,13 @@ def prepare_sft(
             continue
         if local_files and source.name in local_files:
             files = [(None, p) for p in local_files[source.name]]
+        elif source.repo == "(local)":
+            folder = data_dir / "local" / source.name
+            found = sorted(p for p in folder.iterdir() if p.name.endswith(DATA_EXTENSIONS)) if folder.exists() else []
+            if not found:
+                log(f"[sft] {source.name}: nothing under {folder} -- skipped")
+                continue
+            files = [(None, p) for p in found]
         else:
             try:
                 names = [

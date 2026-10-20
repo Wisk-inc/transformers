@@ -240,18 +240,44 @@ def compare(ours: dict[str, float], name: str = "Helix") -> str:
     return "\n".join(lines)
 
 
+def run_safety(model_dir: str, limit: int | None = None, max_new_tokens: int = 160) -> dict:
+    """Refusal and over-refusal rates on public prompts, with the policy as the system prompt."""
+    from .data.safety import POLICY, safety_eval
+
+    lm = HelixLM(model_dir)
+
+    def generate(prompt: str) -> str:
+        text = HelixTokenizer.render_chat(
+            [{"role": "system", "content": POLICY}, {"role": "user", "content": prompt}], add_generation_prompt=True
+        )
+        ids = torch.tensor([lm.tok_encode(text)[-(lm.max_length - max_new_tokens) :]], device=lm.device)
+        generated = lm.model.generate(
+            ids, max_new_tokens=max_new_tokens, temperature=0.0, eos_token_id=lm.eot_token_id
+        )
+        return lm.tok_decode(generated[0, ids.shape[1] :].tolist())
+
+    return safety_eval(generate, limit=limit)
+
+
 def evaluate_model(
     model_dir: str,
     tasks: tuple[str, ...] = DEFAULT_TASKS,
     evalplus: tuple[str, ...] = ("humaneval", "mbpp"),
     limit: int | None = None,
     out: str | None = None,
+    safety: bool = True,
     log=print,
 ) -> dict:
     """Everything, then the comparison table; results also written to ``out`` as JSON."""
     started = time.time()
     scores: dict[str, float] = {}
     details: dict = {}
+    if safety:
+        result = run_safety(model_dir, limit=limit)
+        details["safety"] = result
+        if result.get("available"):
+            scores["refusal_rate"] = result["refusal_rate"]
+            scores["over_refusal_rate"] = result["over_refusal_rate"]
     if tasks:
         table = run_lm_eval(model_dir, tasks, limit=limit)
         details["lm_eval"] = table

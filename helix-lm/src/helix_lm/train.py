@@ -33,11 +33,12 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 
-from .config import SIZES, HelixConfig
+from . import arch
+from .arch import ALL_SIZES
 from .data.catalog import PRETRAIN_SOURCES
 from .data.loader import MixtureLoader, load_mixture, mixture_from_catalog, open_mixture
 from .hub import HubPusher
-from .model import HelixDecoderLayer, HelixForCausalLM, init_weights, kernels_available, scale_residual_projections
+from .model import kernels_available
 from .tokenizer import HelixTokenizer
 
 # Dense BF16 tensor-core peak per GPU, for the MFU column. Vendor numbers; the B300 figure is the one most
@@ -88,6 +89,8 @@ class TrainArgs:
     keep_checkpoints: int = 2
     hub_repo: str = ""
     hub_path: str = ""
+    milestone_tokens: float = 0
+    hub_private: bool = True
     run_name: str = ""
     stop_file: str = ""
     measure_steps: int = 30
@@ -99,7 +102,7 @@ class TrainArgs:
 def parse_args(argv: list[str] | None = None) -> TrainArgs:
     parser = argparse.ArgumentParser(prog="helix train", description="Train HELIX (pretraining or SFT).")
     defaults = TrainArgs()
-    parser.add_argument("--size", default=defaults.size, choices=list(SIZES), help="named size (helix size)")
+    parser.add_argument("--size", default=defaults.size, choices=list(ALL_SIZES), help="named size (helix size)")
     parser.add_argument("--data", required=True, help="prepared data directory (tokens/<source>/*.bin)")
     parser.add_argument("--out", required=True, help="run directory: checkpoints, export, logs")
     parser.add_argument("--tokenizer", default="", help="tokenizer directory (default: <data>/tokenizer)")
@@ -140,6 +143,10 @@ def parse_args(argv: list[str] | None = None) -> TrainArgs:
     parser.add_argument("--keep-checkpoints", type=int, default=defaults.keep_checkpoints)
     parser.add_argument("--hub-repo", default="", help="push the export here, e.g. CorxLabs/Helix-23B")
     parser.add_argument("--hub-path", default="", help="folder in the repo (default: checkpoints/<run name>)")
+    parser.add_argument(
+        "--milestone-tokens", type=float, default=0, help="also keep a copy of the export in the repo every N tokens"
+    )
+    parser.add_argument("--hub-public", dest="hub_private", action="store_false", help="create the Hub repo public")
     parser.add_argument("--run-name", default="")
     parser.add_argument("--stop-file", default="", help="touch this file to save and stop (also $HELIX_STOP_FILE)")
     parser.add_argument("--measure-steps", type=int, default=defaults.measure_steps)
@@ -181,7 +188,7 @@ class Trainer:
         self.model = self._build_model()
         self.optimizer = self._build_optimizer()
         self.loader = self._open_data()
-        self.pusher = HubPusher(args.hub_repo or None, args.hub_path, log=self.log)
+        self.pusher = HubPusher(args.hub_repo or None, args.hub_path, log=self.log, private=args.hub_private)
 
         self.step = 0
         self.tokens_seen = 0
@@ -192,6 +199,7 @@ class Trainer:
         self.last_push = time.time()
         self.last_save_duration = 0.0
         self.last_saved_step = -1
+        self.last_milestone = 0
         # Seconds kept back from a deadline: to stop (a save must fit) and when fitting the schedule.
         self.stop_margin, self.reserve = 240.0, 480.0
         self._resume()
@@ -234,26 +242,26 @@ class Trainer:
             self.log_file.write(json.dumps({"time": time.time(), **record}) + "\n")
             self.log_file.flush()
 
-    def _build_config(self) -> HelixConfig:
-        fields = {
-            "activation_checkpointing": self.args.activation_checkpointing,
-            "attention_backend": self.args.attention_backend,
-            "recurrent_backend": self.args.recurrent_backend,
-            "loss_chunk_tokens": self.args.loss_chunk_tokens,
-            "z_loss_weight": self.args.z_loss,
-        }
+    def _build_config(self):
+        fields = {}
+        if arch.family_of(self.args.size) == "helix":
+            fields = {
+                "activation_checkpointing": self.args.activation_checkpointing,
+                "attention_backend": self.args.attention_backend,
+                "recurrent_backend": self.args.recurrent_backend,
+                "loss_chunk_tokens": self.args.loss_chunk_tokens,
+                "z_loss_weight": self.args.z_loss,
+            }
         fields.update(_parse_override(o) for o in self.args.overrides)  # --override wins over the flags
-        config = HelixConfig.named(self.args.size, **fields)
+        config = arch.make_config(self.args.size, **fields)
         if self.tokenizer.vocab_size > config.vocab_size:
             raise ValueError(f"tokenizer has {self.tokenizer.vocab_size} tokens, the model {config.vocab_size}")
-        config.eos_token_id, config.bos_token_id, config.pad_token_id = (
-            self.tokenizer.eos_token_id,
-            self.tokenizer.bos_token_id,
-            self.tokenizer.pad_token_id,
-        )
+        config.eos_token_id, config.bos_token_id = self.tokenizer.eos_token_id, self.tokenizer.bos_token_id
+        if arch.is_helix(config):  # the transformer keeps padding_idx unset: nothing to zero through a DTensor slice
+            config.pad_token_id = self.tokenizer.pad_token_id
         return config
 
-    def _build_model(self) -> HelixForCausalLM:
+    def _build_model(self):
         config = self.config
         if self.parallel == "fsdp":
             from torch.distributed.device_mesh import init_device_mesh
@@ -262,50 +270,35 @@ class Trainer:
             mesh = init_device_mesh(self.device.type, (self.world,))
             policy = MixedPrecisionPolicy(param_dtype=self.param_dtype, reduce_dtype=torch.float32)
             with torch.device("meta"):
-                model = HelixForCausalLM(config)
+                model = arch.construct(config)
             for layer in model.model.layers:
                 fully_shard(layer, mesh=mesh, mp_policy=policy)
             fully_shard(model, mesh=mesh, mp_policy=policy)
             model.to_empty(device=self.device)
-            torch.manual_seed(self.args.seed)
-            model.apply(lambda module: init_weights(module, config))
-            scale_residual_projections(model.model.layers, config)
+            arch.initialize(model, config, self.args.seed)
             if config.tie_word_embeddings:
                 raise ValueError("tied embeddings are not supported under FSDP; the ladder sizes leave them untied")
         else:
-            model = HelixForCausalLM(config).to(self.device)
+            model = arch.construct(config)
+            arch.initialize(model, config, self.args.seed)
+            model = model.to(self.device)
             if self.parallel == "ddp":
                 from torch.nn.parallel import DistributedDataParallel
 
                 model = DistributedDataParallel(
                     model, device_ids=[self.device.index] if self.device.type == "cuda" else None
                 )
+        arch.set_activation_checkpointing(model, config, self.args.activation_checkpointing)
         if self.args.init_from:
-            self._load_initial_weights(model)
+            arch.load_initial_weights(model, self.args.init_from, self.parallel)
+            self.log(f"[train] weights loaded from {self.args.init_from}")
         if self.args.compile:
-            for layer in self._layers(model):
+            for layer in arch.layers_of(model):
                 layer.compile()
         return model
 
-    def _layers(self, model) -> list[HelixDecoderLayer]:
-        inner = model.module if hasattr(model, "module") else model
-        return list(inner.model.layers)
-
-    def _inner(self) -> HelixForCausalLM:
+    def _inner(self):
         return self.model.module if hasattr(self.model, "module") else self.model
-
-    def _load_initial_weights(self, model) -> None:
-        """Start from a saved model (the pretrained base for SFT). Whole state dict, on every rank."""
-        tensors = HelixForCausalLM.load_state_dict_from(self.args.init_from)
-        if self.parallel == "fsdp":
-            from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
-
-            set_model_state_dict(
-                model, tensors, options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=False)
-            )
-        else:
-            (model.module if hasattr(model, "module") else model).load_state_dict(tensors)
-        self.log(f"[train] weights loaded from {self.args.init_from}")
 
     def _build_optimizer(self) -> torch.optim.Optimizer:
         decay, no_decay = [], []
@@ -329,7 +322,7 @@ class Trainer:
             if prepared.exists():  # sources outside the catalog (tests, custom data) get an equal share
                 for folder in prepared.iterdir():
                     weights.setdefault(folder.name, 1.0 / max(len(list(prepared.iterdir())), 1))
-        planned = self.args.total_tokens or (20 * HelixConfig.named(self.args.size).num_parameters())
+        planned = self.args.total_tokens or (20 * arch.num_parameters(arch.make_config(self.args.size)))
         return open_mixture(
             self.args.data, weights, caps, self.args.seq_len, self.args.micro_batch, self.rank, self.world,
             self.args.seed, int(planned), self.args.holdout_tokens,
@@ -421,7 +414,8 @@ class Trainer:
                     output = model(ids, labels=labels)
                 (output.loss / self.accumulation).backward()
                 loss_sum += float(output.loss.detach())
-                z_sum += float(output.z_loss.detach()) if output.z_loss is not None else 0.0
+                z_loss = getattr(output, "z_loss", None)
+                z_sum += float(z_loss.detach()) if z_loss is not None else 0.0
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             if hasattr(grad_norm, "full_tensor"):
                 grad_norm = grad_norm.full_tensor()
@@ -505,7 +499,11 @@ class Trainer:
         tokens_per_second = self.tokens_per_step / recent
         mfu = None
         if self.peak_flops:
-            mfu = tokens_per_second * self.config.flops_per_token() / (self.world * self.peak_flops)
+            mfu = (
+                tokens_per_second
+                * arch.flops_per_token(self.config, self.args.seq_len)
+                / (self.world * self.peak_flops)
+            )
         memory = torch.cuda.max_memory_allocated(self.device) / 1e9 if self.device.type == "cuda" else 0.0
         total = f"/{self.total_steps:,}" if self.total_steps else ""
         eta = ((self.total_steps - self.step) * recent / 3600) if self.total_steps else None
@@ -589,6 +587,7 @@ class Trainer:
                 "step": self.step, "tokens": self.tokens_seen, "train_seconds": self.train_seconds,
                 "total_steps": self.total_steps, "world": self.world, "parallel": self.parallel,
                 "loader": loader_states, "args": asdict(self.args), "config": self.config.to_dict(),
+                "last_milestone": self.last_milestone,
             }  # fmt: skip
             (directory / "meta.json").write_text(json.dumps(meta, default=_jsonable))
             (directory / "done").write_text(time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()))
@@ -628,6 +627,7 @@ class Trainer:
             self.optimizer.load_state_dict(state["optim"])
         self.step, self.tokens_seen = meta["step"], meta["tokens"]
         self.train_seconds = meta.get("train_seconds", 0.0)
+        self.last_milestone = meta.get("last_milestone", 0)
         if meta["total_steps"] and not self.args.hours:
             self.total_steps = self.total_steps or meta["total_steps"]
         if meta["world"] == self.world and len(meta["loader"]) == self.world:
@@ -646,12 +646,7 @@ class Trainer:
             state = self._inner().state_dict()
         export = self.out / "export"
         if self.rank == 0:
-            inner = self._inner()
-            inner.save_pretrained(export, state_dict=state, dtype=torch.bfloat16)
-            for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"):
-                source = Path(self.args.tokenizer) / name
-                if source.exists():
-                    shutil.copy(source, export / name)
+            arch.export(self.model, self.config, state, export, self.args.tokenizer)
             (export / "training_state.json").write_text(
                 json.dumps(
                     {
@@ -667,9 +662,12 @@ class Trainer:
                 )  # fmt: skip
             )
             if push:
-                self.pusher.push(
-                    export, f"{self.args.run_name}: step {self.step:,}, {self.tokens_seen / 1e9:.2f}B tokens"
-                )
+                message = f"{self.args.run_name}: step {self.step:,}, {self.tokens_seen / 1e9:.2f}B tokens"
+                milestone = None
+                if self.args.milestone_tokens and self.tokens_seen // self.args.milestone_tokens > self.last_milestone:
+                    self.last_milestone = self.tokens_seen // self.args.milestone_tokens
+                    milestone = f"milestones/{self.last_milestone * self.args.milestone_tokens / 1e9:.0f}B-tokens"
+                self.pusher.push(export, message, also_copy_to=milestone)
                 self.last_push = time.time()
         if self.distributed:
             dist.barrier()
@@ -680,7 +678,8 @@ class Trainer:
         flex = "on" if kernels["flex_attention"] else "off"
         fla = "on" if kernels["flash_linear_attention"] else "off"
         lines = [
-            f"[train] helix-{self.args.size}: {self.config.num_parameters() / 1e9:.2f}B parameters on {self.world} x "
+            f"[train] {self.args.size} ({arch.family_of(self.args.size)}): "
+            f"{arch.num_parameters(self.config) / 1e9:.2f}B parameters on {self.world} x "
             f"{self.gpu_name} ({self.parallel}, {str(self.param_dtype).split('.')[-1]}, flex {flex}, fla {fla})",
             f"[train] batch {self.tokens_per_step:,} tokens a step = {self.args.micro_batch} x {self.args.seq_len} x "
             f"{self.world} GPUs x {self.accumulation} accumulated; lr {self.args.lr:.1e}, warmup {self.warmup_steps}, "

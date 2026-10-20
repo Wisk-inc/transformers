@@ -229,7 +229,13 @@ def cmd_data(args: argparse.Namespace) -> None:
     elif args.action == "prepare":
         tokenizer = args.tokenizer or str(Path(args.data) / "tokenizer")
         prepared = prepare_all(
-            args.data, tokenizer, int(args.tokens), workers=args.workers, token=token, only=tuple(args.only)
+            args.data,
+            tokenizer,
+            int(args.tokens),
+            workers=args.workers,
+            token=token,
+            only=tuple(args.only),
+            min_free_gb=args.min_free_gb,
         )
         print(f"[data] prepared: {prepared}")
         print(describe_prepared(args.data))
@@ -264,7 +270,24 @@ def cmd_sft(args: argparse.Namespace) -> None:
 def cmd_eval(args: argparse.Namespace) -> None:
     from .evaluate import evaluate_model
 
-    evaluate_model(args.model, tasks=tuple(args.tasks), evalplus=tuple(args.evalplus), limit=args.limit, out=args.out)
+    evaluate_model(
+        args.model, tasks=tuple(args.tasks), evalplus=tuple(args.evalplus), limit=args.limit, out=args.out,
+        safety=args.safety,
+    )  # fmt: skip
+
+
+def cmd_jamaica(args: argparse.Namespace) -> None:
+    if args.action == "crawl":
+        from .data.jamaica_gov import crawl
+
+        crawl(args.data, hours=args.hours, max_pages_per_host=args.max_pages, delay=args.delay)
+        print("[crawl] CRAWLED", flush=True)
+    else:
+        from .data.synth import Teacher, synthesize
+
+        teacher = Teacher(args.teacher_url, args.model, api_key=os.environ.get("TEACHER_API_KEY", "none"))
+        synthesize(args.data, teacher, count=args.count, workers=args.workers, seed=args.seed)
+        print("[synth] SYNTHESIZED", flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -317,6 +340,12 @@ def main(argv: list[str] | None = None) -> int:
     data.add_argument("--tokens", type=float, default=460e9, help="tokens to prepare in total (the run's budget)")
     data.add_argument("--workers", type=int, default=max(4, (os.cpu_count() or 8) - 4))
     data.add_argument("--only", nargs="*", default=[], help="only these sources")
+    data.add_argument(
+        "--min-free-gb",
+        type=float,
+        default=300.0,
+        help="stop preparing when the volume has less free space than this (room for checkpoints)",
+    )
     data.set_defaults(func=cmd_data)
 
     train = sub.add_parser("train", help="pretrain (see `helix train --help`)")
@@ -340,7 +369,25 @@ def main(argv: list[str] | None = None) -> int:
     evaluate.add_argument("--evalplus", nargs="*", default=["humaneval", "mbpp"])
     evaluate.add_argument("--limit", type=int, default=None, help="problems per task (a quick look)")
     evaluate.add_argument("--out", default="", help="write the results here as JSON")
+    evaluate.add_argument(
+        "--no-safety", dest="safety", action="store_false", help="skip the refusal / over-refusal check"
+    )
     evaluate.set_defaults(func=cmd_eval)
+
+    jamaica = sub.add_parser(
+        "jamaica", help="the Jamaican data: crawl public records, synthesize code-switched dialogues"
+    )
+    jamaica.add_argument("action", choices=["crawl", "synth"])
+    jamaica.add_argument("--data", required=True)
+    jamaica.add_argument("--hours", type=float, default=6.0, help="crawl: wall-clock cap")
+    jamaica.add_argument("--max-pages", type=int, default=20_000, help="crawl: per host")
+    jamaica.add_argument("--delay", type=float, default=2.0, help="crawl: seconds between requests to one host")
+    jamaica.add_argument("--count", type=int, default=100_000, help="synth: dialogues to make")
+    jamaica.add_argument("--teacher-url", default="http://127.0.0.1:8000/v1", help="synth: OpenAI-compatible endpoint")
+    jamaica.add_argument("--model", default="Qwen/Qwen3-32B", help="synth: the teacher model name at the endpoint")
+    jamaica.add_argument("--workers", type=int, default=32)
+    jamaica.add_argument("--seed", type=int, default=0)
+    jamaica.set_defaults(func=cmd_jamaica)
 
     args = parser.parse_args(argv)
     if getattr(args, "train_args", None) and args.train_args[:1] == ["--"]:
