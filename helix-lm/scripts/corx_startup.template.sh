@@ -8,13 +8,15 @@
 #  dialogues synthesized -> 870B tokens of data prepared -> smoke run -> 1B pilot (HELIX against a transformer
 #  twin) -> the 34B run, a year long, checkpointed every 30 minutes, pushed to the Hub every 12 hours with a
 #  milestone copy every 100B tokens -> the coding-agent fine-tune with the safeguards -> benchmarks -> model card.
+#  2.0: trains with Muon (falls back to AdamW), and the pilot compares HELIX, the transformer twin and Anansi.
 #
 #  SETTINGS -- edit before pasting. Everything else is derived.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════
 CORX_HF_TOKEN="${CORX_HF_TOKEN:-}"      # your Hugging Face WRITE token, or leave empty and later: echo hf_xxx > /root/hf_token
 CORX_REPO="${CORX_REPO:-CorxLabs/CorX5.5}"   # the model repository: code, checkpoints, milestones, model card
 CORX_PUBLIC="${CORX_PUBLIC:-0}"          # 1 makes the repository public (private repos over 100 GB need a paid Hub plan)
-CORX_SIZE="${CORX_SIZE:-34b}"            # HELIX 34b (33.9B parameters). Others: 23b, 7b, 3b, 1b, t-34b, t-14b ...
+CORX_SIZE="${CORX_SIZE:-34b}"            # HELIX 34b (33.9B parameters). Others: a-24b / a-34b (Anansi, 2.0), 23b, t-34b ...
+CORX_OPTIMIZER="${CORX_OPTIMIZER:-muon}" # muon (about 2x AdamW's token efficiency; falls back to adamw if the smoke run fails) or adamw
 CORX_TOKENS="${CORX_TOKENS:-870e9}"      # tokens to train on; 870B is one year on 8 x B300 at ~35% utilization
 CORX_HOURS="${CORX_HOURS:-8760}"         # wall-clock budget for the main run (0 = until the tokens are done)
 CORX_SEQ_LEN="${CORX_SEQ_LEN:-8192}"     # pretraining context; the fine-tune runs at 32k
@@ -80,6 +82,7 @@ CORX_PILOT=$CORX_PILOT
 CORX_CRAWL_HOURS=$CORX_CRAWL_HOURS
 CORX_SYNTH_COUNT=$CORX_SYNTH_COUNT
 CORX_TEACHER=$CORX_TEACHER
+CORX_OPTIMIZER=$CORX_OPTIMIZER
 CORX_NODES=$CORX_NODES
 CORX_NODE_RANK=$CORX_NODE_RANK
 CORX_MASTER_ADDR=$CORX_MASTER_ADDR
@@ -241,14 +244,15 @@ wait_for_tokens() {  # wait_for_tokens BILLIONS: until that much is on disk, or 
 }
 
 # ---- training helper: OOM back-off and kernel fallbacks --------------------------------------------------
-RB="auto"; AB="auto"
+RB="auto"; AB="auto"; OPT="$CORX_OPTIMIZER"
 train() {  # train NAME SIZE MICRO_BATCH ARGS...
   local name="$1" size="$2" mb="$3" code; shift 3
   for attempt in 1 2 3 4 5 6; do
     [ -f "$STOP" ] && return 0
     log "train $name ($size): micro-batch $mb, attempt $attempt"
     torchrun $(torchrun_args) -m helix_lm.train --size "$size" --data "$DATA_DIR" --out "$DATA_DIR/runs/$name" \
-      --micro-batch "$mb" --seq-len "$CORX_SEQ_LEN" --recurrent-backend "$RB" --attention-backend "$AB" $PUBLIC_FLAG "$@" \
+      --micro-batch "$mb" --seq-len "$CORX_SEQ_LEN" --recurrent-backend "$RB" --attention-backend "$AB" \
+      --optimizer "$OPT" $PUBLIC_FLAG "$@" \
       2>&1 | tee -a "$LOGS/$name.log"
     code=${PIPESTATUS[0]}
     [ "$code" -eq 0 ] && return 0
@@ -284,17 +288,34 @@ PY
 wait_for_tokens 3
 if ! done_marker smoke "\[train\] finished"; then
   log "stage 6: smoke run (HELIX 350m, 25 minutes): kernels, FSDP, checkpoint, export, push"
-  train smoke 350m 32 --total-tokens 1e9 --hours 0.4 --global-batch-tokens 1048576 --lr 1e-3 --save-every-min 8 \
-    --push-every-min 10 --hub-repo "$CORX_REPO" --hub-path "runs/smoke" || { log "!! the smoke run failed; fix it, then: systemctl restart corx"; exit 1; }
+  SMOKE_ARGS=(--total-tokens 1e9 --hours 0.4 --global-batch-tokens 1048576 --lr 1e-3 --save-every-min 8
+    --push-every-min 10 --hub-repo "$CORX_REPO" --hub-path "runs/smoke")
+  if ! train smoke 350m 32 "${SMOKE_ARGS[@]}"; then
+    if [ "$OPT" = "muon" ]; then
+      log "!! the smoke run failed with Muon; trying AdamW (the 1.x optimizer) for the whole program"
+      OPT="adamw"; rm -rf "$DATA_DIR/runs/smoke"
+      train smoke 350m 32 "${SMOKE_ARGS[@]}" || { log "!! the smoke run failed; fix it, then: systemctl restart corx"; exit 1; }
+    else
+      log "!! the smoke run failed; fix it, then: systemctl restart corx"; exit 1
+    fi
+  fi
+  echo "$OPT" > "$LOGS/optimizer"
 fi
-if [ "$CORX_PILOT" = "1" ] && ! done_marker pilot-twin "\[train\] finished"; then
+[ -s "$LOGS/optimizer" ] && OPT=$(cat "$LOGS/optimizer")
+if [ "$CORX_PILOT" = "1" ] && ! done_marker pilot-anansi "\[train\] finished"; then
   wait_for_tokens 30
-  log "stage 6b: the 1B pilot -- HELIX against a transformer twin on the same tokens (about 4 hours)"
-  train pilot-helix 1b 16 --total-tokens 20e9 --hours 2 --global-batch-tokens 1048576 --lr 6e-4 --eval-every 300 \
-    --hub-repo "$CORX_REPO" --hub-path "runs/pilot-helix" || true
-  train pilot-twin t-1b 16 --total-tokens 20e9 --hours 2 --global-batch-tokens 1048576 --lr 6e-4 --eval-every 300 \
-    --hub-repo "$CORX_REPO" --hub-path "runs/pilot-twin" || true
-  log "PILOT: mean held-out loss HELIX $(pilot_loss pilot-helix) vs transformer $(pilot_loss pilot-twin) at equal tokens (within ~2%: healthy; clearly worse: read docs/CORX5.5.md before spending the year)"
+  log "stage 6b: the 1B pilot -- HELIX, the transformer twin and Anansi on the same tokens, plus HELIX with AdamW (about 8 hours)"
+  PILOT_ARGS=(--total-tokens 20e9 --hours 2 --global-batch-tokens 1048576 --lr 6e-4 --eval-every 300 --hub-repo "$CORX_REPO")
+  train pilot-helix 1b 16 "${PILOT_ARGS[@]}" --hub-path "runs/pilot-helix" || true
+  train pilot-twin t-1b 16 "${PILOT_ARGS[@]}" --hub-path "runs/pilot-twin" || true
+  train pilot-anansi a-1b 8 "${PILOT_ARGS[@]}" --hub-path "runs/pilot-anansi" || true
+  if [ "$OPT" = "muon" ]; then
+    SAVED_OPT="$OPT"; OPT="adamw"
+    train pilot-helix-adamw 1b 16 "${PILOT_ARGS[@]}" --hub-path "runs/pilot-helix-adamw" || true
+    OPT="$SAVED_OPT"
+  fi
+  log "PILOT: mean held-out loss at equal tokens -- HELIX $(pilot_loss pilot-helix), transformer $(pilot_loss pilot-twin), Anansi $(pilot_loss pilot-anansi), HELIX+AdamW $(pilot_loss pilot-helix-adamw)"
+  log "PILOT: HELIX within ~2% of the transformer: healthy. Anansi clearly ahead: consider CORX_SIZE=a-24b (same cost per token). Muon not ahead of AdamW: set CORX_OPTIMIZER=adamw. Read docs/CORX5.5.md and docs/ANANSI.md before spending the year."
 fi
 
 # ---- stage 7: CorX5.5 ---------------------------------------------------------------------------------------

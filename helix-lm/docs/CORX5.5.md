@@ -53,6 +53,20 @@ the code share moves to the ungated `github-code`: `bigcode/the-stack-dedup`, `b
 The preparation stops itself when the volume has less than 800 GB free (`--min-free-gb`), so checkpoints
 always have room; on a 10 TB volume this never triggers.
 
+## What 2.0 changes in the program
+
+helix-lm 2.0 (see `docs/ANANSI.md`) adds one setting and widens the pilot:
+
+- `CORX_OPTIMIZER` (default `muon`): the main run and the pilots train with Muon, which Moonshot measured at
+  about twice AdamW's token efficiency and Kimi K2 used at 1T parameters. If the smoke run fails under Muon on
+  the machine, the program switches the whole run to AdamW by itself and says so in the log.
+- The pilot (stage 6b) now trains four 1B models for two hours each on the same tokens: HELIX, the transformer
+  twin, Anansi (`a-1b`), and HELIX with AdamW. The `PILOT:` line prints all four held-out losses. Anansi clearly
+  ahead is the signal to consider `CORX_SIZE=a-24b` (Anansi at HELIX-34b's cost per token); Muon not ahead of
+  AdamW is the signal to set `CORX_OPTIMIZER=adamw`. The program never switches architecture by itself.
+
+Nothing else in the plan moves: the default remains HELIX `34b` on 870B tokens.
+
 ## The stages
 
 Everything is resumable: each stage leaves a marker (a file or a log line) and is skipped on the next start.

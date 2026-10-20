@@ -15,6 +15,7 @@ Command line entry point.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import sys
@@ -168,19 +169,105 @@ def cmd_recall(args: argparse.Namespace) -> None:
     run_recall(steps=args.steps, seq_len=args.seq_len, pairs=args.pairs, batch_size=args.batch_size, seed=args.seed)
 
 
+def cmd_anansi(args: argparse.Namespace) -> None:
+    """The 2.0 architecture: its sizes, a demo, or the toy task suite against HELIX and the transformer."""
+    from .anansi import AnansiConfig, AnansiForCausalLM, describe_anansi_sizes
+
+    print(_banner())
+    if args.action == "sizes":
+        print(describe_anansi_sizes())
+    elif args.action == "demo":
+        torch.manual_seed(args.seed)
+        config = AnansiConfig.named(args.size, vocab_size=args.vocab_size, loss_chunk_tokens=0, ngram_memory_size=4096)
+        model = AnansiForCausalLM(config).eval()
+        ids = torch.randint(0, args.vocab_size, (1, 32))
+        logits, used = model.think(ids, max_loops=config.max_loops, kl_threshold=args.kl)
+        print(f"{args.size}: {model.num_parameters():,} parameters, effective depth {config.effective_depth:.0f}")
+        print(f"adaptive depth on a random prompt: {used} of {config.max_loops} passes (kl threshold {args.kl})")
+        out = model.generate(ids[:, :8], max_new_tokens=8, temperature=0)
+        print(
+            f"generated {out.shape[1] - 8} tokens from the cache; "
+            f"decoding runs the core {config.loops_for_inference()} times per token"
+        )
+    else:
+        from .tasks import FAMILIES, TASKS, compare, describe_results
+
+        tasks = args.tasks or list(TASKS)
+        families = args.families or list(FAMILIES)
+        results = compare(tasks, families, steps=args.steps, batch_size=args.batch_size, lr=args.lr, seed=args.seed)
+        print()
+        print(describe_results(results))
+        if args.out:
+            Path(args.out).write_text(json.dumps(results, indent=1))
+            print(f"written to {args.out}")
+
+
+def cmd_grow(args: argparse.Namespace) -> None:
+    from .growth import grow_export
+
+    out = grow_export(args.source, args.target, args.out, mode=args.mode)
+    print(
+        f"[grow] {args.source} -> {args.target} ({args.mode}) written to {out}; "
+        f"continue with: helix train ... --init-from {out}"
+    )
+
+
+def cmd_audio(args: argparse.Namespace) -> None:
+    from .audio.data import describe_audio_sources
+
+    print(_banner())
+    if args.action == "sources":
+        print(describe_audio_sources(commercial_only=args.commercial))
+    else:
+        from .audio import AudioCodec, CodecConfig, codec_losses
+        from .audio.data import synthetic_voice
+
+        torch.manual_seed(args.seed)
+        config = CodecConfig(
+            sample_rate=8000, dim=32, channels=8, strides=(2, 4, 5, 8), num_codebooks=4, codebook_size=64, code_dim=4
+        )
+        codec = AudioCodec(config)
+        wave = synthetic_voice(0.4, 8000)[None]
+        optimizer = torch.optim.Adam(codec.parameters(), lr=3e-3)
+        for step in range(args.steps):
+            terms = codec_losses(codec(wave), wave, config)
+            optimizer.zero_grad()
+            terms["total"].backward()
+            optimizer.step()
+            if (step + 1) % max(1, args.steps // 5) == 0:
+                print(
+                    f"  step {step + 1:4}  mel {terms['mel'].item():.3f}  time {terms['time'].item():.4f}  "
+                    f"commit {terms['commitment'].item():.4f}"
+                )
+        codes = codec.eval().encode(wave)
+        print(
+            f"codec at {config.frame_rate:.1f} Hz: {codes.shape[1]} codebooks x {codes.shape[2]} frames "
+            f"for {wave.shape[-1] / 8000:.1f} s; "
+            f"semantic codebook usage {codec.quantizer.semantic.usage():.0%}"
+        )
+
+
 def cmd_size(args: argparse.Namespace) -> None:
     print(_banner())
     print(
         "\nThe ladder. Parameters from the shapes (65,536-token vocabulary); 'tokens x20' is the Chinchilla budget.\n"
     )
     print(describe_sizes())
+    from .anansi import describe_anansi_sizes
+
+    print("\nAnansi (2.0): 'active' counts the looped core once per pass; TFLOP/tok at 8k context.\n")
+    print(describe_anansi_sizes())
     if args.size:
-        config = HelixConfig.named(args.size)
-        flops = config.flops_per_token()
-        print(f"\n{args.size}: {config.num_parameters() / 1e9:.2f}B parameters, {flops:.3e} training FLOPs a token")
+        from . import arch
+
+        config = arch.make_config(args.size)
+        flops = arch.flops_per_token(config, 8192)
+        print(
+            f"\n{args.size}: {arch.num_parameters(config) / 1e9:.2f}B parameters, {flops:.3e} training FLOPs a token"
+        )
         for gpus, peak, name in ((8, 2.25e15, "B300"), (8, 9.89e14, "H100"), (1, 2.25e15, "B300")):
             for mfu in (0.35, 0.45):
-                tokens = 20 * config.num_parameters()
+                tokens = 20 * arch.num_parameters(config)
                 hours = tokens * flops / (gpus * peak * mfu) / 3600
                 print(
                     f"  {gpus} x {name} at {mfu:.0%} MFU: {tokens / 1e9:.0f}B tokens in {hours:,.0f} h "
@@ -388,6 +475,36 @@ def main(argv: list[str] | None = None) -> int:
     jamaica.add_argument("--workers", type=int, default=32)
     jamaica.add_argument("--seed", type=int, default=0)
     jamaica.set_defaults(func=cmd_jamaica)
+
+    anansi = sub.add_parser(
+        "anansi", help="the 2.0 architecture: sizes, demo, toy task suite against HELIX / transformer"
+    )
+    anansi.add_argument("action", choices=["sizes", "demo", "bench"])
+    anansi.add_argument("--size", default="a-20m")
+    anansi.add_argument("--vocab-size", type=int, default=512)
+    anansi.add_argument("--kl", type=float, default=5e-4, help="demo: adaptive-depth exit threshold")
+    anansi.add_argument("--tasks", nargs="*", default=[], help="bench: recall parity multihop copynoise")
+    anansi.add_argument("--families", nargs="*", default=[], help="bench: transformer helix anansi")
+    anansi.add_argument("--steps", type=int, default=300)
+    anansi.add_argument("--batch-size", type=int, default=32)
+    anansi.add_argument("--lr", type=float, default=2e-3)
+    anansi.add_argument("--seed", type=int, default=0)
+    anansi.add_argument("--out", default="", help="bench: write the results as JSON")
+    anansi.set_defaults(func=cmd_anansi)
+
+    grow = sub.add_parser("grow", help="grow a saved model into a bigger named size (continue with --init-from)")
+    grow.add_argument("source", help="an export directory")
+    grow.add_argument("target", help="the target size name (same width and heads)")
+    grow.add_argument("out", help="where to write the grown export")
+    grow.add_argument("--mode", choices=["stack", "identity"], default="stack")
+    grow.set_defaults(func=cmd_grow)
+
+    audio = sub.add_parser("audio", help="the audio stack: dataset catalogue, a toy codec demo")
+    audio.add_argument("action", choices=["sources", "codec-demo"])
+    audio.add_argument("--commercial", action="store_true", help="sources: only licences a product may use")
+    audio.add_argument("--steps", type=int, default=60)
+    audio.add_argument("--seed", type=int, default=0)
+    audio.set_defaults(func=cmd_audio)
 
     args = parser.parse_args(argv)
     if getattr(args, "train_args", None) and args.train_args[:1] == ["--"]:

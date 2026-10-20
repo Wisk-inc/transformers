@@ -15,6 +15,7 @@ matrix-valued state, and a hierarchical landmark index that can reach an exact t
 Made by Nathan.
 """
 
+from .anansi import ANANSI_SIZES, AnansiConfig, AnansiForCausalLM, describe_anansi_sizes
 from .cache import HelixCache, HelixLayerCache
 from .config import SIZES, HelixConfig, describe_sizes
 from .model import (
@@ -29,10 +30,13 @@ from .model import (
 )
 from .tokenizer import HelixTokenizer, train_tokenizer
 
-__version__ = "1.1.0"
+__version__ = "2.0.0"
 __author__ = "Nathan"
 
 __all__ = [
+    "ANANSI_SIZES",
+    "AnansiConfig",
+    "AnansiForCausalLM",
     "HelixBraid",
     "HelixCache",
     "HelixConfig",
@@ -46,6 +50,7 @@ __all__ = [
     "HelixTokenizer",
     "SIZES",
     "__version__",
+    "describe_anansi_sizes",
     "describe_sizes",
     "kernels_available",
     "train_tokenizer",

@@ -124,6 +124,9 @@ class MixtureLoader:
         self.drawn = dict.fromkeys(self.names, 0)
         self.step = 0
         self.generator = np.random.default_rng([seed, rank])
+        self.prior = dict(self.weights)
+        self.max_epochs, self.total_tokens = dict(max_epochs or {}), total_tokens
+        self.last_eval: dict[str, float] = {}
 
     def resolve_weights(self, weights, max_epochs, total_tokens, world_size) -> dict[str, float]:
         """Lower the weight of any source that would exceed its epoch cap; hand the slack to the rest."""
@@ -155,6 +158,39 @@ class MixtureLoader:
             weights[name] = remaining * free[name] / free_total if free_total else 0.0
         weights.update(capped)
         return weights
+
+    def reweight(self, eval_losses: dict[str, float], strength: float = 1.0) -> str:
+        """
+        Online mixture reweighting from learning progress (the idea of ADO / Aioli, in its simplest form): a
+        source whose held-out loss fell faster than average since the last evaluation gets more of the next
+        batches, one whose loss stalled gets less. New weight ``w_i = prior_i * (progress_i / mean progress) ^
+        strength``, clipped to ``[0.5, 2] x prior`` so no source is starved or allowed to dominate, then the
+        epoch caps are re-applied. The first call only records the losses. Returns a short description of the
+        change, empty when nothing changed.
+        """
+        current = {n: float(v) for n, v in eval_losses.items() if n in self.names}
+        if not self.last_eval:
+            self.last_eval = current
+            return ""
+        progress = {n: max(self.last_eval.get(n, v) - v, 0.0) for n, v in current.items()}
+        self.last_eval = current
+        mean = sum(progress.values()) / max(len(progress), 1)
+        if mean <= 0:
+            return ""
+        proposed = {}
+        for n in self.names:
+            score = max(0.25, min(4.0, progress.get(n, mean) / mean)) ** strength
+            proposed[n] = min(2.0 * self.prior[n], max(0.5 * self.prior[n], self.prior[n] * score))
+        self.set_weights(proposed)
+        total = sum(self.weights.values())
+        return ", ".join(f"{n} {self.weights[n] / total:.1%}" for n in self.names)
+
+    def set_weights(self, weights: dict[str, float]) -> None:
+        self.weights = self.resolve_weights(
+            {n: weights[n] for n in self.names}, self.max_epochs, self.total_tokens, self.world_size
+        )
+        self.probabilities = np.array([self.weights[n] for n in self.names], dtype=np.float64)
+        self.probabilities /= self.probabilities.sum()
 
     def expected_epochs(self, total_tokens: int) -> dict[str, float]:
         """How many passes over each source a run of ``total_tokens`` makes with the resolved weights."""
@@ -211,6 +247,8 @@ class MixtureLoader:
             "step": self.step,
             "generator": self.generator.bit_generator.state,
             "names": list(self.names),
+            "weights": dict(self.weights),
+            "last_eval": dict(self.last_eval),
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -230,6 +268,10 @@ class MixtureLoader:
         self.drawn.update({n: d for n, d in state["drawn"].items() if n in self.names})
         self.step = state["step"]
         self.generator.bit_generator.state = state["generator"]
+        self.last_eval = dict(state.get("last_eval", {}))
+        saved = state.get("weights")
+        if saved and all(n in saved for n in self.names):
+            self.set_weights({n: saved[n] for n in self.names})
 
     def describe(self, total_tokens: int | None = None) -> str:
         lines = [f"{'source':18} {'tokens':>10} {'weight':>7}" + (f" {'epochs':>7}" if total_tokens else "")]

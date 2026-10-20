@@ -1431,6 +1431,10 @@ class HelixForCausalLM(nn.Module):
         """Training FLOPs per token, estimated from the configuration (see :meth:`HelixConfig.flops_per_token`)."""
         return self.config.flops_per_token()
 
+    def new_cache(self) -> HelixCache:
+        """An empty decoding cache for this model (subclasses bring their own kind)."""
+        return HelixCache(self.config)
+
     @torch.no_grad()
     def generate(
         self,
@@ -1452,7 +1456,7 @@ class HelixForCausalLM(nn.Module):
             eos_token_id: stop early once every sequence has produced this token.
         """
         self.eval()
-        cache = HelixCache(self.config)
+        cache = self.new_cache()
         output = input_ids
         step_input, step_mask = input_ids, attention_mask
         finished = torch.zeros(input_ids.shape[0], dtype=torch.bool, device=input_ids.device)

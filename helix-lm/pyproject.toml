@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "helix-lm"
-version = "1.1.0"
-description = "HELIX: a linear-scaling sequence architecture with exact long-range recall, and the engine that trains Helix"
+version = "2.0.0"
+description = "HELIX and ANANSI: linear-scaling sequence architectures with exact long-range recall, and the engine that trains them (Muon, muP, growth, audio)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"

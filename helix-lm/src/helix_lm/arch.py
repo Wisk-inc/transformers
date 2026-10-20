@@ -3,10 +3,11 @@
 The model families the engine trains.
 
 * ``helix`` -- :class:`helix_lm.model.HelixForCausalLM`, the three-strand architecture.
+* ``anansi`` -- :class:`helix_lm.anansi.AnansiForCausalLM`, the strands in the looped, hyper-connected body (2.0).
 * ``transformer`` -- a dense decoder on the Qwen3 layout through ``transformers``: RMSNorm, rotary, grouped-query
   attention with per-head QK normalization (what keeps 30B+ runs from scratch stable at a high learning rate),
   SwiGLU, no biases. Every serving stack loads it: vLLM, SGLang, llama.cpp, ``transformers`` itself.
-  **CorX5.5 is this family at ``t-34b``.**
+  The pilot's control; ``t-34b`` is the fallback if HELIX disappoints.
 
 Both are built the same way: on the meta device, sharded with FSDP2 block by block, materialized, then
 initialized in place -- so a 34B model never exists whole on one GPU. The trainer only talks to this module.
@@ -21,6 +22,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
+from .anansi import ANANSI_SIZES, AnansiConfig
 from .config import SIZES, HelixConfig
 
 # Dense transformer sizes: hidden, MLP, layers, query heads, key/value heads; head_dim is 128 throughout. The
@@ -38,10 +40,12 @@ _T_ROWS = {
 }
 TRANSFORMER_SIZES: dict[str, dict] = {name: dict(zip(_T_COLUMNS, row, strict=True)) for name, row in _T_ROWS.items()}
 
-ALL_SIZES: tuple[str, ...] = tuple(SIZES) + tuple(TRANSFORMER_SIZES)
+ALL_SIZES: tuple[str, ...] = tuple(SIZES) + tuple(TRANSFORMER_SIZES) + tuple(ANANSI_SIZES)
 
 
 def family_of(size: str) -> str:
+    if size in ANANSI_SIZES:
+        return "anansi"
     if size in TRANSFORMER_SIZES:
         return "transformer"
     if size in SIZES:
@@ -50,13 +54,21 @@ def family_of(size: str) -> str:
 
 
 def is_helix(config) -> bool:
+    """HELIX or Anansi: both save, load and export the HELIX way."""
     return isinstance(config, HelixConfig)
+
+
+def is_anansi(config) -> bool:
+    return isinstance(config, AnansiConfig)
 
 
 # ---------------------------------------------------------------------------------------- configs --
 def make_config(size: str, vocab_size: int = 65536, **overrides):
     """A configuration for a named size: :class:`HelixConfig`, or a ``Qwen3Config`` for the transformer."""
-    if family_of(size) == "helix":
+    family = family_of(size)
+    if family == "anansi":
+        return AnansiConfig.named(size, **overrides)
+    if family == "helix":
         return HelixConfig.named(size, **overrides)
     from transformers import Qwen3Config
 
@@ -100,6 +112,8 @@ def num_parameters(config, embeddings: bool = True) -> int:
 
 def flops_per_token(config, seq_len: int) -> float:
     """Training FLOPs per token: ``6N`` plus attention (``12 L H hd s`` for a dense causal window)."""
+    if is_anansi(config):
+        return config.flops_per_token(seq_len)
     if is_helix(config):
         return config.flops_per_token()
     weights = 6.0 * num_parameters(config, embeddings=False) + 6.0 * config.vocab_size * config.hidden_size
@@ -132,6 +146,10 @@ def describe_transformer_sizes() -> str:
 # ------------------------------------------------------------------------------------------ models --
 def construct(config) -> nn.Module:
     """The module for a config, on the current default device (call under ``torch.device("meta")``)."""
+    if is_anansi(config):
+        from .anansi import AnansiForCausalLM
+
+        return AnansiForCausalLM(config)
     if is_helix(config):
         from .model import HelixForCausalLM
 
@@ -154,6 +172,12 @@ def initialize(model: nn.Module, config, seed: int) -> None:
     ``std / sqrt(2 * layers)`` in both families.
     """
     torch.manual_seed(seed)
+    if is_anansi(config):
+        from .anansi.model import anansi_init_weights, scale_residual_projections
+
+        model.apply(lambda module: anansi_init_weights(module, config))
+        scale_residual_projections(model, config)
+        return
     if is_helix(config):
         from .model import init_weights, scale_residual_projections
 

@@ -7,7 +7,7 @@ Training HELIX on one machine with any number of GPUs.
 
 What it does, in order: builds the model on the meta device and shards it with FSDP2 (bf16 parameters and
 gradients, fp32 master weights and reductions, every block its own shard group); opens the prepared data
-as a weighted mixture; resumes from the newest checkpoint if there is one; trains with fused AdamW on a
+as a weighted mixture; resumes from the newest checkpoint if there is one; trains with fused AdamW (or Muon) on a
 warmup-stable-decay schedule whose length comes from ``--total-tokens`` or, with ``--hours``, from the
 measured throughput so the decay ends exactly when the money does; saves a sharded checkpoint every few
 minutes and a bf16 safetensors export it pushes to the Hub; reports loss, learning rate, tokens a second,
@@ -39,6 +39,8 @@ from .data.catalog import PRETRAIN_SOURCES
 from .data.loader import MixtureLoader, load_mixture, mixture_from_catalog, open_mixture
 from .hub import HubPusher
 from .model import kernels_available
+from .optim import build_optimizer, mup_plan, unwrap_optimizers
+from .optim.mup import apply_init
 from .tokenizer import HelixTokenizer
 
 # Dense BF16 tensor-core peak per GPU, for the MFU column. Vendor numbers; the B300 figure is the one most
@@ -96,6 +98,11 @@ class TrainArgs:
     measure_steps: int = 30
     holdout_tokens: int = 2_000_000
     init_from: str = ""
+    optimizer: str = "adamw"
+    muon_momentum: float = 0.95
+    mup: bool = False
+    mup_base_width: int = 256
+    reweight_strength: float = 0.0
     overrides: list[str] = field(default_factory=list)
 
 
@@ -152,6 +159,23 @@ def parse_args(argv: list[str] | None = None) -> TrainArgs:
     parser.add_argument("--measure-steps", type=int, default=defaults.measure_steps)
     parser.add_argument("--holdout-tokens", type=int, default=defaults.holdout_tokens)
     parser.add_argument("--init-from", default="", help="start from this saved model (SFT, continued pretraining)")
+    parser.add_argument(
+        "--optimizer",
+        choices=["adamw", "muon"],
+        default=defaults.optimizer,
+        help="muon: orthogonalized momentum on the block matrices, AdamW on the rest",
+    )
+    parser.add_argument("--muon-momentum", type=float, default=defaults.muon_momentum)
+    parser.add_argument(
+        "--mup", action="store_true", help="muP init and per-width learning rates (transfer the pilot's lr)"
+    )
+    parser.add_argument("--mup-base-width", type=int, default=defaults.mup_base_width)
+    parser.add_argument(
+        "--reweight-strength",
+        type=float,
+        default=defaults.reweight_strength,
+        help="online data-mixture reweighting from per-source held-out progress (0 = off)",
+    )
     parser.add_argument("--override", dest="overrides", action="append", default=[], help="config field=value")
     namespace = parser.parse_args(argv)
     args = TrainArgs(**vars(namespace))
@@ -244,7 +268,7 @@ class Trainer:
 
     def _build_config(self):
         fields = {}
-        if arch.family_of(self.args.size) == "helix":
+        if arch.family_of(self.args.size) in ("helix", "anansi"):
             fields = {
                 "activation_checkpointing": self.args.activation_checkpointing,
                 "attention_backend": self.args.attention_backend,
@@ -259,6 +283,8 @@ class Trainer:
         config.eos_token_id, config.bos_token_id = self.tokenizer.eos_token_id, self.tokenizer.bos_token_id
         if arch.is_helix(config):  # the transformer keeps padding_idx unset: nothing to zero through a DTensor slice
             config.pad_token_id = self.tokenizer.pad_token_id
+        if self.args.mup and hasattr(config, "output_multiplier"):
+            config.output_multiplier = self.args.mup_base_width / config.hidden_size
         return config
 
     def _build_model(self):
@@ -288,6 +314,9 @@ class Trainer:
                 model = DistributedDataParallel(
                     model, device_ids=[self.device.index] if self.device.type == "cuda" else None
                 )
+        self.mup = None
+        if self.args.mup:
+            self.mup = self._apply_mup(model, config)
         arch.set_activation_checkpointing(model, config, self.args.activation_checkpointing)
         if self.args.init_from:
             arch.load_initial_weights(model, self.args.init_from, self.parallel)
@@ -297,20 +326,34 @@ class Trainer:
                 layer.compile()
         return model
 
+    def _apply_mup(self, model, config):
+        """muP: width-scaled init for the matrices (the residual writers keep their depth scaling) and the lr plan."""
+        from .optim.muon import partition_parameters
+
+        muon_matrices = {id(p) for p in partition_parameters(model)[0]} if self.args.optimizer == "muon" else set()
+        plan = mup_plan(model, config.hidden_size, self.args.mup_base_width, config.initializer_range, muon_matrices)
+        writers = ("o_proj.weight", "out_proj.weight", "down_proj.weight", "w_down")
+        inner = model.module if hasattr(model, "module") else model
+        skip = {id(p) for n, p in inner.named_parameters() if n.endswith(writers)}
+        apply_init(model, plan, skip=skip)
+        self.log(f"[train] {plan.describe()}")
+        return plan
+
     def _inner(self):
         return self.model.module if hasattr(self.model, "module") else self.model
 
-    def _build_optimizer(self) -> torch.optim.Optimizer:
-        decay, no_decay = [], []
-        for param in self.model.parameters():
-            (decay if param.dim() >= 2 else no_decay).append(param)
-        groups = [{"params": decay, "weight_decay": self.args.weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
-        return torch.optim.AdamW(
-            groups,
+    def _build_optimizer(self):
+        plan = getattr(self, "mup", None)
+        return build_optimizer(
+            self.model,
+            self.args.optimizer,
             lr=self.args.lr,
+            weight_decay=self.args.weight_decay,
             betas=(self.args.beta1, self.args.beta2),
-            eps=1e-8,
+            momentum=self.args.muon_momentum,
             fused=self.device.type == "cuda",
+            lr_multipliers=plan.lr_multiplier if plan else None,
+            wd_multipliers=plan.wd_multiplier if plan else None,
         )
 
     def _open_data(self) -> MixtureLoader:
@@ -365,6 +408,11 @@ class Trainer:
         progress = min(1.0, (step - decay_start) / max(1, self.total_steps - decay_start))
         return floor + (peak - floor) * (1 - math.sqrt(progress))
 
+    def _in_cooldown(self) -> bool:
+        if self.total_steps is None:
+            return False
+        return self.step >= int(self.total_steps * (1 - self.args.decay_fraction))
+
     def _fit_steps_to_deadline(self) -> None:
         """With ``--hours``: pick the total so that training, with its decay, ends at the deadline."""
         if not self.args.hours or len(self.step_times) < self.args.measure_steps:
@@ -400,8 +448,9 @@ class Trainer:
             step_started = time.perf_counter()
             lr = self.lr_at(self.step)
             for group in optimizer.param_groups:
-                group["lr"] = lr
-            loss_sum = z_sum = 0.0
+                group["lr"] = lr * group.get("lr_mult", 1.0)
+            loss_sum = z_sum = mtp_sum = 0.0
+            loops = 0
             for micro in range(self.accumulation):
                 ids, _, mask = loader.next_batch()
                 ids = ids.to(self.device, non_blocking=True)
@@ -416,6 +465,9 @@ class Trainer:
                 loss_sum += float(output.loss.detach())
                 z_loss = getattr(output, "z_loss", None)
                 z_sum += float(z_loss.detach()) if z_loss is not None else 0.0
+                mtp = getattr(output, "mtp_loss", None)
+                mtp_sum += float(mtp.detach()) if mtp is not None else 0.0
+                loops = getattr(output, "loops", 0) or loops
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             if hasattr(grad_norm, "full_tensor"):
                 grad_norm = grad_norm.full_tensor()
@@ -431,9 +483,18 @@ class Trainer:
 
             loss = self._mean_across_ranks(loss_sum / self.accumulation)
             if self.step % args.log_every == 0 or self.step == 1:
-                self._log_step(loss, z_sum / self.accumulation, lr, float(grad_norm), elapsed)
+                self._log_step(
+                    loss, z_sum / self.accumulation, lr, float(grad_norm), elapsed, mtp_sum / self.accumulation, loops
+                )
             if args.eval_every and self.step % args.eval_every == 0:
-                self.evaluate()
+                results = self.evaluate()
+                if args.reweight_strength > 0 and results and not self._in_cooldown():
+                    change = loader.reweight(results, args.reweight_strength)
+                    if change:
+                        self.log(
+                            "[data] mixture reweighted: " + change,
+                            {"event": "reweight", "step": self.step, "weights": loader.weights},
+                        )
             if self._time_to_save():
                 self.save_checkpoint()
                 if self.pusher.enabled and time.time() - self.last_push >= args.push_every_min * 60:
@@ -494,7 +555,9 @@ class Trainer:
             due = bool(int(flag))
         return due
 
-    def _log_step(self, loss: float, z_loss: float, lr: float, grad_norm: float, elapsed: float) -> None:
+    def _log_step(
+        self, loss: float, z_loss: float, lr: float, grad_norm: float, elapsed: float, mtp: float = 0.0, loops: int = 0
+    ) -> None:
         recent = statistics.median(self.step_times[-20:])
         tokens_per_second = self.tokens_per_step / recent
         mfu = None
@@ -510,6 +573,8 @@ class Trainer:
         self.log(
             f"[train] step {self.step:,}{total}  loss {loss:.4f}  z {z_loss:.3f}  lr {lr:.2e}  gnorm {grad_norm:.2f}  "
             f"tok/s {tokens_per_second / 1e6:.2f}M"
+            + (f"  mtp {mtp:.3f}" if mtp else "")
+            + (f"  loops {loops}" if loops else "")
             + (f"  mfu {mfu:.0%}" if mfu is not None else "")
             + (f"  mem {memory:.0f}G" if memory else "")
             + f"  train {self.train_seconds / 3600:.2f}h"
@@ -576,7 +641,7 @@ class Trainer:
             import torch.distributed.checkpoint as dcp
             from torch.distributed.checkpoint.state_dict import get_state_dict
 
-            model_state, optim_state = get_state_dict(self.model, self.optimizer)
+            model_state, optim_state = get_state_dict(self.model, unwrap_optimizers(self.optimizer))
             dcp.save({"model": model_state, "optim": optim_state}, checkpoint_id=str(directory / "dcp"))
         elif self.rank == 0:
             torch.save(
@@ -618,9 +683,14 @@ class Trainer:
             import torch.distributed.checkpoint as dcp
             from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
 
-            model_state, optim_state = get_state_dict(self.model, self.optimizer)
+            model_state, optim_state = get_state_dict(self.model, unwrap_optimizers(self.optimizer))
             dcp.load({"model": model_state, "optim": optim_state}, checkpoint_id=str(directory / "dcp"))
-            set_state_dict(self.model, self.optimizer, model_state_dict=model_state, optim_state_dict=optim_state)
+            set_state_dict(
+                self.model,
+                unwrap_optimizers(self.optimizer),
+                model_state_dict=model_state,
+                optim_state_dict=optim_state,
+            )
         else:
             state = torch.load(directory / "state.pt", map_location=self.device, weights_only=False)
             self._inner().load_state_dict(state["model"])
@@ -682,7 +752,8 @@ class Trainer:
             f"{arch.num_parameters(self.config) / 1e9:.2f}B parameters on {self.world} x "
             f"{self.gpu_name} ({self.parallel}, {str(self.param_dtype).split('.')[-1]}, flex {flex}, fla {fla})",
             f"[train] batch {self.tokens_per_step:,} tokens a step = {self.args.micro_batch} x {self.args.seq_len} x "
-            f"{self.world} GPUs x {self.accumulation} accumulated; lr {self.args.lr:.1e}, warmup {self.warmup_steps}, "
+            f"{self.world} GPUs x {self.accumulation} accumulated; {self.args.optimizer}"
+            f"{' + muP' if self.args.mup else ''}, lr {self.args.lr:.1e}, warmup {self.warmup_steps}, "
             f"decay over the last {self.args.decay_fraction:.0%}",
             "[train] planned: "
             + (

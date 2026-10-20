@@ -149,6 +149,30 @@ HelixConfig(
 )
 ```
 
+## 2.0: ANANSI, faster learning, audio
+
+2.0 is a major upgrade documented in [`docs/ANANSI.md`](docs/ANANSI.md), with the evidence behind every piece:
+
+* **faster learning** in the trainer: `--optimizer muon` (orthogonalized momentum, about 2x AdamW's token
+  efficiency in Moonshot's scans, Kimi K2's optimizer), `--mup` (learning-rate transfer from a pilot),
+  multi-token prediction, `helix grow` (train small, stack, continue), `--reweight-strength` (online data-mixture
+  reweighting from held-out progress);
+* **ANANSI** (`helix_lm.anansi`, sizes `a-350m` .. `a-34b`): the HELIX strands in a new body -- four residual
+  streams mixed by manifold-constrained hyper-connections, a looped reasoning core with adaptive depth at
+  inference (`model.think`), gated attention, a hashed n-gram memory, sandwich norms, a recurrence-only prelude,
+  an optional fine-grained mixture of experts, and a multi-token predictor;
+* **audio** (`helix_lm.audio`): a raw-waveform codec at 25 frames a second with a split residual quantizer, a
+  speaker encoder for zero-shot voice cloning, score streams for singing, and an omni wrapper that interleaves
+  text tokens and audio frames in one Anansi sequence;
+* **a toy task suite** (`helix anansi bench`): recall, parity, multi-hop, copy-with-noise for the three families.
+
+```bash
+helix anansi sizes && helix anansi demo
+helix anansi bench --steps 300
+helix train --size a-1b --optimizer muon --mup --reweight-strength 1 --data /data/corx --out /data/corx/runs/a-1b
+helix audio sources --commercial
+```
+
 ## Training Helix (1.1): CorX5.5
 
 1.0 added the engine that turns the architecture into a model and the ladder of named sizes; 1.1 is the
@@ -172,6 +196,11 @@ helix jamaica synth --data /data/corx --count 300000      # SJE/Patois code-swit
 | fused strand L | `model.py` (`attention_backend="flex"`) | each head's sliding window as one block-sparse FlexAttention kernel, no key copies; equal to the reference staircase |
 | Triton strand R | `model.py` (`recurrent_backend="fla"`) | `flash-linear-attention`'s chunked gated delta rule, the reference as fallback |
 | sizes | `config.py` (`HelixConfig.named`) | 350m / 1b / 3b / 7b / 23b / 34b with analytic parameter and FLOP counts |
+| Anansi | `anansi/` | the 2.0 network: hyper-connected streams, looped core, gated attention, n-gram memory, MoE option, MTP |
+| optimizers | `optim/` | Muon + AdamW split, muP plans |
+| growth | `growth.py` | identity and stack growth of exports |
+| audio | `audio/` | codec, speaker encoder, singing streams, omni wrapper, dataset catalogue |
+| tasks | `tasks.py` | the toy suite |
 | transformer twins | `arch.py` | `t-350m` .. `t-34b` on the Qwen3 layout (QK-norm), same trainer, exported as `Qwen3ForCausalLM`; the pilot's control |
 | tokenizer | `tokenizer.py` | the CorxLabs 65,536-token byte-level BPE (uint16 storage), chat and tool-call format |
 | data | `data/` | verified Hub catalog (36 pretraining sources: web, code, execution traces, commits and issues, math, legal, health, finance, education, Patois), row renderers, streaming prepare to shards with a free-space guard, the Jamaica and Caribbean filters, identity documents, a deterministic resumable mixture loader |

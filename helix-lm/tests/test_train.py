@@ -150,3 +150,41 @@ def test_two_processes_fsdp2_train_checkpoint_and_resume(prepared, tmp_path):
     steps = read_log(out, "step")
     assert [s["step"] for s in steps] == [1, 2, 3, 4, 5, 6]
     assert HelixForCausalLM.from_pretrained(out / "export").num_parameters() > 0
+
+
+ANANSI = [
+    "--size", "a-20m", "--override", "ngram_memory_size=512", "--override", "num_streams=2",
+    "--override", "mean_loops=2", "--override", "max_loops=3", "--override", "backprop_loops=2",
+]  # fmt: skip
+
+
+def test_anansi_trains_with_muon_and_mup_and_resumes(prepared, tmp_path):
+    """The 2.0 path: Anansi with Muon + muP, the multi-token loss logged, checkpoint and resume with Chained state."""
+    out = tmp_path / "anansi"
+    base = [*ANANSI, "--optimizer", "muon", "--mup", "--save-every-steps", "3"]
+    first = Trainer(args_for(prepared, out, *base, "--steps", "3"))
+    assert first.config.output_multiplier == 256 / first.config.hidden_size
+    assert first.mup is not None and len(first.optimizer.optimizers) == 2
+    assert first.run() == "planned"
+    steps = read_log(out, "step")
+    assert [s["step"] for s in steps] == [1, 2, 3] and all(s.get("loops", 0) >= 1 for s in steps)
+    assert all(s.get("mtp", 0) > 0 for s in steps), "the multi-token loss is logged"
+    second = Trainer(args_for(prepared, out, *base, "--steps", "6"))
+    assert second.step == 3, "resumed from the checkpoint"
+    assert second.run() == "planned"
+    assert [s["step"] for s in read_log(out, "step")] == [1, 2, 3, 4, 5, 6]
+    from helix_lm.anansi import AnansiForCausalLM
+
+    loaded = AnansiForCausalLM.from_pretrained(out / "export")
+    assert loaded.config.num_streams == 2 and loaded.num_parameters() == second.config.num_parameters()
+
+
+def test_online_reweighting_runs_in_the_trainer(prepared, tmp_path):
+    out = tmp_path / "reweight"
+    trainer = Trainer(args_for(prepared, out, "--steps", "6", "--eval-every", "2", "--reweight-strength", "1.0"))
+    assert trainer.run() == "planned"
+    assert len(read_log(out, "eval")) >= 3
+    weights = trainer.loader.weights
+    assert abs(sum(weights.values()) - 1.0) < 1e-6 or sum(weights.values()) > 0
+    prior = trainer.loader.prior
+    assert all(0.5 * prior[n] - 1e-9 <= w <= 2.0 * prior[n] + 1e-9 for n, w in weights.items())

@@ -207,3 +207,17 @@ def test_catalog_shapes():
     assert "NOT FOUND" in describe_report(report)
     with pytest.raises(KeyError):
         source_by_name("nope")
+
+
+def test_reweight_follows_learning_progress(prepared):
+    loader = make_loader(prepared, total_tokens=200_000)
+    prior = dict(loader.prior)
+    assert loader.reweight({"web": 3.0, "code": 3.0, "identity": 3.0}) == "", "the first call only records"
+    change = loader.reweight({"web": 2.0, "code": 2.9, "identity": 2.9})  # web improved most
+    assert change and loader.weights["web"] > prior["web"] and loader.weights["code"] < prior["code"]
+    assert loader.weights["web"] <= 2 * prior["web"] + 1e-9 and loader.weights["code"] >= 0.5 * prior["code"] - 1e-9
+    assert abs(loader.probabilities.sum() - 1.0) < 1e-9
+    state = loader.state_dict()
+    fresh = make_loader(prepared, total_tokens=200_000)
+    fresh.load_state_dict(state)
+    assert fresh.weights == loader.weights and fresh.last_eval == loader.last_eval
