@@ -155,6 +155,38 @@ log "CorX5.5: HELIX $CORX_SIZE, $(billions "$CORX_TOKENS")B tokens, $NGPU GPU(s)
 helix size "$CORX_SIZE" | tail -8
 helix kernels || true
 
+# ---- stage 0: the repository ----------------------------------------------------------------------------
+# Creates CorxLabs/CorX5.5 if it does not exist (private unless CORX_PUBLIC=1), puts the code (the wheel) under
+# code/ and a first model card, so the repository holds everything needed to rebuild this machine.
+if is_main_node && ! done_marker repo "REPOSITORY READY"; then
+  log "stage 0: the model repository $CORX_REPO"
+  python3 - <<'PY' 2>&1 | tee -a "$LOGS/repo.log"
+import glob, os
+from huggingface_hub import HfApi
+
+repo, private = os.environ["CORX_REPO"], os.environ.get("CORX_PUBLIC") != "1"
+api = HfApi(token=os.environ["HF_TOKEN"])
+api.create_repo(repo, exist_ok=True, private=private)
+have = set(api.list_repo_files(repo))
+for wheel in sorted(glob.glob("/root/helix_lm-*.whl")):
+    name = os.path.basename(wheel)
+    if f"code/{name}" not in have:
+        api.upload_file(path_or_fileobj=wheel, path_in_repo=f"code/{name}", repo_id=repo, commit_message=f"code: {name}")
+        print(f"[repo] uploaded code/{name}")
+if "README.md" not in have:
+    card = (
+        "---\nlicense: apache-2.0\nlanguage: [en, jam]\ntags: [helix, corxlabs, jamaica, coding-agent, long-context]\n---\n"
+        "# CorX5.5\n\nCorxLabs' 34B HELIX coding agent, trained from scratch in Kingston, Jamaica. Training is in progress: "
+        "`code/` holds the software, `runs/` the smoke and pilot runs, `checkpoints/corx5.5` the latest export, "
+        "`milestones/` a copy every 100B tokens. The full card is written when training finishes.\n"
+    )
+    api.upload_file(path_or_fileobj=card.encode(), path_in_repo="README.md", repo_id=repo, commit_message="CorX5.5: training in progress")
+    print("[repo] first model card uploaded")
+print(f"[repo] {'private' if private else 'public'} https://huggingface.co/{repo}")
+print("REPOSITORY READY")
+PY
+fi
+
 # ---- stage 1: sources -------------------------------------------------------------------------------------
 if is_main_node && ! done_marker verify "source"; then
   log "stage 1: the data sources"; helix data verify 2>&1 | tee "$LOGS/verify.log" | grep -E "!!|GATED" || true
