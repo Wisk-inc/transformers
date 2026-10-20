@@ -163,12 +163,21 @@ def test_open_mixture_and_catalog_weights(prepared):
         open_mixture(prepared, {"missing": 1.0}, {}, 16, 2, 0, 1, 0, None)
 
 
-def test_loader_rejects_a_changed_mixture(prepared):
+def test_loader_rejects_a_lost_source_and_welcomes_a_new_one(prepared):
     loader = make_loader(prepared)
     state = loader.state_dict()
-    state["names"] = ["web"]
+    state["names"] = [*state["names"], "gone"]
     with pytest.raises(ValueError):
         loader.load_state_dict(state)
+    # a source prepared after the checkpoint (data streams in during a long run) joins with a fresh cursor
+    sources = {n: TokenSource(n, prepared / "tokens" / n, holdout_tokens=200) for n in ("web", "code")}
+    older = MixtureLoader(sources, {"web": 0.6, "code": 0.3}, seq_len=32, micro_batch=4, rank=0, world_size=1, seed=0)
+    for _ in range(3):
+        older.next_batch()
+    newer = make_loader(prepared)
+    newer.load_state_dict(older.state_dict())
+    assert newer.cursors["web"] == older.cursors["web"] and newer.step == older.step
+    assert "identity" in newer.names and newer.next_batch()[0].shape == (4, 33)
 
 
 # -------------------------------------------------------------------------------------- Jamaica, identity --

@@ -149,26 +149,35 @@ HelixConfig(
 )
 ```
 
-## Training Helix (1.0)
+## Training Helix (1.1): CorX5.5
 
-1.0 adds the engine that turns the architecture into a model -- **Helix**, CorxLabs' coding agent -- and the
-ladder of named sizes it is trained through. The full plan, with the arithmetic, is in
-[`docs/HELIX_23B_PLAN.md`](docs/HELIX_23B_PLAN.md).
+1.0 added the engine that turns the architecture into a model and the ladder of named sizes; 1.1 is the
+program that trains **CorX5.5**, CorxLabs' 34B long-horizon coding agent, from scratch on 870B tokens in one
+year on 8 x B300, largely on Jamaican data, with safeguards. The plan, arithmetic, data mixture, safeguards
+and limits are in [`docs/CORX5.5.md`](docs/CORX5.5.md); the earlier 23B plan is kept in
+[`docs/HELIX_23B_PLAN.md`](docs/HELIX_23B_PLAN.md). The whole program is one startup script
+(`corx_startup.sh`, built from the wheel) that runs as a service and pushes code, checkpoints and milestones
+to `CorxLabs/CorX5.5`.
 
 ```bash
 pip install "helix-lm[all]"
-helix size 23b                  # the ladder: 350m, 1b, 3b, 7b, 23b -- parameters, FLOPs, hours on 8 x B300
+helix size 34b                  # the ladder: 350m, 1b, 3b, 7b, 23b, 34b -- parameters, FLOPs, hours on 8 x B300
 helix kernels                   # FlexAttention / flash-linear-attention availability
+helix jamaica crawl --data /data/corx --hours 12          # Jamaican public records (polite, robots.txt)
+helix jamaica synth --data /data/corx --count 300000      # SJE/Patois code-switched dialogues via a local vLLM teacher
 ```
 
 | piece | module | what it does |
 | --- | --- | --- |
 | fused strand L | `model.py` (`attention_backend="flex"`) | each head's sliding window as one block-sparse FlexAttention kernel, no key copies; equal to the reference staircase |
 | Triton strand R | `model.py` (`recurrent_backend="fla"`) | `flash-linear-attention`'s chunked gated delta rule, the reference as fallback |
-| sizes | `config.py` (`HelixConfig.named`) | 350m / 1b / 3b / 7b / 23b with analytic parameter and FLOP counts |
+| sizes | `config.py` (`HelixConfig.named`) | 350m / 1b / 3b / 7b / 23b / 34b with analytic parameter and FLOP counts |
+| transformer twins | `arch.py` | `t-350m` .. `t-34b` on the Qwen3 layout (QK-norm), same trainer, exported as `Qwen3ForCausalLM`; the pilot's control |
 | tokenizer | `tokenizer.py` | the CorxLabs 65,536-token byte-level BPE (uint16 storage), chat and tool-call format |
-| data | `data/` | verified Hub catalog, streaming prepare to shards, the Jamaica filter and Patois sources, identity documents, a deterministic resumable mixture loader |
-| trainer | `train.py` | FSDP2 bf16, fused AdamW, warmup-stable-decay fitted to `--hours`, sharded checkpoints, bf16 safetensors export pushed to the Hub, resume, MFU |
+| data | `data/` | verified Hub catalog (36 pretraining sources: web, code, execution traces, commits and issues, math, legal, health, finance, education, Patois), row renderers, streaming prepare to shards with a free-space guard, the Jamaica and Caribbean filters, identity documents, a deterministic resumable mixture loader |
+| Jamaican data | `data/jamaica_gov.py`, `data/synth.py` | a polite crawler of Jamaican public records; SJE/Patois code-switched dialogues for banking, legal, health, education and customer service from a local Apache-2.0 teacher |
+| safeguards | `data/safety.py` | the policy prompt, boundary and look-alike examples, agent conduct, CoCoNot/tulu refusals, XSTest over-refusal and harmful-set refusal rates in `helix eval` |
+| trainer | `train.py`, `hub.py` | FSDP2 bf16, fused AdamW, warmup-stable-decay fitted to `--hours`, sharded checkpoints, bf16 safetensors export pushed to the Hub (history squashed, milestone copies every N tokens), resume, MFU, a stop file |
 | SFT | `data/agent.py` | SWE-agent and SWE-smith trajectories, OpenCodeInstruct, OpenThoughts, smoltalk, tulu into one masked chat format |
 | eval | `evaluate.py` | lm-evaluation-harness adapter, EvalPlus, a table against the published Qwen numbers |
 
@@ -195,9 +204,10 @@ source; a training run checkpoints, exports and **resumes to the same losses and
 processes train with FSDP2 and distributed checkpoints and resume; SFT data is masked through packing and
 a fine-tune starts from a saved model; the lm-eval adapter's log-likelihoods match a direct forward.
 
-**Still true: there are no trained checkpoints yet.** 1.0 is the engine, tested at toy scale on a CPU. The
-plan's first rung is a 20-minute smoke run on the real machine and its second a 7-hour 1B pilot; whether
-HELIX trains as well as a transformer on text is what those runs measure.
+**Still true: there are no trained checkpoints yet.** 1.1 is the engine and the program, tested at toy scale
+on a CPU. The program's first rung on the real machine is a 25-minute smoke run and its second a 1B pilot of
+HELIX against its transformer twin on the same tokens; whether HELIX trains as well as a transformer on text
+is what that pilot measures, before the year-long run starts.
 
 ## License
 

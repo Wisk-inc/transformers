@@ -214,11 +214,20 @@ class MixtureLoader:
         }
 
     def load_state_dict(self, state: dict) -> None:
-        if state["names"] != self.names:
-            raise ValueError(f"the mixture changed: saved {state['names']}, now {self.names}")
-        self.cursors.update(state["cursors"])
-        self.epochs.update(state["epochs"])
-        self.drawn.update(state["drawn"])
+        """
+        Continue where the checkpoint stopped. Sources that were prepared after the run started (the data keeps
+        streaming in during a long run) join the mixture with fresh cursors; a source that disappeared is an error,
+        because the mixture the checkpoint was trained on can no longer be reproduced.
+        """
+        lost = [n for n in state["names"] if n not in self.names]
+        if lost:
+            raise ValueError(f"the mixture lost sources since the checkpoint: {lost} (saved {state['names']})")
+        added = [n for n in self.names if n not in state["names"]]
+        if added:
+            print(f"[loader] sources prepared since the checkpoint join the mixture now: {added}", flush=True)
+        self.cursors.update({n: c for n, c in state["cursors"].items() if n in self.names})
+        self.epochs.update({n: e for n, e in state["epochs"].items() if n in self.names})
+        self.drawn.update({n: d for n, d in state["drawn"].items() if n in self.names})
         self.step = state["step"]
         self.generator.bit_generator.state = state["generator"]
 
