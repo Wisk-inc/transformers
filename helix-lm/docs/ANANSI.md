@@ -222,7 +222,7 @@ hackathon) are research or competition-licensed. Recording and licensing Jamaica
 
 ## 4. Measured here
 
-Toy suite on this machine (a 4-thread CPU), `helix anansi bench --steps 100 --batch-size 16` (AdamW, lr 2e-3,
+Toy suite on this machine (a 4-thread CPU), `helix anansi bench --steps 100 --batch-size 16` (Muon, lr 2e-3,
 seed 0), accuracy after 100 steps, with the wall time of each run:
 
 | task | transformer | HELIX | Anansi |
