@@ -1,0 +1,86 @@
+[
+ {
+  "family": "transformer",
+  "task": "recall",
+  "accuracy": 0.1220703125,
+  "params": 1370240,
+  "seconds": 19.47771406173706
+ },
+ {
+  "family": "helix",
+  "task": "recall",
+  "accuracy": 0.05517578125,
+  "params": 18199772,
+  "seconds": 153.81552839279175
+ },
+ {
+  "family": "anansi",
+  "task": "recall",
+  "accuracy": 0.0361328125,
+  "params": 18358646,
+  "seconds": 197.9202380180359
+ },
+ {
+  "family": "transformer",
+  "task": "parity",
+  "accuracy": 0.5234375,
+  "params": 1346176,
+  "seconds": 11.882521152496338
+ },
+ {
+  "family": "helix",
+  "task": "parity",
+  "accuracy": 0.5234375,
+  "params": 18199772,
+  "seconds": 84.87500166893005
+ },
+ {
+  "family": "anansi",
+  "task": "parity",
+  "accuracy": 0.5234375,
+  "params": 18358646,
+  "seconds": 112.79297494888306
+ },
+ {
+  "family": "transformer",
+  "task": "multihop",
+  "accuracy": 0.078125,
+  "params": 1357952,
+  "seconds": 18.933692932128906
+ },
+ {
+  "family": "helix",
+  "task": "multihop",
+  "accuracy": 0.046875,
+  "params": 18199772,
+  "seconds": 149.22683572769165
+ },
+ {
+  "family": "anansi",
+  "task": "multihop",
+  "accuracy": 0.0078125,
+  "params": 18358646,
+  "seconds": 199.18582272529602
+ },
+ {
+  "family": "transformer",
+  "task": "copynoise",
+  "accuracy": 1.0,
+  "params": 1353856,
+  "seconds": 23.119086980819702
+ },
+ {
+  "family": "helix",
+  "task": "copynoise",
+  "accuracy": 0.2708333333333333,
+  "params": 18199772,
+  "seconds": 191.76536560058594
+ },
+ {
+  "family": "anansi",
+  "task": "copynoise",
+  "accuracy": 0.025390625,
+  "params": 18358646,
+  "seconds": 261.33892846107483
+ }
+]

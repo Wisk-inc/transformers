@@ -222,11 +222,24 @@ hackathon) are research or competition-licensed. Recording and licensing Jamaica
 
 ## 4. Measured here
 
-Toy suite, this machine (CPU), 200 steps, batch 32, Muon, seed 0:
+Toy suite on this machine (a 4-thread CPU), `helix anansi bench --steps 100 --batch-size 16` (AdamW, lr 2e-3,
+seed 0), accuracy after 100 steps, with the wall time of each run:
 
-RESULTS_TABLE
+| task | transformer | HELIX | Anansi |
+|---|---|---|---|
+| recall | 12.2 % (19 s) | 5.5 % (154 s) | 3.6 % (198 s) |
+| parity | 52.3 % (12 s) | 52.3 % (85 s) | 52.3 % (113 s) |
+| multihop | 7.8 % (19 s) | 4.7 % (149 s) | 0.8 % (199 s) |
+| copynoise | 100.0 % (23 s) | 27.1 % (192 s) | 2.5 % (261 s) |
 
-Read it as a sanity check of the mechanisms, not as a ranking of the families at scale.
+Read it plainly: at 100 steps the plain transformer is ahead on every task, parity is still at chance for all
+three, and the recurrent and looped families are 8-10x slower a step on a CPU without their fused kernels. A
+200-step run with batch 32 did not finish inside the 90 minutes available here. The suite is a check that the
+mechanisms train and that the three families can be compared on equal terms; it is not evidence that Anansi
+learns faster, which only the longer runs (`--steps 300` and up, on a GPU, several seeds) can give. The
+measured claims that do hold are the exact ones in `tests/test_anansi.py`: the chunked loss equals the plain
+loss, cached decoding equals the full forward to 1e-6, growth preserves the function, MoE balancing moves the
+bias towards under-used experts, and `think()` exits early on an easy prompt.
 
 ## 5. What remains unproven
 
