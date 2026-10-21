@@ -48,6 +48,15 @@ class CodecConfig:
     )
     mel_scales: tuple[int, ...] = field(default_factory=lambda: (32, 64, 128, 256, 512, 1024, 2048))
 
+    @classmethod
+    def at_frame_rate(cls, frame_rate: int, **overrides) -> CodecConfig:
+        """Strides for 25, 50 or 75 frames a second at 24 kHz (hops 960, 480, 320). 50 Hz halves what each
+        frame has to average over: fewer smeared consonants at twice the sequence length for the flow decoder."""
+        strides = {25: (4, 5, 6, 8), 50: (4, 5, 4, 6), 75: (4, 5, 4, 4)}
+        if frame_rate not in strides:
+            raise ValueError(f"frame_rate must be one of {sorted(strides)}")
+        return cls(strides=strides[frame_rate], **overrides)
+
     @property
     def frame_rate(self) -> float:
         hop = 1

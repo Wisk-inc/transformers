@@ -135,10 +135,137 @@ def beat_echo(x: torch.Tensor, sample_rate: int, bpm: float, beats: float = 0.75
     return echo(x, sample_rate, delay_seconds=60.0 / bpm * beats, **kw)
 
 
-def match_reverb(
-    vocal: torch.Tensor, sample_rate: int, backing_decay: float, vocal_decay: float = 0.0, mix: float = 0.2
+ROOM_BANDS = ((60.0, 250.0), (250.0, 1000.0), (1000.0, 4000.0), (4000.0, 11000.0))
+
+
+def decay_time(wave: torch.Tensor, sample_rate: int, hop_ms: float = 10.0, max_seconds: float = 3.0) -> float:
+    """
+    T60 from the decays that actually happen in the signal: after each level peak the envelope is followed
+    down to 25 dB under the peak, and the slope of its last 20 dB (the part after the sound itself has stopped)
+    is extrapolated to 60 dB; median over peaks. A held note's length is not counted as reverb. Returns 0 when
+    nothing decays far enough.
+    """
+    env = rms_envelope(wave, sample_rate, 30.0)
+    hop = max(1, int(sample_rate * hop_ms / 1000))
+    db = 20 * torch.log10(env[::hop] + 1e-6)
+    n = db.numel()
+    if n < 20:
+        return 0.0
+    floor = float(db.max()) - 30
+    w = max(1, int(100 / hop_ms))
+    limit = int(max_seconds * 1000 / hop_ms)
+    times, i = [], 0
+    while i < n:
+        if db[i] >= floor and db[i] == db[max(0, i - w) : i + w + 1].max():
+            top = float(db[i])
+            j, last, end = i + 1, top, None
+            while j < n and j - i < limit:
+                value = float(db[j])
+                if value > last + 3.0:  # a new onset: stop following
+                    break
+                last = min(last, value)
+                if value <= top - 25:
+                    end = j
+                    break
+                j += 1
+            span = 20.0
+            if end is None and top - last >= 15:  # the signal ended mid-decay: use the last 10 dB of what there is
+                end, span = int(db[i:j].argmin()) + i, 10.0
+            if end is not None:
+                target = float(db[end]) + span
+                k = end
+                while k > i and float(db[k]) < target:
+                    k -= 1
+                if end > k:
+                    times.append(60.0 * (end - k) * hop_ms / 1000 / span)
+            i = max(j, i + 1)
+        else:
+            i += 1
+    # a voice's own releases can only make a decay look slower than the room, never faster: take the fast quartile
+    return min(max_seconds, float(torch.tensor(times).quantile(0.25))) if times else 0.0
+
+
+def multiband_reverb_time(wave: torch.Tensor, sample_rate: int) -> list[float]:
+    """The decay per octave-ish band: real rooms lose highs faster than lows, and a voice swap that gives the
+    new voice one broadband decay sounds pasted on. Returns seconds per band of ``ROOM_BANDS``."""
+    broadband = decay_time(wave, sample_rate)
+    out = []
+    for lo, hi in ROOM_BANDS:
+        hi = min(hi, sample_rate / 2 - 100)
+        band = bandpass(wave, lo, hi, sample_rate) if hi > lo else wave
+        value = decay_time(band, sample_rate)
+        out.append(value if value > 0 else broadband)
+    return out
+
+
+def estimate_room(wave: torch.Tensor, sample_rate: int) -> dict:
+    """What can be read of a room from a vocal alone: per-band decays, a pre-delay guess from the envelope's
+    first echo (10-40 ms autocorrelation peak) and a wet fraction from the broadband decay."""
+    decays = multiband_reverb_time(wave, sample_rate)
+    env = rms_envelope(wave, sample_rate, 2.0)
+    env = env - env.mean()
+    lo, hi = int(0.010 * sample_rate), int(0.040 * sample_rate)
+    best, pre = 0.0, 0.015
+    for lag in range(lo, hi, max(1, (hi - lo) // 30)):
+        r = float((env[:-lag] * env[lag:]).mean() / (env.pow(2).mean() + 1e-9))
+        if r > best:
+            best, pre = r, lag / sample_rate
+    broadband = sum(decays) / len(decays)
+    return {"decays": decays, "pre_delay": pre, "wet": float(min(0.5, max(0.0, (broadband - 0.3) / 2.0)))}
+
+
+def build_rir(
+    decays: list[float],
+    sample_rate: int,
+    pre_delay: float = 0.012,
+    early: tuple[float, ...] = (0.007, 0.013, 0.021, 0.034),
+    seed: int = 0,
 ) -> torch.Tensor:
-    """Give a dry vocal roughly the room of the backing track (only adds; it never tries to remove reverb)."""
+    """A room impulse response from per-band decays: a direct tap, a few early reflections, and one band-limited
+    decaying noise tail per band of ``ROOM_BANDS`` with its own time constant."""
+    g = torch.Generator().manual_seed(seed)
+    longest = max(max(decays), 0.05)
+    length = int(longest * sample_rate)
+    t = torch.arange(length) / sample_rate
+    tail = torch.zeros(length)
+    for (lo, hi), decay in zip(ROOM_BANDS, decays, strict=True):
+        hi = min(hi, sample_rate / 2 - 100)
+        if hi <= lo:
+            continue
+        noise = torch.randn(length, generator=g)
+        tau = max(decay, 0.05) / 6.9
+        band = bandpass(noise * torch.exp(-t / tau), lo, hi, sample_rate)
+        tail = tail + band
+    ir = torch.zeros(int(pre_delay * sample_rate) + length)
+    ir[0] = 1.0
+    for k, delay in enumerate(early):
+        pos = int(delay * sample_rate)
+        if pos < ir.numel():
+            ir[pos] += 0.4 / (k + 1) * (1 if k % 2 == 0 else -1)
+    ir[int(pre_delay * sample_rate) :] += tail / (tail.abs().max() + 1e-9) * 0.6
+    return ir / ir.abs().max()
+
+
+def apply_room(x: torch.Tensor, room: dict, sample_rate: int, mix: float | None = None) -> torch.Tensor:
+    ir = build_rir(room["decays"], sample_rate, room.get("pre_delay", 0.012))
+    wet = _fft_convolve(x, ir)
+    wet = wet / (wet.abs().max() + 1e-9) * (x.abs().max() + 1e-9)
+    mix = room.get("wet", 0.2) if mix is None else mix
+    return (1 - mix) * x + mix * wet
+
+
+def match_reverb(
+    vocal: torch.Tensor,
+    sample_rate: int,
+    backing_decay: float,
+    vocal_decay: float = 0.0,
+    mix: float = 0.2,
+    room: dict | None = None,
+) -> torch.Tensor:
+    """Give a dry vocal the room of the original (only adds; it never tries to remove reverb). With ``room`` from
+    :func:`estimate_room` the per-band decays and the pre-delay are matched, not one broadband tail."""
+    if room is not None and max(room["decays"]) > 0.1:
+        return apply_room(vocal, room, sample_rate, mix if mix != 0.2 else None)
     extra = max(0.0, backing_decay - vocal_decay)
     return reverb(vocal, sample_rate, decay_seconds=extra, mix=mix) if extra > 0.1 else vocal
 

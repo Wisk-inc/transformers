@@ -49,7 +49,7 @@ from pathlib import Path
 
 AUDIO_SUFFIXES = (".wav", ".flac", ".mp3", ".ogg", ".m4a")
 
-STAGES = ("setup", "data", "prepare", "codec", "train", "eval", "push", "swap")
+STAGES = ("setup", "data", "prepare", "codec", "refiner", "air", "train", "eval", "push", "swap")
 
 
 def log(*parts) -> None:
@@ -250,7 +250,7 @@ def stage_codec(args) -> None:
         mark(root, "codec")
         return
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    config = CodecConfig(sample_rate=args.sample_rate)
+    config = CodecConfig.at_frame_rate(args.codec_rate, sample_rate=args.sample_rate)
     codec, disc = AudioCodec(config).to(device), MultiPeriodDiscriminator().to(device)
     files = find_audio([root / "prepared"])
     files = [f for f in files if f.name.endswith(".vocal.wav") or f.name.endswith(".instrumental.wav")]
@@ -325,6 +325,180 @@ def load_codec(root: Path, device):
     codec = AudioCodec(CodecConfig(**state["config"])).to(device).eval()
     codec.load_state_dict(state["codec"])
     return codec
+
+
+# ----------------------------------------------------------------------------------------- refiner --
+def load_refiner(root: Path, device):
+    import torch
+
+    from helix_lm.audio.refiner import HarmonicNoiseRefiner, RefinerConfig
+
+    ckpt = root / "refiner" / "refiner.pt"
+    if not ckpt.exists():
+        return None
+    state = torch.load(ckpt, map_location=device)
+    refiner = HarmonicNoiseRefiner(RefinerConfig(**state["config"])).to(device).eval()
+    refiner.load_state_dict(state["refiner"])
+    return refiner
+
+
+def stage_refiner(args) -> None:
+    """The refiner learns to put back what the codec averages away: trained on (codec reconstruction -> original)
+    pairs of the prepared dry vocals, with the multi-period discriminator after the first 2,000 steps."""
+    import torch
+
+    from helix_lm.audio.codec import MultiPeriodDiscriminator, discriminator_loss
+    from helix_lm.audio.data import read_wave
+    from helix_lm.audio.refiner import HarmonicNoiseRefiner, RefinerConfig, refiner_losses
+    from helix_lm.audio.singing import estimate_f0
+
+    root = Path(args.root)
+    if args.refiner_hours <= 0:
+        log("refiner stage skipped (--refiner-hours 0)")
+        mark(root, "refiner")
+        return
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    codec = load_codec(root, device)
+    if codec is None:
+        log("!! no codec (run the codec stage first)")
+        return
+    files = sorted((root / "prepared").rglob("*.vocal.wav"))
+    if not files:
+        log("!! no prepared vocals")
+        return
+    (root / "refiner").mkdir(exist_ok=True)
+    ckpt = root / "refiner" / "refiner.pt"
+    config = RefinerConfig(
+        sample_rate=args.sample_rate, frame_dim=codec.config.dim, frame_rate=codec.config.frame_rate
+    )
+    refiner = HarmonicNoiseRefiner(config).to(device)
+    disc = MultiPeriodDiscriminator().to(device)
+    opt = torch.optim.AdamW(refiner.parameters(), lr=2e-4, betas=(0.8, 0.99))
+    opt_d = torch.optim.AdamW(disc.parameters(), lr=2e-4, betas=(0.8, 0.99))
+    step = 0
+    if ckpt.exists():
+        state = torch.load(ckpt, map_location=device)
+        refiner.load_state_dict(state["refiner"])
+        disc.load_state_dict(state["disc"])
+        step = state["step"]
+        log(f"refiner resumed at step {step}")
+    log(f"refiner: {refiner.num_parameters() / 1e6:.1f}M parameters, {len(files)} clips, {args.refiner_hours:.0f} h")
+    deadline = time.time() + args.refiner_hours * 3600
+    g = torch.Generator().manual_seed(step)
+    batch_size = max(4, args.batch if args.batch > 0 else 16)
+    need = int(2.0 * args.sample_rate)
+    hop_fine = config.hop
+    tf = need // hop_fine
+    need = tf * hop_fine
+    last_save = time.time()
+
+    def save() -> None:
+        torch.save(
+            {"refiner": refiner.state_dict(), "disc": disc.state_dict(), "step": step, "config": config.__dict__}, ckpt
+        )
+
+    while time.time() < deadline and not (root / "stop").exists():
+        waves = []
+        for _ in range(batch_size):
+            wave = read_wave(files[int(torch.randint(0, len(files), (), generator=g))], args.sample_rate)
+            if wave.shape[-1] < need:
+                wave = torch.nn.functional.pad(wave, (0, need - wave.shape[-1]))
+            start = int(torch.randint(0, wave.shape[-1] - need + 1, (), generator=g))
+            waves.append(wave[start : start + need])
+        wave = torch.stack(waves).to(device)
+        try:
+            with torch.no_grad():
+                frames = codec.listen(wave)
+                recon = codec.decode_frames(frames)[:, :, :need]
+                f0_fine = estimate_f0(wave.cpu(), args.sample_rate, frame_rate=config.fine_rate).to(device)[:, :tf]
+                f0_fine = torch.nn.functional.pad(f0_fine, (0, tf - f0_fine.shape[-1]))
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
+                out = refiner(recon, frames, f0_fine)
+                terms = refiner_losses(out, wave, args.sample_rate, disc if step > 2000 else None)
+            opt.zero_grad()
+            terms["total"].backward()
+            torch.nn.utils.clip_grad_norm_(refiner.parameters(), 1.0)
+            opt.step()
+            if step > 2000:
+                opt_d.zero_grad()
+                discriminator_loss(disc, out["wave"].detach(), wave[:, None]).backward()
+                opt_d.step()
+        except torch.cuda.OutOfMemoryError:
+            opt.zero_grad(set_to_none=True)
+            torch.cuda.empty_cache()
+            batch_size = max(2, batch_size // 2)
+            log(f"refiner out of memory: batch halved to {batch_size}")
+            continue
+        step += 1
+        if step % 50 == 0:
+            log(f"refiner step {step}: " + " ".join(f"{k} {float(v):.3f}" for k, v in terms.items()))
+        if time.time() - last_save > 1800:
+            save()
+            last_save = time.time()
+    save()
+    log(f"refiner saved at step {step}")
+    mark(root, "refiner")
+
+
+# --------------------------------------------------------------------------------------------- air --
+def stage_air(args) -> None:
+    """The air band above the codec's Nyquist, learned from your own recordings at 44.1/48 kHz (the uploads
+    folder, read at 48 kHz). Opt in with --air-hours; without 48 kHz sources there is nothing to learn from."""
+    import torch
+
+    from helix_lm.audio.data import read_wave
+    from helix_lm.audio.refiner import AirBandExtension, AirConfig, air_losses
+    from helix_lm.music.data import find_audio
+
+    root = Path(args.root)
+    if args.air_hours <= 0:
+        log("air stage skipped (--air-hours 0)")
+        mark(root, "air")
+        return
+    files = find_audio([root / "uploads"])
+    if not files:
+        log("!! no uploads to learn the air band from")
+        mark(root, "air")
+        return
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    (root / "air").mkdir(exist_ok=True)
+    ckpt = root / "air" / "air.pt"
+    config = AirConfig(in_rate=args.sample_rate, out_rate=48000)
+    air = AirBandExtension(config).to(device)
+    opt = torch.optim.AdamW(air.parameters(), lr=3e-4)
+    step = 0
+    if ckpt.exists():
+        state = torch.load(ckpt, map_location=device)
+        air.load_state_dict(state["air"])
+        step = state["step"]
+    deadline = time.time() + args.air_hours * 3600
+    g = torch.Generator().manual_seed(step)
+    need = int(2.0 * 48000)
+    ratio = 48000 // args.sample_rate
+    batch_size = max(2, (args.batch if args.batch > 0 else 16) // 2)
+    while time.time() < deadline and not (root / "stop").exists():
+        waves = []
+        for _ in range(batch_size):
+            wave = read_wave(files[int(torch.randint(0, len(files), (), generator=g))], 48000)
+            if wave.shape[-1] < need:
+                wave = torch.nn.functional.pad(wave, (0, need - wave.shape[-1]))
+            start = int(torch.randint(0, wave.shape[-1] - need + 1, (), generator=g))
+            waves.append(wave[start : start + need])
+        target = torch.stack(waves).to(device)
+        body = torch.nn.functional.avg_pool1d(target[:, None], ratio, stride=ratio)  # the 24 kHz body of the take
+        out = air(body)
+        terms = air_losses(out, target, 48000, cutoff=args.sample_rate / 2 * 0.95)
+        opt.zero_grad()
+        terms["total"].backward()
+        opt.step()
+        step += 1
+        if step % 50 == 0:
+            log(f"air step {step}: " + " ".join(f"{k} {float(v):.3f}" for k, v in terms.items()))
+        if step % 500 == 0:
+            torch.save({"air": air.state_dict(), "step": step, "config": config.__dict__}, ckpt)
+    torch.save({"air": air.state_dict(), "step": step, "config": config.__dict__}, ckpt)
+    log(f"air band saved at step {step}")
+    mark(root, "air")
 
 
 def stage_train(args) -> None:
@@ -467,13 +641,14 @@ def stage_eval(args) -> None:
     from helix_lm.audio.data import read_wave
     from helix_lm.audio.singing import estimate_f0
     from helix_lm.audio.speaker import speaker_similarity
-    from helix_lm.music.effects import detect_glitches
+    from helix_lm.music.failsafe import Gates, synthesize_with_gates
     from helix_lm.music.regularize import ClipTags, split_singers
     from helix_lm.music.tristream import TriStreamConfig, TriStreamForSinging, noise_features, source_features
 
     root = Path(args.root)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     codec = load_codec(root, device)
+    refiner = load_refiner(root, device)
     ckpt = root / "runs" / args.size / "latest.pt"
     if codec is None or not ckpt.exists():
         log("!! nothing to evaluate yet")
@@ -494,7 +669,11 @@ def stage_eval(args) -> None:
     tags = [ClipTags(**r["tags"]) for r in records]
     split = split_singers([t.singer for t in tags])
     held = [r for r, t in zip(records, tags, strict=True) if split[t.singer] == "validation"][: args.eval_clips]
-    results = {"clips": len(held), "f0_rmse_cents": [], "speaker_similarity": [], "glitch_rate": []}
+    results = {
+        "clips": len(held), "f0_rmse_cents": [], "speaker_similarity": [], "glitch_rate": [], "buzz_db": [],
+        "hnr_db": [], "sync_lag_ms": [], "robotic": [], "rounds": [], "fallbacks": [], "passed": [],
+    }  # fmt: skip
+    gates = Gates(steps=config.flow_steps, min_similarity=None, frame_rate=config.frame_rate)
     for r in held:
         stem = Path(r["path"]).stem
         wave = read_wave(Path(r["dir"]) / f"{stem}.vocal.wav", args.sample_rate)[: int(10 * args.sample_rate)].to(
@@ -510,22 +689,27 @@ def stage_eval(args) -> None:
                 "phonemes": torch.full((1, 1), -1, dtype=torch.long, device=device),
                 "speaker": speaker_encoder(frames),
             }
-            out = model.sample(batch, steps=config.flow_steps)
-            audio = codec.decode_frames(out)[0, 0].cpu()
-        f0_out = estimate_f0(audio[None], args.sample_rate, config.frame_rate)[0]
-        n = min(f0_out.shape[0], f0.shape[1])
-        voiced = (f0[0, :n].cpu() > 0) & (f0_out[:n] > 0)
-        if voiced.any():
-            cents = 1200 * torch.log2(f0_out[:n][voiced] / f0[0, :n].cpu()[voiced])
-            results["f0_rmse_cents"].append(float(cents.pow(2).mean().sqrt()))
+            audio, report = synthesize_with_gates(
+                model, codec, batch, args.sample_rate, f0[0], refiner=refiner, source_wave=wave, gates=gates
+            )
+            audio = audio.cpu()
+        final = report.final
+        results["f0_rmse_cents"].append(final["f0_rmse_cents"])
         with torch.no_grad():
             sim = speaker_similarity(speaker_encoder(codec.listen(audio[None].to(device))), speaker_encoder(frames))
         results["speaker_similarity"].append(float(sim))
-        glitches = detect_glitches(audio, args.sample_rate)
+        glitches = final["glitches"]
         results["glitch_rate"].append(
             float(glitches["clicks"].numel() + glitches["dropouts"].numel())
             / max(audio.shape[-1] / args.sample_rate, 1e-6)
         )
+        results["buzz_db"].append(final["buzz"]["buzz_db"])
+        results["hnr_db"].append(final.get("coherence", {}).get("hnr_db", 0.0))
+        results["sync_lag_ms"].append(abs(final.get("sync", {}).get("lag_ms", 0.0)))
+        results["robotic"].append(final.get("robotic", {}).get("score", 0.0))
+        results["rounds"].append(len(report.rounds))
+        results["fallbacks"].append(float(any("sketch" in a or "transplant" in a for a in report.applied)))
+        results["passed"].append(float(report.ok))
     summary = {k: (sum(v) / len(v) if isinstance(v, list) and v else v) for k, v in results.items()}
     (root / "eval" / "summary.json").write_text(json.dumps(summary, indent=1))
     log("eval:", summary)
@@ -586,7 +770,12 @@ def stage_swap(args) -> None:
             SpeakerEncoder(frame_dim=codec.config.dim, embedding_dim=config.speaker_dim).to(device).eval()
         )
         speaker_encoder.load_state_dict(state["speaker"])
-        converter = Converter(model, codec, speaker_encoder)
+        from helix_lm.music.failsafe import Gates
+
+        converter = Converter(
+            model, codec, speaker_encoder, refiner=load_refiner(root, device),
+            gates=Gates(steps=config.flow_steps, frame_rate=config.frame_rate),
+        )  # fmt: skip
     song = read_wave(args.song, args.sample_rate)
     reference = read_wave(args.reference, args.sample_rate)
     mix, report = swap_voice(song, reference, args.sample_rate, converter=converter)
@@ -618,6 +807,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--upload-accent", default="unknown")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--codec-hours", type=float, default=240.0)
+    parser.add_argument("--codec-rate", type=int, default=25, choices=[25, 50, 75], help="codec frames a second")
+    parser.add_argument("--refiner-hours", type=float, default=48.0)
+    parser.add_argument("--air-hours", type=float, default=0.0, help="air band from 48 kHz uploads; 0 = skip")
     parser.add_argument("--train-hours", type=float, default=200.0)
     parser.add_argument("--clip-seconds", type=float, default=12.0)
     parser.add_argument("--batch", type=int, default=0, help="clips per step; 0 = auto (largest that fits)")

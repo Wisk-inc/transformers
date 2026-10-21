@@ -56,20 +56,43 @@ class Converter:
     input (so the rest of the pipeline can be exercised and measured), and says so in the report.
     """
 
-    def __init__(self, model=None, codec=None, speaker_encoder=None) -> None:
+    def __init__(self, model=None, codec=None, speaker_encoder=None, refiner=None, gates=None) -> None:
         self.model, self.codec, self.speaker_encoder = model, codec, speaker_encoder
+        self.refiner, self.gates = refiner, gates
+        self.last_report = None
+        self.last_reference = None
+        self.chunk_seconds = 30.0  # long tracks are converted in beat-agnostic chunks on one global grid
 
-    def embed(self, reference: torch.Tensor, sample_rate: int) -> torch.Tensor:
+    def embed(self, reference: torch.Tensor, sample_rate: int, robust: bool = True) -> torch.Tensor:
+        """The voice embedding of a reference; robust by default (cleaned, windowed, trimmed mean: see
+        ``intake.reference_embedding``), with the report kept in ``self.last_reference``."""
         if self.codec is None or self.speaker_encoder is None:
             return torch.zeros(1, 192)
-        frames = self.codec.listen(reference[None])
-        return self.speaker_encoder(frames)
+        if robust:
+            from .intake import reference_embedding
+
+            embedding, self.last_reference = reference_embedding(
+                reference, sample_rate, self.codec, self.speaker_encoder
+            )
+            return embedding
+        return self.speaker_encoder(self.codec.listen(reference[None]))
 
     def convert(
-        self, vocal: torch.Tensor, f0_hz: torch.Tensor, speaker: torch.Tensor, sample_rate: int, steps: int = 16
+        self,
+        vocal: torch.Tensor,
+        f0_hz: torch.Tensor,
+        speaker: torch.Tensor,
+        sample_rate: int,
+        steps: int = 16,
+        reference: torch.Tensor | None = None,
+        quality: float | None = None,
+        tract_ratio: float | None = None,
     ) -> tuple[torch.Tensor, str]:
         if self.model is None or self.codec is None:
             return vocal, "no model: the vocal was passed through unchanged"
+        hop = int(sample_rate / self.codec.config.frame_rate)
+        if vocal.shape[-1] > self.chunk_seconds * sample_rate:
+            return self._convert_long(vocal, f0_hz, speaker, sample_rate, steps, reference, hop)
         from .tristream import noise_features, source_features
 
         frames = self.codec.listen(vocal[None])  # (1, T, dim)
@@ -81,9 +104,55 @@ class Converter:
             "source": source_features(f0, energy), "noise": noise_features(frames), "frames": frames,
             "semantic": codes[:, :t], "phonemes": torch.full((1, 1), -1, dtype=torch.long), "speaker": speaker,
         }  # fmt: skip
+        if quality is not None:
+            batch["quality"] = torch.tensor([float(quality)])
+        if tract_ratio is not None:
+            batch["tract_ratio"] = torch.tensor([float(tract_ratio)])
+        if self.gates is not None or self.refiner is not None:
+            from .failsafe import Gates, synthesize_with_gates
+
+            gates = self.gates or Gates(steps=steps)
+            wave, report = synthesize_with_gates(
+                self.model, self.codec, batch, sample_rate, f0[0], refiner=self.refiner,
+                speaker_encoder=self.speaker_encoder, reference_wave=reference, source_wave=vocal, gates=gates,
+            )  # fmt: skip
+            self.last_report = report
+            how = f"converted with TriStream-2 through the fail-safe loop ({len(report.rounds)} round(s), "
+            how += f"{'passed' if report.ok else 'failed: ' + ', '.join(report.final.get('failed', []))})"
+            return wave[: vocal.shape[-1]], how
         out_frames = self.model.sample(batch, steps=steps)
         wave = self.codec.decode_frames(out_frames)[0, 0]
         return wave[: vocal.shape[-1]], f"converted with TriStream-2 in {steps} flow steps"
+
+    def _convert_long(self, vocal, f0_hz, speaker, sample_rate, steps, reference, hop) -> tuple[torch.Tensor, str]:
+        """Chunks on one global frame grid (frame i is always samples [i*hop, (i+1)*hop)), crossfaded; drift
+        measured afterwards and reported (music.longform)."""
+        from .longform import drift_curve, drift_rate, render_long
+
+        frame_rate = sample_rate / hop
+        total_frames = vocal.shape[-1] // hop
+        f0 = torch.nn.functional.interpolate(f0_hz[None, None].float(), size=total_frames, mode="linear")[0, 0]
+        hows: list[str] = []
+
+        def synth(start: int, end: int) -> torch.Tensor:
+            seg = vocal[start * hop : end * hop]
+            out, how = self.convert(seg, f0[start:end], speaker, sample_rate, steps, reference)
+            hows.append(how)
+            return out
+
+        wave = render_long(
+            synth,
+            total_frames,
+            hop,
+            chunk_frames=int(self.chunk_seconds * frame_rate),
+            overlap_frames=int(2 * frame_rate),
+        )
+        times, lags, reliable = drift_curve(f0, wave, sample_rate, frame_rate)
+        drift = drift_rate(times, lags, reliable)
+        self.last_drift = drift
+        how = f"{len(hows)} chunks on one grid; drift {drift['ms_per_minute']:+.1f} ms/min, "
+        how += f"offset {drift['offset_ms']:+.0f} ms"
+        return wave, how
 
 
 def load_converter(root: str | Path, size: str = "ts-765m", device: str | torch.device | None = None) -> Converter:
@@ -121,7 +190,10 @@ def capture_effects(vocal: torch.Tensor, sample_rate: int, analysis: AnalysisRes
     if voiced.numel() > 10:
         midi = 69 + 12 * torch.log2(voiced / 440.0)
         retuned = float((midi - midi.round()).abs().lt(0.08).float().mean())  # a hard-tuned vocal sits on the grid
-    return {"reverb": decay, "retune_fraction": retuned, "autotuned": retuned > 0.7}
+    from .effects import estimate_room
+
+    room = estimate_room(vocal, sample_rate) if decay > 0.1 else None
+    return {"reverb": decay, "retune_fraction": retuned, "autotuned": retuned > 0.7, "room": room}
 
 
 def swap_voice(
@@ -140,6 +212,19 @@ def swap_voice(
     """
     converter = converter or Converter()
     notes = []
+    # 0. intake: measure the inputs, clean what the measurement calls for, keep the quality as a condition
+    from .intake import assess_input, clean_input
+
+    intake = assess_input(song, sample_rate)
+    if intake["quality"] < 0.85:
+        song, applied = clean_input(song, sample_rate, intake)
+        if applied:
+            notes.append(f"song intake ({intake['kind']}, quality {intake['quality']:.2f}): " + "; ".join(applied))
+    ref_intake = assess_input(reference, sample_rate)
+    if ref_intake["quality"] < 0.85:
+        reference, applied = clean_input(reference, sample_rate, ref_intake)
+        if applied:
+            notes.append(f"reference intake ({ref_intake['kind']}): " + "; ".join(applied))
     # 1. separation: a pretrained open separator when installed, the band-split model when given, else a notch
     pretrained = try_pretrained()
     if pretrained is not None:
@@ -202,12 +287,34 @@ def swap_voice(
             notes.append(f"melody moved for the new voice's range: {range_action}")
     if captured["autotuned"] and analysis is not None:
         f0 = retune(f0, analysis.key[0], analysis.key[1], speed=0.9)
-    # 5. convert
+    # 4b. register: what the new voice can do with this melody, and the bounded formant move
+    from .register import comfortable_range, register_plan, tract_scale
+
+    tract_ratio = None
+    if voiced.numel() > 5 and ref_voiced.numel() > 5:
+        plan = register_plan(
+            comfortable_range(reference, sample_rate),
+            (float(voiced.quantile(0.05)), float(voiced.quantile(0.95))),
+            tract_scale(reference, sample_rate),
+        )
+        tract_ratio = plan["formant_ratio"]
+        notes.append(
+            f"register: {plan['register']} ({plan['semitones_above']:.0f} st above the voice's top); {plan['action']}"
+        )
+    # 5. convert (the intake quality and the register plan travel with the batch)
     speaker = converter.embed(reference, sample_rate)
-    converted, how = converter.convert(vocal, f0, speaker, sample_rate)
+    last_reference = getattr(converter, "last_reference", None)
+    if last_reference and not last_reference.get("ok", True):
+        notes.append(
+            f"reference warning: contamination {last_reference['contamination']:.2f}; "
+            f"dropped {last_reference['dropped']}"
+        )
+    converted, how = converter.convert(
+        vocal, f0, speaker, sample_rate, reference=reference, quality=intake["quality"], tract_ratio=tract_ratio
+    )
     notes.append(how)
-    # 6. re-apply the room, place in the mix, gates
-    converted = match_reverb(converted, sample_rate, captured["reverb"], 0.0)
+    # 6. re-apply the room (per band, with its pre-delay), place in the mix, gates
+    converted = match_reverb(converted, sample_rate, captured["reverb"], 0.0, room=captured.get("room"))
     before = detect_glitches(converted, sample_rate)
     converted = repair_glitches(converted, sample_rate, before)
     after = detect_glitches(converted, sample_rate)

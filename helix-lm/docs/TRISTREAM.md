@@ -53,7 +53,7 @@ was a training task; validation was singer-disjoint; targets had to be dry.
 | source / filter / noise / lyric encoders | 3 / 5 / 2 / 4 layers | 4 / 8 / 3 / 4 layers, each a pre-norm transformer encoder |
 | fusion | 8-layer transformer | **Anansi trunk**: 2 prelude + 8 core looped 1.5x on average + 2 coda layers, 2 residual streams mixed by manifold-constrained hyper-connections, gated attention, recurrence-only prelude (the delta-rule strand carries the long musical context cheaply) |
 | decoder | rectified flow over mel | rectified flow over **codec frames** (the 2.0 codec, 25 Hz, 256-dim continuous latents), 6 layers, with the source-filter sketch added as a structural prior |
-| parameters | ~300M | **764.5M** (`helix tristream sizes`) |
+| parameters | ~300M | **765M** (`helix tristream sizes`; 765.1M with the 2.2 additions) |
 | cloning | speaker embedding | speaker embedding **and** in-context prompting through masked-span editing |
 | adversaries | singer | singer **and accent** (gradient reversal, scale 0.1) |
 | auxiliary heads | - | pitch (256 bins, 0.3), duration (0.1) |
@@ -288,9 +288,11 @@ One file, eight stages, every stage resumable from a marker, a `stop` file to en
 | `setup` | packages, GPU check, token (from `$HF_TOKEN` or `/root/hf_token`) | minutes |
 | `data` | Zenodo downloads (VocalSet, Dagstuhl, ESMUC, Slakh), Emilia-YODAS archives (`--emilia-hours`), research sets only with `--include-research`, size cap `--max-gb` | hours, network-bound |
 | `prepare` | separate, resample, F0, breaths, dryness, tags, manifests; your `uploads/` first | hours, CPU-bound |
-| `codec` | the 2.0 codec at 24 kHz with the multi-period discriminator, continuous passthrough 0.25 | `--codec-hours 240` |
+| `codec` | the 2.0 codec at 24 kHz (or `--codec-rate 50`) with the multi-period discriminator, continuous passthrough 0.25 | `--codec-hours 240` |
+| `refiner` | the sample-rate refiner on (codec reconstruction, original) pairs: phase-true harmonics, 10 ms noise, snake residual, transient and high-band losses, discriminator after 2,000 steps | `--refiner-hours 48` |
+| `air` | the air band above the codec's Nyquist from your 48 kHz uploads (opt in) | `--air-hours 0` |
 | `train` | TriStream-2 with Muon, singer-disjoint split, accent balancing, in-context speaker conditioning, checkpoints every 30 min, Hub push with each checkpoint | `--train-hours 200` |
-| `eval` | F0 RMSE in cents, voicing error, speaker similarity on held-out singers, glitch rate, accent-probe accuracy | minutes |
+| `eval` | through the fail-safe loop on held-out singers: F0 RMSE in cents, speaker similarity, glitch rate, frame-rate buzz, HNR, sync lag, robotic score, rounds, fallback rate, pass rate | minutes |
 | `push` | `CorxLabs/TriStream-2-765M` (or `--hf-repo`), model card with the gaps report | minutes |
 | `swap` | `--song` + `--reference` demo through the pipeline | minutes |
 
@@ -346,7 +348,7 @@ on *your* voices if those voices are in the uploads folder.
 
 ---
 
-## 11. Using it
+## 11. Using it (see also section 12 for the fail-safe loop)
 
 ```bash
 pip install "helix-lm[music]"                      # soundfile + HT-Demucs for separation
@@ -364,3 +366,217 @@ helix music prepare ~/takes --out /workspace/tristream/uploads --singer nathan -
 ```
 
 The token for the Hub goes in `$HF_TOKEN` or `/root/hf_token` on the machine, never in a notebook or a chat.
+
+---
+
+## 12. Hardening (2.2): what if it fails
+
+Three failure modes were named against the 2.1 design, and each is real. This section says what was built
+against each, what detects it when it happens anyway, and what the system does then. Everything below is in
+`helix_lm.audio.refiner`, `helix_lm.music.artifacts`, `helix_lm.music.humanize`, `helix_lm.music.failsafe`
+and the 2.2 changes to `tristream.py`, with the tests in `tests/test_hardening.py`.
+
+### 12.1 "Lossy compression": the 25 Hz codec smears consonants, breath and air, and can phase
+
+What is true: a 40 ms frame cannot carry a 5 ms burst or the phase relations between harmonics; the codec's
+decoder has to guess them back, and the guess is where metallic phasing and smeared fricatives come from.
+
+What was built:
+
+* **The refiner** (`HarmonicNoiseRefiner`) stops asking the codec to do those jobs. It runs at the sample
+  rate after the codec with three paths: a **harmonic oscillator bank** whose phase is accumulated sample by
+  sample from a 100 Hz F0 curve (coherent by construction, aliasing excluded by construction), a **noise
+  path** shaped by band gains at 100 Hz (a /t/ lands at 10 ms, not 40), and a **snake-activated residual
+  network** that corrects what those two cannot express. A learned gate decides how much of the codec's
+  output to keep. Its losses are multi-resolution STFT, a **transient loss** on 5 ms spectral-flux curves,
+  a **high-band loss** above 6 kHz, time-domain L1 and the multi-period discriminator. The molab program
+  trains it in its own stage (`refiner`, 48 h by default) on (codec reconstruction, original) pairs.
+* **A 50 Hz codec option** (`CodecConfig.at_frame_rate(50)`, `--codec-rate 50`): half the averaging per
+  frame at twice the decoder's sequence length.
+* **The flow decoder already works on continuous latents**, never on quantised codes; the quantiser is
+  for the language-model path, not for singing.
+
+What detects a failure anyway: `frame_rate_buzz` (the frame rate leaking into the amplitude envelope),
+`harmonic_coherence` (harmonics-to-noise along the F0 and its flicker on held notes), `hf_character` (the
+band above 6 kHz tonal where the reference is noisy: metallic), `consonant_sharpness` (how much onset
+energy survives at the reference's onsets).
+
+What happens then: the loop escalates steps and guidance and re-seeds; if consonants or air still fail it
+**transplants the source vocal's own unvoiced high band** (unvoiced bursts carry little identity, so this
+is nearly free in similarity and large in crispness); if harmonics still phase or buzz it renders the span
+from the **source-filter sketch** (`render_sketch`), which has no learned parameters and cannot phase.
+
+### 12.2 "Cross-stream desynchronization": the streams slip against each other in runs and belts
+
+What is true: the lyric stream is the only one not on the frame grid, and a model that reads pitch at 25 Hz
+cannot represent a 60 ms glide or a 6 Hz vibrato faithfully; the classic result is a formant track that
+follows the pitch (the "chipmunk" or the robot).
+
+What was built:
+
+* **Sub-frame F0**: the source stream reads the F0 at four points inside every frame (100 Hz) as offsets from
+  the frame's value (`source_features(..., f0_fine=...)`, 11 channels), and the refiner's oscillator follows
+  the same 100 Hz curve, so a run is a run and not its average.
+* **A monotonic alignment prior** on the lyric cross-attention (`alignment_bias`): with the durations
+  (ground truth in training, the duration head's prediction at inference) a frame can only attend near the
+  phoneme that is sung there. The lyric stream cannot drift against the pitch stream because it is not free to.
+* **Formant / pitch decoupling** as a loss: on half of every batch the source stream is shifted by up to
+  seven semitones and the envelope the model sketches must not move (`formant_invariance`, weight 0.05).
+  This is the invariance the source-filter theory promises, enforced rather than hoped for.
+* The source, filter and noise streams were already frame-synchronous; the decoder is bidirectional.
+
+What detects a failure anyway: `sync_lag` (cross-correlation between the control events, voicing onsets
+and note changes, and the audio's onsets at 10 ms; vibrato is deliberately not an event), and the pitch
+error of the output against the control curve.
+
+What happens then: the failing span is regenerated through the editing path with more steps; the sketch
+fallback is coherent with the control curve by construction.
+
+### 12.3 "One-block stale indexing": the trunk cannot react mid-block
+
+What is true: the index strand chooses landmarks at block boundaries from the previous block's end. In a
+streaming language model that is a one-block lag. In an offline singing model it is a choice, and the
+wrong one, because the whole song is known in advance.
+
+What was built:
+
+* **Look-ahead conditioning** (`lookahead_frames = 8`, one block): the trunk's input at frame *t* also
+  carries the source and noise streams at *t + 8*. The index decision at a block boundary is made with
+  the *next* block's pitch, breath and energy already in hand: the index is one block early, not one
+  block stale. The local strand covers the inside of the block as before.
+* **An event track** (`event_features`): beat phase, downbeat, section change and loudness surge from the
+  song analysis, fed for the current frame and one block ahead. The drop, the pivot and the sudden entry
+  are in the conductor's plan before a note is rendered; the trunk is told.
+* **Sway sampling and adaptive steps**: the flow's time grid bends towards *t = 0*, where structure is
+  decided, and sampling stops once the velocity field has settled (`adaptive=True`), so the budget goes to
+  the hard spans.
+* **Classifier-free guidance** on the voice and the sliders (`cfg_dropout = 0.1` in training, `guidance`
+  at inference): sharper identity and control when a take comes out vague.
+
+### 12.4 "No robotic sound": the humanizer and the ear for it
+
+A synthesizer gives itself away in the pitch curve before anything else. `humanize` renders a note list
+the way a larynx does (portamento with an S-shaped glide and overshoot, preparation from below,
+vibrato that starts late, ramps in, drifts and grows, a slow wander and a fine jitter, releases that fall
+away, attacks and phrase arches in loudness, a breath before each phrase, onsets never exactly on the
+grid), at 100 Hz, with named styles (`pop`, `soul`, `classical`, `reggae`, `ethereal`, `aggressive`) and a
+seed per singer. The conductor now renders through it by default and picks the style from the song's
+vibe cue. `robotic_score` is the ear for the same tells (fine fluctuation on held notes, constancy of the
+vibrato extent, instantaneous jumps instead of glides); on the test curves a machine curve scores above
+0.5 and the humanized one below 0.1.
+
+### 12.5 The loop (`failsafe.synthesize_with_gates`)
+
+```
+generate (steps, guidance, seed)
+  -> listen: artifacts, pitch error, voice similarity, sync lag, level
+  -> ok? ship
+  -> local failure (clicks, dropouts, a smeared onset)? regenerate that span only, through the editing path
+  -> otherwise: steps x2, guidance +0.5, new seed, again (up to max_rounds)
+  -> still smeared consonants or air? transplant the source's unvoiced high band
+  -> still phasing or buzzing? render the span from the source-filter sketch
+  -> glitch repair, limiter, and a report that says what was done and why
+```
+
+The report is attached to every conversion (`Converter.last_report`), printed by the molab `eval` stage per
+held-out clip (pass rate, rounds, fallback rate, buzz, HNR, lag, robotic score alongside pitch error and
+similarity), and is what a listening test should be read against.
+
+### 12.6 What this does and does not claim
+
+Each mechanism is implemented, runs on a CPU at toy scale, and is tested for the property it was built
+for (phase-true oscillator, aliasing excluded, detectors that fire on injected buzz, smear, lag and machine
+pitch, a loop that escalates and falls back without ever returning a non-finite sample). None of it has
+been trained at size, and "bulletproof" is a claim only a listening test on a trained model can make. What
+can be said is that every named failure mode now has a mechanism against it, a detector for it, and a
+fallback that is coherent by construction, which is more than a one-shot generator can say.
+
+---
+
+## 13. Hardening, round two (2.2): the production failure modes
+
+Five more ways it fails in the real world were named, and each is right. The same discipline applies:
+a mechanism against it, a detector for it, a fallback that is correct by construction.
+
+### 13.1 Alignment drift on long tracks
+
+**What is true.** A 5 ms error per chunk, accumulated across a five-minute track, is a quarter beat by the
+last chorus; sub-frame F0 and a monotonic prior do not help if the clock itself drifts.
+
+**What was built** (`helix_lm.music.longform`). Nothing accumulates: frame *i* is the samples
+`[i*hop, (i+1)*hop)` of the whole track for the codec frames, the F0 curve, the durations and the output,
+and every chunk is pasted back at its absolute position (`render_long`). Chunk edges snap to beats
+(`plan_chunks`) and overlaps are crossfaded with raised cosines; the alignment prior is re-normalized
+inside each chunk, so an error cannot be carried forward. The refiner's oscillator accumulates phase in
+float64 and wraps it. Drift is **measured** (`drift_curve`: the sync lag in 20 s windows; `drift_rate`:
+its slope in ms per minute and the constant offset) and a measured slope is cancelled by `time_warp` on
+the controls before the affected chunks are regenerated. `Converter.convert` switches to this path above
+30 s and reports the measured drift with every long conversion.
+
+### 13.2 Extreme formant stretching
+
+**What is true.** A tract does not scale with the pitch; a baritone pushed two octaves up through a
+formant-invariant model is a hollow, resonance-less sound, because physics has nothing to offer there.
+
+**What was built** (`helix_lm.music.register`). The reference voice's **tract scale** is measured from its
+first three formants (LPC); its **comfortable range** from its F0 distribution. `register_plan` says how far
+the melody leaves that range, which register the voice will be in there (chest, head, falsetto, whistle,
+beyond physics), what the plan should do (sing as written; F1 tunes to F0 on the top notes, Joliveau et
+al. 2004; move the top line down an octave; compress), and the **bounded formant ratio** the model may
+apply: a quarter of the pitch excursion in log terms, capped at the 15-20 % a real tract spans. The model
+warps its sketched envelope by that ratio (`warp_envelope` inside `TriStreamForSinging.sketch`), the swap
+pipeline logs the register verdict, and `hollow_score` detects the failure when a conversion was pushed
+past the limit anyway (F1-region deficit against the reference, flat formant contrast). Two octaves up from
+a baritone is reported as "beyond physics" with the melody moved; it is not pretended.
+
+### 13.3 Air above the codec's Nyquist
+
+**What is true.** A 24 kHz pipeline has nothing above 12 kHz, whatever the frame rate; the air of a
+sibilant and the breath of a close microphone are there, and a studio monitor shows their absence.
+
+**What was built** (`helix_lm.audio.refiner.AirBandExtension`). The body is taken from 24 to 48 kHz and the
+top band is filled with shaped noise whose per-band gains are predicted from the body's spectrum and
+whose time envelope follows the 4-11 kHz band (sibilance drives air): spectral band replication with the
+gains learned from 48 kHz recordings instead of transmitted. `air_report` measures the missing air in dB
+against a reference and `pre_echo_score` the backward smear of transients that is the "mp3" sound; both
+join the artifact report at 44.1 kHz and above. For conversion the source vocal's own air is transplanted
+where it exists (`transient_transplant` with a higher cutoff), because unvoiced air carries almost no identity.
+
+### 13.4 Out-of-distribution audio and separator residue
+
+**What is true.** Development audio is dry stems; user audio is rooms, noise, rips, clipping and
+phase-cancelled separator output, and a refiner will sharpen the damage with the voice.
+
+**What was built** (`helix_lm.music.intake`). `assess_input` measures bandwidth, noise floor, clipping,
+room T60, codec holes and summarizes them as a quality in [0, 1]; `clean_input` runs only the steps that
+measurement calls for (declipping, click repair, spectral-gate denoising from the signal's own quiet
+frames, Lebart late-reverb suppression) and records each; `separation_sanity` catches phase-cancelled
+residue (negative vocal/instrumental correlation in the voice band) and invented energy. The quality
+travels with the batch as a **condition** (`quality_in` in the filter stream), so the model is told the
+input is dirty rather than left to imitate the dirt, and it scales the refiner's residual path (`trust`),
+so a rough input gets the physical paths and the codec but not an amplifier. Training sees the same
+world: `augment` now adds codec holes, a noise floor and anti-phase separator residue to its rooms,
+echoes, muffles and loud instrumentals.
+
+### 13.5 Zero-shot reference contamination
+
+**What is true.** A ten-second reference with a chorus behind it, a bathroom around it or a shout in it
+becomes, through a pooled embedding, the singer's "permanent" timbre.
+
+**What was built** (`intake.reference_embedding`). The reference is cleaned, cut into one-second windows,
+and windows that are whispered or silent (little voicing), shouted (loud and bright well above the clip's
+own norm) or too quiet are dropped; the rest are embedded one by one and combined by a **trimmed mean**
+around the medoid, so one window cannot steer the voice. The report lists what was dropped and the
+**contamination**: how far the naive pooled embedding sat from the robust one; the swap pipeline warns
+when it is large. `condition_invariance_loss` trains the speaker encoder so that a clip and its augmented
+twin (room, noise, music, band limit) embed the same and different voices do not. `Converter.embed` uses
+the robust path by default.
+
+### 13.6 Still not claimed
+
+Every mechanism above runs and is tested at toy scale on a CPU (`tests/test_hardening2.py`). The
+formant estimates are the phonetics recipe, good to a few percent on clean vowels and worse on dense
+mixes; the intake's cleaners are classical and will not rescue a 32 kbps rip; the air band needs 48 kHz
+training data you supply; and the drift controller corrects a measured slope, not an unmeasurable one.
+What is claimed is narrower and true: each named failure now has a measurement, a mechanism and a
+fallback, and the system reports which of them it used.

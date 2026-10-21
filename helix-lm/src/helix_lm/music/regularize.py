@@ -246,8 +246,41 @@ def augment(
     if draw() < 0.2:
         x = lowpass(x, 4000 + 8000 * draw(), sample_rate)
         applied["bandlimited"] = True
+    if draw() < 0.2:  # a low-bitrate rip: band limit plus the holes a perceptual codec punches
+        depth = 30 + 20 * draw()
+        x = codec_hole_augment(x, sample_rate, depth_db=depth, seed=int(draw() * 1e6))
+        applied["codec_holes_db"] = depth
+    if draw() < 0.25:  # a noise floor (phone, room tone, tape)
+        level_db = -45 + 20 * draw()
+        noise = torch.randn(x.shape[-1], generator=g)
+        noise = lowpass(noise, 6000.0, sample_rate)
+        x = x + noise / (noise.pow(2).mean().sqrt() + 1e-9) * x.pow(2).mean().sqrt() * 10 ** (level_db / 20)
+        applied["noise_floor_db"] = level_db
+    if instrumental is not None and draw() < 0.2:  # separator residue: anti-phase, low-passed instrumental
+        inst = instrumental[: x.shape[-1]]
+        if inst.shape[-1] < x.shape[-1]:
+            inst = F.pad(inst, (0, x.shape[-1] - inst.shape[-1]))
+        x = x - 0.1 * lowpass(inst, 2000.0, sample_rate) * (
+            x.pow(2).mean().sqrt() / (inst.pow(2).mean().sqrt() + 1e-9)
+        )
+        applied["phase_residue"] = True
     peak = x.abs().max()
     return (x / peak * 0.95 if peak > 0.95 else x), applied
+
+
+def codec_hole_augment(x: torch.Tensor, sample_rate: int, depth_db: float = 36.0, seed: int = 0) -> torch.Tensor:
+    """Zero the time-frequency bins above 4 kHz that sit ``depth_db`` under their frame's peak, and cut above
+    16 kHz: what an MP3 at 128 kbps leaves of a vocal."""
+    n_fft, hop = 2048, 512
+    window = torch.hann_window(n_fft)
+    spec = torch.stft(x, n_fft, hop, window=window, return_complex=True)
+    db = 20 * torch.log10(spec.abs() + 1e-7)
+    freqs = torch.fft.rfftfreq(n_fft, 1 / sample_rate)
+    peak = db.max(0, keepdim=True).values
+    holes = (db < peak - depth_db) & (freqs >= 4000)[:, None]
+    spec = spec.masked_fill(holes, 0)
+    spec = spec.masked_fill((freqs >= 16000)[:, None], 0)
+    return torch.istft(spec, n_fft, hop, window=window, length=x.shape[-1])
 
 
 def retune_f0_for_training(f0_hz: torch.Tensor, tonic: int, mode: str, seed: int = 0) -> torch.Tensor:

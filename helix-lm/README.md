@@ -173,6 +173,31 @@ helix train --size a-1b --optimizer muon --mup --reweight-strength 1 --data /dat
 helix audio sources --commercial
 ```
 
+## 2.2: hardening TriStream-2
+
+2.2 answers the three failure modes named against 2.1 and the robotic-sound problem, with mechanisms, detectors
+and fallbacks (`docs/TRISTREAM.md` section 12):
+
+* **the refiner** (`helix_lm.audio.refiner`): phase-true additive harmonics from a 100 Hz F0, 10 ms shaped noise
+  for consonants and breath, a snake-activated residual network and a gate on the codec's output, trained with
+  transient and high-band losses; a 50 Hz codec option;
+* **stream sync**: sub-frame F0 in the source stream, a monotonic alignment prior on lyric attention, a formant /
+  pitch invariance loss;
+* **routing**: look-ahead conditioning and a song-event track so the index is one block early instead of one
+  block stale; sway sampling, adaptive steps, classifier-free guidance;
+* **the ear** (`helix_lm.music.artifacts`): frame-rate buzz, harmonic coherence, metallic high band, consonant
+  smear, sync lag, robotic pitch;
+* **the humanizer** (`helix_lm.music.humanize`): portamento, overshoot, scoop, late and drifting vibrato, wander,
+  jitter, releases, attacks, phrase arches, breaths; styles; the conductor renders through it;
+* **the fail-safe loop** (`helix_lm.music.failsafe`): generate, listen, escalate, repair the span, transplant the
+  source's unvoiced band, fall back to the source-filter sketch, report;
+* a per-band **room model** so a swapped voice gets the original's room, not a broadband tail;
+* **round two** (`docs/TRISTREAM.md` section 13): one global frame grid and measured drift control for long
+  tracks (`music.longform`), register physics with a bounded formant move and F1 tuning (`music.register`), an
+  air-band extension to 48 kHz with air and pre-echo detectors, an intake that measures and cleans real-world
+  audio and passes its quality to the model as a condition (`music.intake`), and robust reference embeddings
+  that drop shouted, whispered or buried windows and report contamination.
+
 ## 2.1: TriStream-2 and the music stack
 
 2.1 adds `helix_lm.music`, documented with its evidence in [`docs/TRISTREAM.md`](docs/TRISTREAM.md):
@@ -194,7 +219,8 @@ helix audio sources --commercial
 * **data rules**: accent tags and balancing, pitch-range buckets with a gaps report, dry-target checks,
   singer-disjoint splits, augmentation into the hard input conditions, multi-file uploads;
 * **the 96 GB program** (`helix tristream molab`, `python -m helix_lm.scripts.tristream_molab`): data, prepare,
-  codec, train, eval, push, swap on one RTX PRO 6000 Blackwell, resumable, with auto batch sizing.
+  codec, refiner, air, train, eval, push, swap on one RTX PRO 6000 Blackwell, resumable, with auto batch sizing
+  and the fail-safe loop in eval and swap.
 
 ```bash
 pip install "helix-lm[music]"

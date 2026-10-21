@@ -307,14 +307,49 @@ def plan_vocals(
 
 # ------------------------------------------------------------------------------------- to controls --
 def render_controls(
-    plan: VocalPlan, analysis: AnalysisResult, frame_rate: float = 25.0, vibrato_depth: float = 0.35
+    plan: VocalPlan,
+    analysis: AnalysisResult,
+    frame_rate: float = 25.0,
+    vibrato_depth: float = 0.35,
+    humanize: bool = True,
+    style=None,
+    seed: int = 0,
 ) -> dict[str, torch.Tensor]:
     """
-    Per-frame control streams for TriStream: ``f0_hz`` (0 where silent; vibrato ramps in on held notes, a
-    scoop into each new note), ``note`` (MIDI or 128 for rest), ``technique`` ids, ``harmony_f0`` (parts,
-    frames), and one curve per slider, all at ``frame_rate``; notes are placed on the beat grid with swing
-    and a small human offset.
+    Per-frame control streams for TriStream: ``f0_hz`` (0 where silent), ``note`` (MIDI or 128 for rest),
+    ``technique`` ids, ``harmony_f0`` (parts, frames), and one curve per slider, all at ``frame_rate``; notes
+    are placed on the beat grid with swing and a small human offset. With ``humanize`` (the default) the pitch,
+    loudness and breath come from :mod:`humanize` at 100 Hz (portamento, overshoot, scoop, delayed and drifting
+    vibrato, wander and jitter, releases, attacks, phrase arches) and ``f0_fine``, ``energy`` and ``breath`` are
+    returned too; the style follows the song's vibe cue unless one is given.
     """
+    controls = _render_controls_grid(plan, analysis, frame_rate, vibrato_depth)
+    if not humanize:
+        return controls
+    from .humanize import HumanStyle, decimate, notes_from_plan
+    from .humanize import humanize as humanize_notes
+
+    if style is None:
+        cues = analysis.vibe.get("cues", []) if isinstance(analysis.vibe, dict) else []
+        pick = next(
+            (c for c in ("ethereal", "aggressive", "classical", "soul", "reggae", "pop") if c in cues), "neutral"
+        )
+        style = HumanStyle.named(pick)
+    notes = notes_from_plan(plan, analysis, frame_rate)
+    frames = controls["f0_hz"].shape[-1]
+    if not notes:
+        return controls
+    fine = humanize_notes(notes, style, 100.0, total_seconds=frames / frame_rate, seed=seed)
+    controls["f0_fine"] = fine["f0_hz"][: int(frames * 100 / frame_rate)]
+    controls["f0_hz"] = decimate(fine["f0_hz"], 100.0, frame_rate, frames)
+    controls["energy"] = decimate(fine["energy"], 100.0, frame_rate, frames)
+    controls["breath"] = decimate(fine["breath"], 100.0, frame_rate, frames)
+    return controls
+
+
+def _render_controls_grid(
+    plan: VocalPlan, analysis: AnalysisResult, frame_rate: float = 25.0, vibrato_depth: float = 0.35
+) -> dict[str, torch.Tensor]:
     beat_times = analysis.beat_times()
     if beat_times.numel() == 0:
         beat_times = torch.arange(1) * 0.0
