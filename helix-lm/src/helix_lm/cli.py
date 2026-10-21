@@ -344,7 +344,7 @@ def cmd_tristream(args: argparse.Namespace) -> None:
         losses["total"].backward()
         optimizer.step()
         if (step + 1) % max(1, args.steps // 5) == 0:
-            print(f"  step {step + 1:3}  " + "  ".join(f"{k} {float(v):.3f}" for k, v in losses.items()))
+            print(f"  step {step + 1:3}  " + "  ".join(f"{k} {float(v.detach()):.3f}" for k, v in losses.items()))
     model.eval()
     mask = torch.zeros(b, t, dtype=torch.bool)
     mask[:, 8:16] = True

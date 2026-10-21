@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,6 +57,8 @@ def _flex_attention_fn(device: torch.device):
     """FlexAttention is only fast once compiled; on a CPU the eager form is used (tests, tiny models)."""
     global _compiled_flex
     if device.type != "cuda":
+        # torch warns once that the eager kernel materializes the scores; that is the deliberate CPU path here
+        warnings.filterwarnings("ignore", message=".*flex_attention called without torch.compile.*")
         return flex_attention
     if _compiled_flex is None:
         _compiled_flex = torch.compile(flex_attention, dynamic=False)

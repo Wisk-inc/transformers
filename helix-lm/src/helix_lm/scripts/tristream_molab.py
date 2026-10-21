@@ -162,8 +162,9 @@ def stage_data(args) -> None:
         try:
             from huggingface_hub import snapshot_download
 
-            # Emilia-YODAS is the CC BY 4.0 half; the EN shard list is large, so take the first N archives only.
-            patterns = [f"Emilia-YODAS/EN/*{i:03d}*" for i in range(max(1, int(args.emilia_hours / 50)))]
+            # Emilia-YODAS is the CC BY 4.0 half (1,362 EN archives named EN-B000000.tar ...; about 50 h each):
+            # fetch exactly the first N, by name
+            patterns = [f"Emilia-YODAS/EN/EN-B{i:06d}.tar" for i in range(max(1, int(args.emilia_hours / 50)))]
             snapshot_download(
                 "amphion/Emilia-Dataset",
                 repo_type="dataset",
@@ -257,6 +258,7 @@ def stage_codec(args) -> None:
     if not files:
         log("!! no prepared audio; run the prepare stage")
         return
+    (root / "codec").mkdir(parents=True, exist_ok=True)  # every stage makes its own folder: no order dependence
     ckpt = root / "codec" / "codec.pt"
     step = 0
     if ckpt.exists():
@@ -366,7 +368,7 @@ def stage_refiner(args) -> None:
     if not files:
         log("!! no prepared vocals")
         return
-    (root / "refiner").mkdir(exist_ok=True)
+    (root / "refiner").mkdir(parents=True, exist_ok=True)
     ckpt = root / "refiner" / "refiner.pt"
     config = RefinerConfig(
         sample_rate=args.sample_rate, frame_dim=codec.config.dim, frame_rate=codec.config.frame_rate
@@ -431,7 +433,7 @@ def stage_refiner(args) -> None:
             continue
         step += 1
         if step % 50 == 0:
-            log(f"refiner step {step}: " + " ".join(f"{k} {float(v):.3f}" for k, v in terms.items()))
+            log(f"refiner step {step}: " + " ".join(f"{k} {float(v.detach()):.3f}" for k, v in terms.items()))
         if time.time() - last_save > 1800:
             save()
             last_save = time.time()
@@ -461,7 +463,7 @@ def stage_air(args) -> None:
         mark(root, "air")
         return
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    (root / "air").mkdir(exist_ok=True)
+    (root / "air").mkdir(parents=True, exist_ok=True)
     ckpt = root / "air" / "air.pt"
     config = AirConfig(in_rate=args.sample_rate, out_rate=48000)
     air = AirBandExtension(config).to(device)
@@ -493,7 +495,7 @@ def stage_air(args) -> None:
         opt.step()
         step += 1
         if step % 50 == 0:
-            log(f"air step {step}: " + " ".join(f"{k} {float(v):.3f}" for k, v in terms.items()))
+            log(f"air step {step}: " + " ".join(f"{k} {float(v.detach()):.3f}" for k, v in terms.items()))
         if step % 500 == 0:
             torch.save({"air": air.state_dict(), "step": step, "config": config.__dict__}, ckpt)
     torch.save({"air": air.state_dict(), "step": step, "config": config.__dict__}, ckpt)
@@ -530,7 +532,13 @@ def stage_train(args) -> None:
     split = split_singers([t.singer for t in tags])
     train_idx = [i for i, t in enumerate(tags) if split[t.singer] == "train"]
     weights = balanced_weights([tags[i] for i in train_idx], by="accent")
-    config = TriStreamConfig.named(args.size, frame_dim=codec.config.dim, sample_rate=args.sample_rate)
+    config = TriStreamConfig.named(
+        args.size,
+        frame_dim=codec.config.dim,
+        sample_rate=args.sample_rate,
+        semantic_codebook=codec.config.codebook_size,  # the content codes come from this codec
+        frame_rate=codec.config.frame_rate,
+    )
     model = TriStreamForSinging(config).to(device)
     speaker_encoder = SpeakerEncoder(frame_dim=codec.config.dim, embedding_dim=config.speaker_dim).to(device)
     params = list(model.parameters()) + list(speaker_encoder.parameters())
@@ -603,7 +611,10 @@ def stage_train(args) -> None:
             continue
         step += 1
         if step % 20 == 0:
-            log(f"step {step}: " + " ".join(f"{k} {float(v):.3f}" for k, v in losses.items() if k != "mask_fraction"))
+            log(
+                f"step {step}: "
+                + " ".join(f"{k} {float(v.detach()):.3f}" for k, v in losses.items() if k != "mask_fraction")
+            )
         if time.time() - last_save > 1800:
             torch.save(
                 {
@@ -659,9 +670,6 @@ def stage_eval(args) -> None:
     model.load_state_dict(state["model"])
     speaker_encoder = SpeakerEncoder(frame_dim=codec.config.dim, embedding_dim=config.speaker_dim).to(device).eval()
     speaker_encoder.load_state_dict(state["speaker"])
-    if args.batch <= 0:
-        args.batch = 64  # auto: the largest batch that fits is found by halving on out-of-memory
-        log("auto batch size: starting at 64 clips and halving on out-of-memory until it fits")
     records = []
     for manifest in (root / "prepared").rglob("manifest.json"):
         data = json.loads(manifest.read_text())
@@ -669,6 +677,9 @@ def stage_eval(args) -> None:
     tags = [ClipTags(**r["tags"]) for r in records]
     split = split_singers([t.singer for t in tags])
     held = [r for r, t in zip(records, tags, strict=True) if split[t.singer] == "validation"][: args.eval_clips]
+    if not held and records:
+        log("no validation singers yet (too few singers for the split): evaluating on training clips, optimistic")
+        held = records[: args.eval_clips]
     results = {
         "clips": len(held), "f0_rmse_cents": [], "speaker_similarity": [], "glitch_rate": [], "buzz_db": [],
         "hnr_db": [], "sync_lag_ms": [], "robotic": [], "rounds": [], "fallbacks": [], "passed": [],
@@ -711,6 +722,7 @@ def stage_eval(args) -> None:
         results["fallbacks"].append(float(any("sketch" in a or "transplant" in a for a in report.applied)))
         results["passed"].append(float(report.ok))
     summary = {k: (sum(v) / len(v) if isinstance(v, list) and v else v) for k, v in results.items()}
+    (root / "eval").mkdir(parents=True, exist_ok=True)
     (root / "eval" / "summary.json").write_text(json.dumps(summary, indent=1))
     log("eval:", summary)
     mark(root, "eval")

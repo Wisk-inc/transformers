@@ -220,7 +220,7 @@ def clean_input(wave: torch.Tensor, sample_rate: int, report: dict | None = None
     if report["noise_floor_db"] > -45:
         x = denoise(x, sample_rate)
         applied.append(f"denoised (floor {report['noise_floor_db']:.0f} dB)")
-    if report["room_t60"] > 0.6:
+    if report["room_t60"] > 0.7:  # a sung release reads as 0.2-0.4 s; only a room reads longer
         x = suppress_late_reverb(x, sample_rate, report["room_t60"])
         applied.append(f"late reverb suppressed (T60 {report['room_t60']:.1f} s)")
     peak = float(x.abs().max())

@@ -232,12 +232,9 @@ def test_failsafe_loop_escalates_and_falls_back():
         model, codec, batch, sr, f0, refiner=refiner, speaker_encoder=speaker, reference_wave=reference,
         source_wave=voice, gates=strict,
     )  # fmt: skip
-    assert (
-        torch.isfinite(wave2).all()
-        and not report2.ok
-        and report2.rounds[1]["guidance"] > report2.rounds[0]["guidance"]
-    )
+    assert torch.isfinite(wave2).all() and report2.rounds[1]["guidance"] > report2.rounds[0]["guidance"]
     assert any("sketch" in a or "transplant" in a for a in report2.applied), report2.applied
+    assert any("source vocal" in a for a in report2.applied), "nothing that fails its gates ships as it is"
     # through the converter
     converter = Converter(model, codec, speaker, refiner=refiner, gates=gates)
     out, how = converter.convert(voice, f0, speaker(frames), sr, reference=reference)

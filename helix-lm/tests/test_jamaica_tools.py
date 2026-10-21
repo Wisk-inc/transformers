@@ -64,6 +64,7 @@ def test_crawler_respects_robots_and_stays_on_host(tmp_path):
     again.run()
     assert again.pages == 0 and again.documents == 2
     server.shutdown()
+    server.server_close()
 
 
 def test_html_to_text_and_caribbean_filter():
@@ -135,6 +136,7 @@ def test_synthesizer_makes_both_outputs_through_a_fake_teacher(tmp_path):
     # a second call does nothing new: the ids are recorded
     assert synthesize(tmp_path, teacher, count=8, workers=2, log=lambda *_: None)["kept"] == 0
     server.shutdown()
+    server.server_close()
 
 
 def test_synth_filters_and_scenarios():

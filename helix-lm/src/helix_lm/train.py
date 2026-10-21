@@ -205,7 +205,7 @@ class Trainer:
         torch.manual_seed(args.seed)
         self.started = time.time()
         self.deadline = self.started + args.hours * 3600 if args.hours else float("inf")
-        self.log_file = open(self.out / "log.jsonl", "a") if self.rank == 0 else None  # noqa: SIM115
+        self.log_path = self.out / "log.jsonl" if self.rank == 0 else None  # appended to per record, never held open
 
         self.tokenizer = HelixTokenizer.from_pretrained(args.tokenizer)
         self.config = self._build_config()
@@ -262,9 +262,9 @@ class Trainer:
         if self.rank != 0:
             return
         print(text, flush=True)
-        if record is not None and self.log_file is not None:
-            self.log_file.write(json.dumps({"time": time.time(), **record}) + "\n")
-            self.log_file.flush()
+        if record is not None and self.log_path is not None:
+            with open(self.log_path, "a") as handle:
+                handle.write(json.dumps({"time": time.time(), **record}) + "\n")
 
     def _build_config(self):
         fields = {}

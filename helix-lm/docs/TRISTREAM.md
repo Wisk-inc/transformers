@@ -474,9 +474,16 @@ generate (steps, guidance, seed)
   -> local failure (clicks, dropouts, a smeared onset)? regenerate that span only, through the editing path
   -> otherwise: steps x2, guidance +0.5, new seed, again (up to max_rounds)
   -> still smeared consonants or air? transplant the source's unvoiced high band
-  -> still phasing or buzzing? render the span from the source-filter sketch
-  -> glitch repair, limiter, and a report that says what was done and why
+  -> glitch repair, then listen again
+  -> still failing any sound gate? render the span from the source-filter sketch (it cannot phase or glitch)
+  -> still failing, and this is a conversion? ship the source vocal unchanged and say so
+  -> limiter, and a report that says which rung was reached and why
 ```
+
+Nothing that fails its gates is shipped as it is. An undertrained model produces noise; the loop's last rungs
+turn that into either a physically coherent sketch of the planned voice or, for a conversion, the original
+voice untouched, with the report naming the failure. That is the guarantee against "weird sounds": not
+that the model cannot fail, but that a failure never reaches the listener as noise.
 
 The report is attached to every conversion (`Converter.last_report`), printed by the molab `eval` stage per
 held-out clip (pass rate, rounds, fallback rate, buzz, HNR, lag, robotic score alongside pitch error and

@@ -224,17 +224,28 @@ def synthesize_with_gates(
         wave = transient_transplant(wave, source_wave.to(device), f0_hz, sample_rate, gates.frame_rate)
         report.applied.append("transient transplant from the source vocal")
         final = listen(wave)
-    if not final["ok"] and gates.use_sketch_fallback and ({"coherence", "buzz", "hf"} & set(final["failed"])):
-        envelope, noise_bands = model.sketch_bands(batch)
-        sketch_wave = render_sketch(fine[None], envelope, noise_bands, sample_rate, gates.fine_rate)[0]
-        level = wave.pow(2).mean().sqrt() / (sketch_wave.pow(2).mean().sqrt() + 1e-9)
-        wave = crossfade_in(wave, sketch_wave * level, full[0], sample_rate, gates.frame_rate)
-        report.applied.append("source-filter sketch rendered for the failing span")
-        final = listen(wave)
     glitches = detect_glitches(wave, sample_rate)
     if not glitches["ok"]:
         wave = repair_glitches(wave, sample_rate, glitches)
         report.applied.append("glitch repair")
+        final = listen(wave)
+    # the last rungs: nothing that fails its gates is shipped as it is. The sketch cannot phase, buzz or glitch
+    # (its harmonics are arithmetic); and in a conversion the source vocal, unchanged, is a real voice, which
+    # beats any synthetic noise. The report says which rung was reached.
+    sound_failures = {"coherence", "buzz", "hf", "glitches", "level", "robotic", "pitch", "consonants", "pre_echo"}
+    if not final["ok"] and gates.use_sketch_fallback and (sound_failures & set(final["failed"])):
+        envelope, noise_bands = model.sketch_bands(batch)
+        sketch_wave = render_sketch(fine[None], envelope, noise_bands, sample_rate, gates.fine_rate)[0]
+        level = wave.pow(2).mean().sqrt().clamp(min=1e-3) / (sketch_wave.pow(2).mean().sqrt() + 1e-9)
+        wave = crossfade_in(wave, sketch_wave * level, full[0], sample_rate, gates.frame_rate)
+        report.applied.append("source-filter sketch rendered for the failing span")
+        final = listen(wave)
+    if not final["ok"] and source_wave is not None and (sound_failures & set(final["failed"])):
+        n = min(wave.numel(), source_wave.numel())
+        wave = torch.nn.functional.pad(source_wave.to(device).float()[:n], (0, wave.numel() - n))
+        report.applied.append("fell back to the source vocal unchanged: the model's output failed its gates")
+        final = listen(wave)
+        final["fallback"] = "source"
     wave = limit(wave)
     report.final = final
     report.ok = final["ok"]

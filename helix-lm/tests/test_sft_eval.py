@@ -166,7 +166,7 @@ def test_lm_eval_adapter_scores_like_a_direct_forward(prepared, tmp_path):
     )
     ids = torch.tensor([context + continuation])
     logprobs = torch.log_softmax(lm.model(ids).logits.float(), -1)[0]
-    expected = sum(float(logprobs[len(context) - 1 + i, t]) for i, t in enumerate(continuation))
+    expected = sum(float(logprobs[len(context) - 1 + i, t].detach()) for i, t in enumerate(continuation))
     assert abs(scores[0][0] - expected) < 1e-3
     text = lm.generate_until([Request("Mi deh", {"until": ["\n"], "max_gen_toks": 4})])
     assert len(text) == 1 and isinstance(text[0], str)

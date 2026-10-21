@@ -88,7 +88,7 @@ class DepthTransformer(nn.Module):
         layer = nn.TransformerEncoderLayer(
             d, config.depth_heads, 4 * d, dropout=0.0, batch_first=True, norm_first=True
         )
-        self.layers = nn.TransformerEncoder(layer, config.depth_layers)
+        self.layers = nn.TransformerEncoder(layer, config.depth_layers, enable_nested_tensor=False)
         self.norm = nn.LayerNorm(d)
         self.heads = nn.ModuleList(nn.Linear(d, config.codebook_size) for _ in range(config.num_codebooks - 1))
         self.config = config

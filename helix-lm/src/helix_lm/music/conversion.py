@@ -102,8 +102,10 @@ class Converter:
         codes = self.codec.encode(vocal[None])[:, 0]  # the semantic codebook carries the content, not the timbre
         batch = {
             "source": source_features(f0, energy), "noise": noise_features(frames), "frames": frames,
-            "semantic": codes[:, :t], "phonemes": torch.full((1, 1), -1, dtype=torch.long), "speaker": speaker,
+            "phonemes": torch.full((1, 1), -1, dtype=torch.long), "speaker": speaker,
         }  # fmt: skip
+        if int(codes.max()) < self.model.config.semantic_codebook:  # a model trained with this codec's codebook
+            batch["semantic"] = codes[:, :t]
         if quality is not None:
             batch["quality"] = torch.tensor([float(quality)])
         if tract_ratio is not None:
