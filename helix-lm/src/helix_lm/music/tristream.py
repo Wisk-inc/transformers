@@ -90,6 +90,9 @@ class TriStreamConfig:
     monotonic_sigma: float = 4.0  # frames; width of the alignment prior on lyric attention (0 = off)
     cfg_dropout: float = 0.1  # classifier-free guidance: drop the speaker and the sliders this often in training
     formant_invariance_weight: float = 0.05  # the envelope must not move when the pitch is shifted (0 = off)
+    sustain_sigma_gain: float = 3.0  # the alignment prior widens up to (1 + gain)x on sustained notes (melismas)
+    formant_smoothness_weight: float = 0.02  # the envelope may not jump between frames of a held pitch
+    transition_lookahead_blocks: int = 2  # extra look-ahead, gated by upcoming downbeats and section changes
     name: str = "tristream"
 
     @property
@@ -197,17 +200,36 @@ class CrossAttention(nn.Module):
         return queries + out
 
 
-def alignment_bias(durations: torch.Tensor, frames: int, sigma: float) -> torch.Tensor:
+def alignment_bias(durations: torch.Tensor, frames: int, sigma: float | torch.Tensor) -> torch.Tensor:
     """
     The monotonic prior on lyric attention: phoneme ``j`` is expected around the centre of its span given the
     durations (frames per phoneme, ``(B, L)``); the bias is a Gaussian in frame distance, ``(B, T, L)``. With
     ground-truth durations in training and predicted ones at inference, a frame can only attend near the
     phoneme that is sung there, so the lyric stream cannot slip against the pitch stream during a run.
+    ``sigma`` may be a per-frame ``(B, T)`` tensor: wide where a note is held (a melisma stretches one vowel
+    over seconds and the prior must not hurry it), narrow where syllables move.
     """
     ends = durations.float().clamp(min=0).cumsum(-1)
     centres = ends - durations.float().clamp(min=0) / 2  # (B, L)
     pos = torch.arange(frames, device=durations.device).float()[None, :, None]
+    if torch.is_tensor(sigma):
+        sigma = sigma.float()[:, :, None]
     return -((pos - centres[:, None, :]) ** 2) / (2 * sigma**2)
+
+
+def sustain_profile(source: torch.Tensor, threshold: float = 0.015, horizon: int = 25) -> torch.Tensor:
+    """
+    How long the current note has been held, per frame, in [0, 1]: voiced frames whose log-F0 moved less than
+    about half a semitone since the previous frame extend a run; the run length over ``horizon`` frames (one
+    second at 25 Hz) is the profile. Channel 0 of the source stream is (log f0 - 5) / 2, channel 1 voicing.
+    """
+    log_f0, voiced = source[..., 0], source[..., 1] > 0.5
+    steady = voiced.clone()
+    steady[:, 1:] &= voiced[:, :-1] & ((log_f0[:, 1:] - log_f0[:, :-1]).abs() < threshold)
+    run = torch.zeros_like(log_f0)
+    for t in range(1, source.shape[1]):
+        run[:, t] = (run[:, t - 1] + 1) * steady[:, t].float()
+    return (run / horizon).clamp(max=1.0)
 
 
 class GradientReversal(torch.autograd.Function):
@@ -302,6 +324,7 @@ class TriStreamForSinging(nn.Module):
         # --- fusion trunk (Anansi) and its cross-attention to the lyrics
         self.fuse = nn.Linear(3 * d, d)
         self.ahead = nn.Linear(2 * d, d)  # the source and noise streams one block ahead
+        self.ahead2 = nn.Linear(2 * d, d)  # two blocks ahead, switched on by an upcoming downbeat or section change
         self.event_in = nn.Linear(c.event_dim, d)
         self.null_speaker = nn.Parameter(torch.zeros(c.speaker_dim))  # the "no voice given" condition for guidance
         self.trunk = AnansiModel(c.anansi())
@@ -384,7 +407,8 @@ class TriStreamForSinging(nn.Module):
         if durations is None:
             durations = torch.expm1(self.duration_head(lyric_states)[..., 0].detach()).clamp(min=0) * (~lyric_pad)
             durations = durations / durations.sum(-1, keepdim=True).clamp(min=1) * t  # fit the predicted total to T
-        return alignment_bias(durations, t, c.monotonic_sigma)
+        sigma = c.monotonic_sigma * (1.0 + c.sustain_sigma_gain * sustain_profile(batch["source"]))
+        return alignment_bias(durations, t, sigma)
 
     def encode_noise(self, noise: torch.Tensor) -> torch.Tensor:
         return self.noise(self.noise_in(noise))
@@ -421,6 +445,14 @@ class TriStreamForSinging(nn.Module):
         if events is not None:
             ev = self.event_in(events)
             fused = fused + ev + (shift_ahead(ev, c.lookahead_frames) if c.lookahead_frames > 0 else 0)
+            if c.transition_lookahead_blocks > 0 and c.lookahead_frames > 0:
+                # a downbeat or a section change inside the next blocks switches on a longer look-ahead, so the
+                # index decision before a drop is made with the drop itself in hand, not the intro's context
+                span = c.transition_lookahead_blocks * c.lookahead_frames
+                flag = events[..., 1:3].amax(-1)  # (B, T): downbeat, section change
+                upcoming = F.max_pool1d(F.pad(flag[:, None], (0, span)), span + 1, stride=1)[:, 0, : flag.shape[1]]
+                far = shift_ahead(torch.cat([source, noise], dim=-1), span)
+                fused = fused + upcoming[..., None] * self.ahead2(far)
         hidden, _, _ = self.trunk(inputs_embeds=fused, num_loops=num_loops)
         return self.fusion_cross(hidden, lyric_states, lyric_pad, bias)
 
@@ -459,6 +491,7 @@ class TriStreamForSinging(nn.Module):
         """
         c = self.config
         frames = batch["frames"]
+        target = batch.get("target_frames", frames)  # the input may be a roomy, noisy copy; the target stays dry
         b, t, _ = frames.shape
         if batch.get("mask_all"):
             mask = torch.ones(b, t, dtype=torch.bool, device=frames.device)
@@ -482,20 +515,27 @@ class TriStreamForSinging(nn.Module):
         sketch, envelope, noise_bands = self.sketch(hidden, batch["source"], batch.get("tract_ratio"))
 
         # rectified flow on the masked frames
-        z = torch.randn_like(frames)
+        z = torch.randn_like(target)
         tt = torch.rand(b, device=frames.device)
-        noisy = (1 - tt[:, None, None]) * z + tt[:, None, None] * frames
+        noisy = (1 - tt[:, None, None]) * z + tt[:, None, None] * target
         v = self.velocity(noisy, tt, hidden, sketch)
-        flow = ((v - (frames - z)) ** 2).mean(-1)
-        losses = {"flow": (flow * mask).sum() / mask.sum().clamp(min=1)}
+        flow = ((v - (target - z)) ** 2).mean(-1)
+        # per-sample loss weights: a sung clip may count for more than a spoken one (domain balance, data.py)
+        sample_weight = batch.get("weights")
+        sample_weight = (
+            torch.ones(b, device=frames.device) if sample_weight is None else sample_weight.to(frames.device).float()
+        )
+        weighted_mask = mask.float() * sample_weight[:, None]
+        losses = {"flow": (flow * weighted_mask).sum() / weighted_mask.sum().clamp(min=1e-6)}
 
         # predictors (pitch per frame from the fused state, durations per phoneme from the lyric states)
         if batch.get("f0_hz") is not None:
             pitch = self.pitch_head(hidden)
             bins = hz_to_bins(batch["f0_hz"])
-            losses["pitch"] = F.cross_entropy(
-                pitch[..., : PITCH_BINS + 1].reshape(-1, PITCH_BINS + 1), bins.reshape(-1)
-            )
+            per_frame = F.cross_entropy(
+                pitch[..., : PITCH_BINS + 1].reshape(-1, PITCH_BINS + 1), bins.reshape(-1), reduction="none"
+            ).reshape(b, t)
+            losses["pitch"] = (per_frame * sample_weight[:, None]).sum() / (sample_weight.sum() * t).clamp(min=1e-6)
         if batch.get("durations") is not None:
             pred = self.duration_head(lyric_states)[..., 0]
             target = torch.log1p(batch["durations"].float())
@@ -520,6 +560,13 @@ class TriStreamForSinging(nn.Module):
                 None if events is None else events[:half], None if bias is None else bias[:half],
             )  # fmt: skip
             losses["formant_invariance"] = (self.envelope_head(hidden_s) - envelope[:half].detach()).abs().mean()
+        # formant smoothness: on a held pitch the envelope must not jump between frames (the "formant wall"
+        # click at a register break is exactly such a jump)
+        if c.formant_smoothness_weight > 0 and t > 1:
+            src = batch["source"]
+            held = (src[:, 1:, 1] > 0.5) & (src[:, :-1, 1] > 0.5) & ((src[:, 1:, 0] - src[:, :-1, 0]).abs() < 0.03)
+            jumps = (envelope[:, 1:] - envelope[:, :-1]).abs().mean(-1)
+            losses["formant_smoothness"] = (jumps * held.float()).sum() / held.float().sum().clamp(min=1)
         losses["total"] = (
             losses["flow"]
             + 0.3 * losses.get("pitch", 0)
@@ -527,6 +574,7 @@ class TriStreamForSinging(nn.Module):
             + 0.1 * losses.get("singer_adv", 0)
             + 0.1 * losses.get("accent_adv", 0)
             + c.formant_invariance_weight * losses.get("formant_invariance", 0)
+            + c.formant_smoothness_weight * losses.get("formant_smoothness", 0)
         )
         losses["mask_fraction"] = mask.float().mean()
         return losses

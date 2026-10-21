@@ -232,9 +232,13 @@ def try_pretrained(name: str = "htdemucs"):
     try:
         import demucs.apply  # type: ignore
         import demucs.pretrained  # type: ignore
+        import torchaudio  # type: ignore  # noqa: F401  (the resampler the separator needs; checked up front)
     except ImportError:
         return None
-    model = demucs.pretrained.get_model(name)
+    try:
+        model = demucs.pretrained.get_model(name)
+    except Exception:  # weights not downloadable here: the pipeline falls back instead of crashing later
+        return None
     model.eval()
 
     def separate(wave: torch.Tensor, sample_rate: int) -> dict[str, torch.Tensor]:

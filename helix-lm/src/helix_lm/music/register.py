@@ -140,21 +140,99 @@ def formant_tuning(f0_hz: torch.Tensor, f1_rest: float) -> torch.Tensor:
 def warp_envelope(
     envelope_log: torch.Tensor, ratio: torch.Tensor | float, low_hz: float = 60.0, high_hz: float = 8000.0
 ) -> torch.Tensor:
-    """Move a log-frequency band envelope ``(B, T, bands)`` by ``ratio`` in frequency (per batch item) by linear
-    interpolation along the band axis with border clamping; what the model's sketch does when the tract is
-    scaled. ``ratio = 1`` is the identity."""
+    """Move a log-frequency band envelope ``(B, T, bands)`` by ``ratio`` in frequency, per batch item ``(B,)`` or per
+    frame ``(B, T)``, by linear interpolation along the band axis with border clamping; what the model's sketch
+    does when the tract is scaled. ``ratio = 1`` is the identity."""
     b, t, bands = envelope_log.shape
     per_octave = (bands - 1) / math.log2(high_hz / low_hz)
     if not torch.is_tensor(ratio):
         ratio = torch.full((b,), float(ratio), device=envelope_log.device)
-    shift = torch.log2(ratio.float().clamp(min=0.25, max=4.0)) * per_octave  # in bands; > 0 moves energy up
-    src = torch.arange(bands, device=envelope_log.device).float()[None, :] - shift[:, None]  # (B, bands)
+    ratio = ratio.float().to(envelope_log.device)
+    if ratio.dim() == 1:
+        ratio = ratio[:, None].expand(b, t)
+    shift = torch.log2(ratio.clamp(min=0.25, max=4.0)) * per_octave  # (B, T) in bands; > 0 moves energy up
+    src = torch.arange(bands, device=envelope_log.device).float()[None, None, :] - shift[:, :, None]  # (B, T, bands)
     lo = src.floor().clamp(0, bands - 1).long()
     hi = (lo + 1).clamp(max=bands - 1)
     w = (src - lo.float()).clamp(0, 1)
-    lo_v = envelope_log.gather(-1, lo[:, None, :].expand(b, t, bands))
-    hi_v = envelope_log.gather(-1, hi[:, None, :].expand(b, t, bands))
-    return lo_v * (1 - w[:, None, :]) + hi_v * w[:, None, :]
+    return envelope_log.gather(-1, lo) * (1 - w) + envelope_log.gather(-1, hi) * w
+
+
+def tract_ratio_curve(
+    f0_hz: torch.Tensor,
+    reference_range_hz: tuple[float, float],
+    frame_rate: float = 25.0,
+    ramp_semitones: float = 3.0,
+    max_ratio: float = 1.2,
+    smooth_ms: float = 150.0,
+) -> torch.Tensor:
+    """
+    The per-frame formant ratio for a melody against a voice's comfortable range: nothing inside the range, a
+    smooth ramp (over ``ramp_semitones``) once the pitch climbs past the top, a quarter of the excess in log
+    terms, capped at ``max_ratio``, held through unvoiced gaps and low-passed over ``smooth_ms``. The wall at a
+    register break is a step in this curve; this curve has no steps.
+    """
+    f0 = f0_hz.float()
+    lo, hi = reference_range_hz
+    voiced = f0 > 0
+    excess = torch.where(voiced, 12 * torch.log2(f0.clamp(min=1.0) / max(hi, 1.0)), torch.zeros_like(f0))
+    deficit = torch.where(voiced, 12 * torch.log2(max(lo, 1.0) / f0.clamp(min=1.0)), torch.zeros_like(f0))
+    up = torch.sigmoid((excess - ramp_semitones / 2) / (ramp_semitones / 4)) * excess.clamp(min=0)
+    down = torch.sigmoid((deficit - ramp_semitones / 2) / (ramp_semitones / 4)) * deficit.clamp(min=0)
+    log_ratio = (up - down) / 12 * 0.25
+    # hold through unvoiced frames (no jump at an onset), then smooth
+    held = log_ratio.clone()
+    for i in range(1, held.numel()):
+        if not voiced[i]:
+            held[i] = held[i - 1]
+    k = max(1, int(smooth_ms / 1000 * frame_rate)) | 1
+    smooth = F.avg_pool1d(F.pad(held[None, None], (k // 2, k // 2), mode="replicate"), k, stride=1)[0, 0]
+    return torch.pow(2.0, smooth).clamp(1 / max_ratio, max_ratio)
+
+
+def register_break_report(
+    wave: torch.Tensor,
+    f0_hz: torch.Tensor,
+    sample_rate: int,
+    boundary_hz: float,
+    frame_rate: float = 25.0,
+    window_ms: float = 100.0,
+    jump_db: float = 12.0,
+) -> dict:
+    """
+    Pops at register breaks: around every frame where the pitch crosses ``boundary_hz`` (the voice's comfortable
+    top), the level envelope is checked for a jump over ``jump_db`` within 5 ms and the click detector for
+    clicks. Returns the crossings, the pops found, pops per minute and ``ok`` (no pops).
+    """
+    from .effects import detect_glitches, rms_envelope
+
+    f0 = f0_hz.float()
+    above = f0 > boundary_hz
+    voiced = f0 > 0
+    cross = (above[1:] != above[:-1]) & voiced[1:] & voiced[:-1]
+    crossings = cross.nonzero().flatten() + 1
+    if crossings.numel() == 0:
+        return {"crossings": 0, "pops": 0, "pops_per_minute": 0.0, "ok": True}
+    env = rms_envelope(wave, sample_rate, 5.0)
+    hop = max(1, int(sample_rate * 0.005))
+    db = 20 * torch.log10(env[::hop] + 1e-6)
+    clicks = detect_glitches(wave, sample_rate)["clicks"]
+    pops = 0
+    half = max(3, int(window_ms / 1000 * frame_rate))
+    for frame in crossings.tolist():
+        a = max(0, int((frame - half) / frame_rate * sample_rate / hop))
+        z = min(db.numel(), int((frame + half) / frame_rate * sample_rate / hop))
+        jump = float((db[a + 1 : z] - db[a : z - 1]).abs().max()) if z - a > 2 else 0.0
+        s0, s1 = int((frame - half) / frame_rate * sample_rate), int((frame + half) / frame_rate * sample_rate)
+        clicked = bool(((clicks >= s0) & (clicks < s1)).any()) if clicks.numel() else False
+        pops += int(jump > jump_db or clicked)
+    minutes = wave.shape[-1] / sample_rate / 60
+    return {
+        "crossings": int(crossings.numel()),
+        "pops": pops,
+        "pops_per_minute": pops / max(minutes, 1e-6),
+        "ok": pops == 0,
+    }
 
 
 def hollow_score(wave: torch.Tensor, reference: torch.Tensor, sample_rate: int) -> dict:

@@ -192,6 +192,13 @@ and fallbacks (`docs/TRISTREAM.md` section 12):
 * **the fail-safe loop** (`helix_lm.music.failsafe`): generate, listen, escalate, repair the span, transplant the
   source's unvoiced band, fall back to the source-filter sketch, report;
 * a per-band **room model** so a swapped voice gets the original's room, not a broadband tail;
+* **2.3**: the molab program mirrors its run to a private Hub repo and resumes from it (checkpoints with
+  step and hours, budgets that carry across restarts, retries), fills the GPU (auto batch, TF32, prefetch),
+  extracts and prepares the downloaded sets on the GPU, and keeps speech from swamping singing: domain
+  shares first (speech annealed 50 % -> 10 % of each batch), spoken clips at half loss weight, a 50/50 codec,
+  singing-only evaluation; round three (section 14): a sustain-aware alignment prior for melismas, a codebook
+  register audit with high-register oversampling, rooms and EQ on every training input against dry targets,
+  a per-frame formant curve with a pop detector, and a two-block look-ahead switched on before drops;
 * **round two** (`docs/TRISTREAM.md` section 13): one global frame grid and measured drift control for long
   tracks (`music.longform`), register physics with a bounded formant move and F1 tuning (`music.register`), an
   air-band extension to 48 kHz with air and pre-echo detectors, an intake that measures and cleans real-world
@@ -227,7 +234,7 @@ pip install "helix-lm[music]"
 helix tristream sizes && helix tristream demo
 helix music analyze song.wav && helix music plan song.wav --out plan.json
 helix music swap song.wav reference.wav --out out.wav
-python -m helix_lm.scripts.tristream_molab --root /workspace/tristream --stage all --hf-repo CorxLabs/TriStream-2-765M
+python -m helix_lm.scripts.tristream_molab --root /workspace/tristream --stage all --hf-repo CorxLabs/Tristream-V2-SVS
 ```
 
 Nothing in 2.1 has been trained at size; the document says what is measured (toy scale) and what is a plan.

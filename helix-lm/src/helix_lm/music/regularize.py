@@ -35,7 +35,7 @@ from torch import nn
 
 from ..audio.singing import estimate_f0
 from .analysis import reverb_time, spectral_rolloff
-from .effects import echo, lowpass, muffle, retune, reverb
+from .effects import echo, lowpass, muffle, retune
 
 ACCENTS = (
     "unknown",
@@ -75,6 +75,7 @@ class ClipTags:
     duet: bool = False
     dry: bool = True
     breaths: list[float] = field(default_factory=list)  # seconds
+    domain: str = "singing"  # singing | choir | speech: the sampler balances these, never the corpus sizes
 
     @property
     def range_bucket(self) -> str:
@@ -143,6 +144,48 @@ def balanced_weights(
     return out / out.sum()
 
 
+def mixture_weights(
+    tags: list[ClipTags],
+    speech_share: float = 0.2,
+    range_balance: bool = True,
+    accent_balance: bool = True,
+) -> torch.Tensor:
+    """
+    Sampling weights that fix the **domain** shares first and only then balance inside each domain, so a
+    thousand hours of speech cannot drown fifteen hours of singing: singing (with choir) gets
+    ``1 - speech_share`` of every batch whatever the clip counts, speech gets ``speech_share`` (and zero when
+    there is no speech, or no singing). Inside a domain, pitch-range buckets and accents are balanced as
+    :func:`balanced_weights` does. Returns probabilities over ``tags`` summing to one.
+    """
+    n = len(tags)
+    if n == 0:
+        return torch.zeros(0)
+    is_speech = torch.tensor([t.domain == "speech" for t in tags])
+    weights = torch.zeros(n)
+    for domain_mask, share in ((~is_speech, 1.0 - speech_share), (is_speech, speech_share)):
+        idx = domain_mask.nonzero().flatten()
+        if idx.numel() == 0:
+            continue
+        sub = [tags[i] for i in idx.tolist()]
+        inner = torch.ones(len(sub))
+        if range_balance:
+            inner = inner * balanced_weights(sub, by="range_bucket")
+        if accent_balance:
+            inner = inner * balanced_weights(sub, by="accent")
+        inner = inner / inner.sum()
+        weights[idx] = inner * share
+    if weights.sum() <= 0:  # only one domain present: it gets everything
+        weights = balanced_weights(tags, by="range_bucket")
+    return weights / weights.sum()
+
+
+def speech_share_at(progress: float, start: float = 0.5, end: float = 0.1) -> float:
+    """The curriculum: speech teaches the source-filter machinery early (half of every batch), then steps
+    back so the late training, where the voice's character is set, is sung. Linear in training progress."""
+    progress = min(1.0, max(0.0, progress))
+    return start + (end - start) * progress
+
+
 def report_gaps(tags: list[ClipTags]) -> list[str]:
     """What the data cannot teach: ranges and accents with fewer than a token amount of clips."""
     gaps = []
@@ -200,6 +243,38 @@ def breath_events(wave: torch.Tensor, sample_rate: int, frame_rate: float = 25.0
 
 
 # ----------------------------------------------------------------------------------- augmentation --
+def random_eq(x: torch.Tensor, sample_rate: int, g: torch.Generator) -> tuple[torch.Tensor, dict]:
+    """A random spectral tilt (up to +-6 dB per octave about 1 kHz) and one random peaking band (+-6 dB): the
+    microphone, the preamp and the mastering chain a recording came through, so clean studio stems do not
+    share one tell-tale spectrum."""
+    n_fft, hop = 2048, 512
+    window = torch.hann_window(n_fft)
+    spec = torch.stft(x, n_fft, hop, window=window, return_complex=True)
+    freqs = torch.fft.rfftfreq(n_fft, 1 / sample_rate).clamp(min=20.0)
+    tilt = float(torch.rand((), generator=g)) * 12 - 6
+    gain_db = (tilt * torch.log2(freqs / 1000.0)).clamp(-12, 12)
+    centre = 200.0 * (30.0 ** float(torch.rand((), generator=g)))  # 200 Hz .. 6 kHz, log-uniform
+    peak = float(torch.rand((), generator=g)) * 12 - 6
+    gain_db = gain_db + peak * torch.exp(-((torch.log2(freqs / centre)) ** 2) / (2 * 0.5**2))
+    out = torch.istft(spec * (10 ** (gain_db / 20))[:, None], n_fft, hop, window=window, length=x.shape[-1])
+    return out, {"tilt_db_per_oct": tilt, "peak_hz": centre, "peak_db": peak}
+
+
+def synthetic_room(x: torch.Tensor, sample_rate: int, g: torch.Generator) -> tuple[torch.Tensor, dict]:
+    """A per-band room (highs decay faster), a pre-delay and a wet mix drawn at random: so a dry stem is also
+    heard in rooms, and a discriminator cannot learn that 'dry means sung' and 'roomy means spoken'."""
+    from .effects import apply_room
+
+    base = 0.2 + 1.8 * float(torch.rand((), generator=g))
+    decays = [base, base * 0.9, base * 0.7, base * 0.45]
+    room = {
+        "decays": decays,
+        "pre_delay": 0.005 + 0.025 * float(torch.rand((), generator=g)),
+        "wet": 0.1 + 0.35 * float(torch.rand((), generator=g)),
+    }
+    return apply_room(x, room, sample_rate), {"t60": base, "wet": room["wet"]}
+
+
 def augment(
     dry: torch.Tensor,
     sample_rate: int,
@@ -217,10 +292,12 @@ def augment(
     draw = lambda: float(torch.rand((), generator=g))  # noqa: E731
     x = dry.clone()
     applied = {}
-    if draw() < 0.5:
-        decay = 0.3 + 1.7 * draw()
-        x = reverb(x, sample_rate, decay_seconds=decay, mix=0.15 + 0.3 * draw())
-        applied["reverb"] = decay
+    if draw() < 0.5:  # a per-band room, not one broadband tail
+        x, room = synthetic_room(x, sample_rate, g)
+        applied["room_t60"] = room["t60"]
+    if draw() < 0.4:  # the chain the recording came through
+        x, eq = random_eq(x, sample_rate, g)
+        applied["eq_tilt_db_per_oct"] = eq["tilt_db_per_oct"]
     if draw() < 0.25:
         x = echo(x, sample_rate, delay_seconds=60.0 / bpm * (0.5 if draw() < 0.5 else 0.75), feedback=0.3, mix=0.25)
         applied["echo"] = True

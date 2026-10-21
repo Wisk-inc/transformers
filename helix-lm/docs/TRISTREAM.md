@@ -296,6 +296,26 @@ One file, eight stages, every stage resumable from a marker, a `stop` file to en
 | `push` | `CorxLabs/TriStream-2-765M` (or `--hf-repo`), model card with the gaps report | minutes |
 | `swap` | `--song` + `--reference` demo through the pipeline | minutes |
 
+**Speech against singing: staging and balance.** Speech is in the mix for the source-filter machinery
+(breath, consonants, the tract), not for the voice's character, and a thousand hours of it would swamp
+fifteen hours of singing in any sampler that draws by clip count. So the sampler fixes the **domain
+share first**: `regularize.mixture_weights` gives singing (with choir) `1 - speech_share` of every batch
+and speech `speech_share`, whatever the corpus sizes, and only then balances pitch-range buckets and
+accents inside each domain. The share follows a **curriculum** (`speech_share_at`): 50 % at the start,
+annealed linearly to 10 % by the end of the training budget, so the late training, where the voice's
+character is set, is sung. Spoken clips also carry a **loss weight** of 0.5 (`batch["weights"]`, applied
+to the flow and pitch losses inside `TriStreamForSinging.forward`). The codec draws sung and spoken
+files half and half. Evaluation uses sung clips only. The default speech download is 300 h
+(`--emilia-hours`); more speech does not change the batch shares, only the variety of the speech half.
+The flags are `--speech-share-start 0.5 --speech-share-end 0.1 --speech-loss-weight 0.5`.
+
+**Resume from the Hub.** The program mirrors its state to a private Hub repo (`--hf-repo`, default
+`CorxLabs/Tristream-V2-SVS`): checkpoints with a sidecar of step and hours, markers, manifests, eval and
+a model card, every `--push-every-hours` (2 by default) and on any failure, interruption or stop file; the
+repo history is squashed after each push so the Hub holds one copy of each file. On start the program
+pulls whichever checkpoint has more steps than the local one. Budgets carry across restarts: a stage
+stopped at hour 30 of 48 resumes with 18 left. A crashed stage is retried (`--retries`, `--retry-wait`).
+
 **Memory.** 765M parameters in bf16 with fp32 master weights and Muon momentum is about 8 GB; activations for
 12 s clips (300 codec frames) are small per clip, so the batch is what fills the card. `--batch 0` (the
 default) starts at 64 clips and halves on the first out-of-memory until it fits, which is how the 96 GB is
@@ -360,12 +380,16 @@ helix music plan song.wav --low 55 --high 79 --out plan.json
 helix music swap song.wav reference.wav --out out.wav [singer_to_replace.wav] [--root /workspace/tristream]
 helix music prepare ~/takes --out /workspace/tristream/uploads --singer nathan --accent jamaican
 
-# the 96 GB program, in a notebook cell:
+# the 96 GB program, in a notebook cell (resumes from the private Hub repo if the notebook dies):
 !pip install -q "helix-lm[music]"
-!python -m helix_lm.scripts.tristream_molab --root /workspace/tristream --stage all --hf-repo CorxLabs/TriStream-2-765M
+!python -m helix_lm.scripts.tristream_molab --root /workspace/tristream --stage all \
+    --hf-repo CorxLabs/Tristream-V2-SVS --size ts-765m --emilia-hours 300 \
+    --codec-hours 240 --refiner-hours 48 --train-hours 200 --push-every-hours 2
+!python -m helix_lm.scripts.tristream_molab --stage eta      # the time the budgets add up to
 ```
 
-The token for the Hub goes in `$HF_TOKEN` or `/root/hf_token` on the machine, never in a notebook or a chat.
+The token for the Hub goes in `$HF_TOKEN` or `/root/hf_token` on the machine. Every stage creates its own
+folder, resumes from its own checkpoint and from the Hub's, and keeps the hours it has already used.
 
 ---
 
@@ -587,3 +611,68 @@ mixes; the intake's cleaners are classical and will not rescue a 32 kbps rip; th
 training data you supply; and the drift controller corrects a measured slope, not an unmeasurable one.
 What is claimed is narrower and true: each named failure now has a measurement, a mechanism and a
 fallback, and the system reports which of them it used.
+
+---
+
+## 14. Hardening, round three (2.3): the traps in training
+
+### 14.1 The melisma trap
+
+A spoken syllable is short; a sung vowel can last four seconds under a run with vibrato. A rigid monotonic
+prior would hurry it. The prior is now **sustain-aware**: `sustain_profile` reads the source stream and
+measures how long the current pitch has been held (voiced, under half a semitone of motion per frame);
+the alignment prior's width grows with it, up to four times (`sustain_sigma_gain = 3`), so a frame deep in
+a held vowel may attend to that vowel's phoneme however far its centre is, while moving syllables keep the
+narrow prior. Durations come from the data in training (melismas included) and from the duration head at
+inference, fitted to the clip. The spoken domain also carries half the loss weight, so the duration head is
+not a speech-pacing head.
+
+### 14.2 Codebook starvation on the high register
+
+A quantizer trained mostly on speech spends its codes between 300 Hz and 4 kHz. Three measures: clips
+whose F0 reaches 500 Hz get a **fixed share of every codec batch** (`--high-register-share 0.25`); a
+**high-band loss** above 6 kHz (weight 2) joins the codec's losses; and the **codebook audit**
+(`codebook_usage_by_register`) runs every 2,000 steps on a fixed high-register and a fixed low-register
+audit set, logs the share of codes each tier uses on each, writes `codec/audit.json` (pushed with the
+checkpoints) and flags starvation when any upper tier uses under half as many codes on the high register
+as on the low. If the flag shows, raise the share or the loss weight; the number is the evidence, not the hope.
+
+### 14.3 The noise-floor shortcut
+
+The singing sets are dry studio stems; Emilia is the wild. Any discriminator or encoder could learn
+"clean means sung". So no domain is clean: every training loop (codec, refiner, TriStream) passes a clip
+through `augment` with probability `--augment-prob 0.5`, which now includes a **per-band synthetic room**
+(`synthetic_room`: random decays with highs dying faster, pre-delay, wet mix) and a **random EQ**
+(`random_eq`: tilt up to 6 dB per octave and one peaking band) besides the echoes, muffles, noise floors,
+codec holes, loud instrumentals and separator residue it already had. For TriStream the augmented copy is
+the **input** and the dry take stays the **target** (`batch["target_frames"]`), so the model learns to
+listen through a room, never to paint one.
+
+### 14.4 The formant wall
+
+A baritone sent up to a falsetto hook crosses a register boundary, and a formant move taken as a step at
+that boundary is a click. The formant move is now a **per-frame curve** (`tract_ratio_curve`): nothing
+inside the voice's own range, a sigmoid ramp over three semitones past its top, a quarter of the excess in
+log terms, capped at 1.2, held through unvoiced gaps and low-passed over 150 ms; `warp_envelope` applies it
+frame by frame, and the converter carries it through long-form chunks. In training a **formant smoothness
+loss** (weight 0.02) penalizes envelope jumps between frames of a held pitch. `register_break_report`
+checks every boundary crossing of an output for a level jump over 12 dB or a click within 100 ms and the
+molab `eval` reports `register_pops_per_minute`.
+
+### 14.5 Index staleness at the drop
+
+The one-block look-ahead (section 12.3) is always on. On top of it, the song-event track now switches on a
+**two-block look-ahead** (`ahead2`) in the frames leading up to a downbeat or a section change: the trunk's
+input carries the source and noise streams from two blocks ahead exactly where a drop, a key change or an
+ad-lib on the one is coming, so the index decision at the boundary is made with the drop in hand. The local
+strand covers the inside of the blocks as before. In long-form conversion the chunk edges snap to the
+song's transitions (`transition_frames`: section starts and downbeats with a loudness surge), so the first
+block after a transition is computed from the transition itself, never from the intro's context.
+
+### 14.6 Measured here
+
+Each mechanism is tested in `tests/test_hardening3.py`: the prior widens on held notes and not on moving
+lines; the codebook audit returns per-tier usage and a starvation flag; the augmentation emits rooms and EQ
+and the model trains with a dirty input against a dry target; the formant curve has no step larger than
+0.02 and the pop detector catches a click at the crossing; the transition anchors land on chunk edges and
+the extra look-ahead changes only the frames before the drop.

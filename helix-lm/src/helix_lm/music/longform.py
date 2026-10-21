@@ -56,6 +56,31 @@ def plan_chunks(
     return spans
 
 
+def transition_frames(analysis, frame_rate: float = 25.0) -> torch.Tensor:
+    """Frames where the song turns: section starts and downbeats with a loudness surge. Chunk edges snap to
+    these, so the trunk's first block after a drop is computed from the drop itself, never from the intro."""
+    beat_times = analysis.beat_times()
+    if beat_times.numel() == 0:
+        return torch.zeros(0, dtype=torch.long)
+    frames = set()
+    for segment in analysis.segments:
+        b = int(segment.get("start_beat", 0))
+        if 0 < b < beat_times.numel():
+            frames.add(int(float(beat_times[b]) * frame_rate))
+    rms = analysis.rms
+    downbeats = analysis.downbeats
+    if downbeats.numel() and int(downbeats.max()) >= beat_times.numel():
+        downbeats = torch.searchsorted(analysis.beats.contiguous(), downbeats.contiguous())
+    for d in downbeats.tolist():
+        if 0 < d < beat_times.numel() and rms.numel() > 1:
+            frame_idx = int(analysis.beats[d]) if d < analysis.beats.numel() else 0
+            before = rms[max(0, frame_idx - 8) : frame_idx].mean() if frame_idx > 0 else rms[:1].mean()
+            after = rms[frame_idx : frame_idx + 8].mean()
+            if float(after) > 1.8 * float(before) + 1e-6:
+                frames.add(int(float(beat_times[d]) * frame_rate))
+    return torch.tensor(sorted(frames), dtype=torch.long)
+
+
 def time_warp(curve: torch.Tensor, factor: float) -> torch.Tensor:
     """Resample a control curve along time by ``factor`` (1.001 = 0.1 % slower); voicing stays hard."""
     n = curve.shape[-1]

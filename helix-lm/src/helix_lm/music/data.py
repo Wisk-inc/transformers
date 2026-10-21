@@ -184,17 +184,28 @@ def prepare_clip(
     is_mixture: bool = False,
     separate=None,
     log=print,
+    device=None,
+    analysis: bool = True,
+    domain: str = "singing",
 ) -> ClipRecord:
     """
     One upload -> a record: resampled mono audio, the vocal (separated when the file is a full song and a
     separator is given), F0 at 25 Hz, breath events, range, dryness check, and the song analysis (tempo, key,
     sections) so the model can be trained with beat-aware timing. Rejected clips are kept in the manifest with
-    the reason, never silently dropped.
+    the reason, never silently dropped. ``device`` runs the pitch, breath and dryness measurements on a GPU
+    (the difference between days and hours on a thousand hours of speech); ``analysis=False`` skips the song
+    analysis, which means nothing for speech.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    wave = read_wave(path, sample_rate)
-    seconds = wave.shape[-1] / sample_rate
     stem = path.stem
+    try:
+        wave = read_wave(path, sample_rate)
+    except Exception as error:  # an unreadable file is a record with a reason, not a crash
+        log(f"[clip] {path.name}: unreadable ({type(error).__name__}: {str(error)[:60]})")
+        return ClipRecord(str(path), 0.0, {}, {}, "", False, f"unreadable: {type(error).__name__}")
+    seconds = wave.shape[-1] / sample_rate
+    if seconds < 0.5:
+        return ClipRecord(str(path), seconds, {}, {}, "", False, "shorter than half a second")
     vocal = wave
     reason = ""
     if is_mixture:
@@ -207,8 +218,12 @@ def prepare_clip(
         write_wave(
             out_dir / f"{stem}.instrumental.wav", sum(v for k, v in stems.items() if k != "vocals"), sample_rate
         )
-    dry, dryness = is_dry_enough(vocal, sample_rate)
-    low, high = f0_range(vocal, sample_rate)
+    measured = vocal.to(device) if device is not None else vocal
+    with torch.no_grad():
+        dry, dryness = is_dry_enough(measured, sample_rate)
+        low, high = f0_range(measured, sample_rate)
+        breaths = breath_events(measured, sample_rate)
+        f0 = estimate_f0(measured[None], sample_rate, frame_rate=25)[0].cpu()
     tags = ClipTags(
         singer=singer,
         accent=accent,
@@ -217,22 +232,24 @@ def prepare_clip(
         f0_low=low,
         f0_high=high,
         dry=dry,
-        breaths=breath_events(vocal, sample_rate),
+        breaths=breaths,
+        domain=domain,
     )
-    f0 = estimate_f0(vocal[None], sample_rate, frame_rate=25)[0]
     torch.save(f0, out_dir / f"{stem}.f0.pt")
     write_wave(out_dir / f"{stem}.vocal.wav", vocal, sample_rate)
-    try:
-        analysis = analyze(wave if is_mixture else vocal, sample_rate)
-        summary = {
-            "tempo": analysis.tempo,
-            "key": analysis.key_name,
-            "sections": analysis.segments,
-            "reverb": analysis.reverb,
-            "cues": analysis.vibe.get("cues"),
-        }
-    except Exception as error:  # analysis must never lose a clip
-        summary = {"error": f"{type(error).__name__}: {error}"}
+    summary: dict = {}
+    if analysis:
+        try:
+            result = analyze(wave if is_mixture else vocal, sample_rate)
+            summary = {
+                "tempo": result.tempo,
+                "key": result.key_name,
+                "sections": result.segments,
+                "reverb": result.reverb,
+                "cues": result.vibe.get("cues"),
+            }
+        except Exception as error:  # analysis must never lose a clip
+            summary = {"error": f"{type(error).__name__}: {error}"}
     accepted = dry and high > 0
     if not dry:
         reason = f"not dry enough (reverb {dryness['reverb']:.2f}s): kept for listening data, not as a target"
@@ -255,14 +272,34 @@ def prepare_uploads(
     mixtures: bool = False,
     separate=None,
     log=print,
+    device=None,
+    analysis: bool = True,
+    workers: int = 1,
+    singer_of=None,
+    language: str = "en",
+    domain: str = "singing",
 ) -> dict:
-    """Many files or folders -> ``manifest.json`` with one record per clip and the data gaps."""
+    """
+    Many files or folders -> ``manifest.json`` with one record per clip and the data gaps. ``singer_of(path)``
+    names the singer per file (one corpus, many voices); ``workers`` threads overlap file reading and writing
+    with the measurements; ``device`` puts the measurements on a GPU.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
     out_dir = Path(out_dir)
     files = find_audio(paths)
-    records = [
-        prepare_clip(f, out_dir, sample_rate, singer, accent, emotion, is_mixture=mixtures, separate=separate, log=log)
-        for f in files
-    ]
+
+    def one(f: Path) -> ClipRecord:
+        return prepare_clip(
+            f, out_dir, sample_rate, singer_of(f) if singer_of else singer, accent, emotion, language,
+            is_mixture=mixtures, separate=separate, log=log, device=device, analysis=analysis, domain=domain,
+        )  # fmt: skip
+
+    if workers > 1 and len(files) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            records = list(pool.map(one, files))
+    else:
+        records = [one(f) for f in files]
     from .regularize import report_gaps
 
     tags = [ClipTags(**r.tags) for r in records if r.tags]

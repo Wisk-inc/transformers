@@ -61,7 +61,8 @@ class Converter:
         self.refiner, self.gates = refiner, gates
         self.last_report = None
         self.last_reference = None
-        self.chunk_seconds = 30.0  # long tracks are converted in beat-agnostic chunks on one global grid
+        self.chunk_seconds = 30.0  # long tracks are converted in chunks on one global grid
+        self.anchors: torch.Tensor | None = None  # frames where the song turns: chunk edges snap to them
 
     def embed(self, reference: torch.Tensor, sample_rate: int, robust: bool = True) -> torch.Tensor:
         """The voice embedding of a reference; robust by default (cleaned, windowed, trimmed mean: see
@@ -86,13 +87,13 @@ class Converter:
         steps: int = 16,
         reference: torch.Tensor | None = None,
         quality: float | None = None,
-        tract_ratio: float | None = None,
+        tract_ratio: float | torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, str]:
         if self.model is None or self.codec is None:
             return vocal, "no model: the vocal was passed through unchanged"
         hop = int(sample_rate / self.codec.config.frame_rate)
         if vocal.shape[-1] > self.chunk_seconds * sample_rate:
-            return self._convert_long(vocal, f0_hz, speaker, sample_rate, steps, reference, hop)
+            return self._convert_long(vocal, f0_hz, speaker, sample_rate, steps, reference, hop, quality, tract_ratio)
         from .tristream import noise_features, source_features
 
         frames = self.codec.listen(vocal[None])  # (1, T, dim)
@@ -109,7 +110,11 @@ class Converter:
         if quality is not None:
             batch["quality"] = torch.tensor([float(quality)])
         if tract_ratio is not None:
-            batch["tract_ratio"] = torch.tensor([float(tract_ratio)])
+            if torch.is_tensor(tract_ratio) and tract_ratio.dim() == 1 and tract_ratio.numel() > 1:
+                curve = torch.nn.functional.interpolate(tract_ratio.float()[None, None], size=t, mode="linear")[0]
+                batch["tract_ratio"] = curve  # (1, T): a smooth per-frame formant move, no wall at a register break
+            else:
+                batch["tract_ratio"] = torch.tensor([float(tract_ratio)])
         if self.gates is not None or self.refiner is not None:
             from .failsafe import Gates, synthesize_with_gates
 
@@ -126,19 +131,26 @@ class Converter:
         wave = self.codec.decode_frames(out_frames)[0, 0]
         return wave[: vocal.shape[-1]], f"converted with TriStream-2 in {steps} flow steps"
 
-    def _convert_long(self, vocal, f0_hz, speaker, sample_rate, steps, reference, hop) -> tuple[torch.Tensor, str]:
-        """Chunks on one global frame grid (frame i is always samples [i*hop, (i+1)*hop)), crossfaded; drift
-        measured afterwards and reported (music.longform)."""
+    def _convert_long(
+        self, vocal, f0_hz, speaker, sample_rate, steps, reference, hop, quality=None, tract_ratio=None
+    ) -> tuple[torch.Tensor, str]:
+        """Chunks on one global frame grid (frame i is always samples [i*hop, (i+1)*hop)), edges snapped to the
+        song's transitions, crossfaded; drift measured afterwards and reported (music.longform)."""
         from .longform import drift_curve, drift_rate, render_long
 
         frame_rate = sample_rate / hop
         total_frames = vocal.shape[-1] // hop
         f0 = torch.nn.functional.interpolate(f0_hz[None, None].float(), size=total_frames, mode="linear")[0, 0]
+        curve = None
+        if torch.is_tensor(tract_ratio) and tract_ratio.dim() == 1 and tract_ratio.numel() > 1:
+            curve = torch.nn.functional.interpolate(tract_ratio.float()[None, None], size=total_frames, mode="linear")
+            curve = curve[0, 0]
         hows: list[str] = []
 
         def synth(start: int, end: int) -> torch.Tensor:
             seg = vocal[start * hop : end * hop]
-            out, how = self.convert(seg, f0[start:end], speaker, sample_rate, steps, reference)
+            ratio = curve[start:end] if curve is not None else tract_ratio
+            out, how = self.convert(seg, f0[start:end], speaker, sample_rate, steps, reference, quality, ratio)
             hows.append(how)
             return out
 
@@ -148,6 +160,7 @@ class Converter:
             hop,
             chunk_frames=int(self.chunk_seconds * frame_rate),
             overlap_frames=int(2 * frame_rate),
+            anchors=self.anchors,
         )
         times, lags, reliable = drift_curve(f0, wave, sample_rate, frame_rate)
         drift = drift_rate(times, lags, reliable)
@@ -290,20 +303,28 @@ def swap_voice(
     if captured["autotuned"] and analysis is not None:
         f0 = retune(f0, analysis.key[0], analysis.key[1], speed=0.9)
     # 4b. register: what the new voice can do with this melody, and the bounded formant move
-    from .register import comfortable_range, register_plan, tract_scale
+    from .register import comfortable_range, register_plan, tract_ratio_curve, tract_scale
 
     tract_ratio = None
     if voiced.numel() > 5 and ref_voiced.numel() > 5:
+        ref_range = comfortable_range(reference, sample_rate)
         plan = register_plan(
-            comfortable_range(reference, sample_rate),
+            ref_range,
             (float(voiced.quantile(0.05)), float(voiced.quantile(0.95))),
             tract_scale(reference, sample_rate),
         )
-        tract_ratio = plan["formant_ratio"]
-        notes.append(
-            f"register: {plan['register']} ({plan['semitones_above']:.0f} st above the voice's top); {plan['action']}"
+        tract_ratio = tract_ratio_curve(f0, ref_range, 25.0)  # per frame and smooth: no wall at a register break
+        where = (
+            f"{plan['semitones_below']:.0f} st below the voice's bottom"
+            if plan["semitones_below"] > plan["semitones_above"]
+            else f"{plan['semitones_above']:.0f} st above the voice's top"
         )
+        notes.append(f"register: {plan['register']} ({where}); {plan['action']}")
     # 5. convert (the intake quality and the register plan travel with the batch)
+    if analysis is not None:
+        from .longform import transition_frames
+
+        converter.anchors = transition_frames(analysis, 25.0)
     speaker = converter.embed(reference, sample_rate)
     last_reference = getattr(converter, "last_reference", None)
     if last_reference and not last_reference.get("ok", True):

@@ -231,3 +231,33 @@ def test_music_and_tristream_cli(tmp_path, capsys):
     out = tmp_path / "swap.wav"
     args = ["music", "swap", str(song), str(reference), "--sample-rate", str(SR), "--out", str(out)]
     assert main(args) == 0 and out.exists() and "no model" in capsys.readouterr().out
+
+
+def test_domain_shares_beat_corpus_sizes():
+    from helix_lm.music.regularize import mixture_weights, speech_share_at
+
+    speech = [
+        ClipTags(singer=f"s{i}", f0_low=100.0, f0_high=300.0 + 20 * (i % 9), domain="speech") for i in range(1000)
+    ]
+    sung = [ClipTags(singer=f"v{i}", f0_low=150.0, f0_high=400.0 + 60 * (i % 6), domain="singing") for i in range(15)]
+    for share in (0.5, 0.2, 0.1):
+        w = mixture_weights(speech + sung, share)
+        assert abs(float(w[:1000].sum()) - share) < 1e-4 and abs(float(w[1000:].sum()) - (1 - share)) < 1e-4
+    assert abs(float(mixture_weights(sung, 0.3).sum()) - 1) < 1e-4, "one domain alone keeps every clip"
+    assert (
+        speech_share_at(0.0) == 0.5
+        and abs(speech_share_at(1.0) - 0.1) < 1e-9
+        and abs(speech_share_at(2.0) - 0.1) < 1e-9
+    )
+    cfg = TriStreamConfig.named("ts-tiny")
+    model = TriStreamForSinging(cfg)
+    b, t = 2, 16
+    f0 = torch.full((b, t), 220.0)
+    frames = torch.randn(b, t, cfg.frame_dim)
+    batch = {
+        "source": source_features(f0, torch.rand(b, t)), "noise": noise_features(frames), "frames": frames,
+        "phonemes": torch.full((b, 1), -1, dtype=torch.long), "speaker": torch.randn(b, cfg.speaker_dim),
+        "f0_hz": f0, "weights": torch.tensor([1.0, 0.5]),
+    }  # fmt: skip
+    losses = model(batch)
+    assert all(torch.isfinite(v) for v in losses.values()), "spoken clips can weigh less in the loss"

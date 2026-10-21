@@ -204,6 +204,29 @@ class AudioCodec(nn.Module):
         return self.encoder(wave).transpose(1, 2)
 
 
+# -------------------------------------------------------------------------------------------- audit --
+@torch.no_grad()
+def codebook_usage_by_register(codec, high: torch.Tensor, low: torch.Tensor) -> dict:
+    """
+    Are the upper quantizer tiers firing on high-register singing, or only on speech? ``high`` and ``low`` are
+    ``(B, N)`` waveforms (clips whose F0 sits above and below the register line). Per codebook, the share of
+    distinct codes used over the tokens seen; ``ratio`` is high over low per codebook and ``starved`` is true
+    when any tier above the first uses under half as many codes on the high register as on the low.
+    """
+    out = {}
+    for name, waves in (("high", high), ("low", low)):
+        codes = codec.encode(waves)  # (B, Q, T)
+        usage = []
+        for q in range(codes.shape[1]):
+            tokens = codes[:, q].flatten()
+            usage.append(float(tokens.unique().numel() / max(1, min(tokens.numel(), codec.config.codebook_size))))
+        out[name] = usage
+    ratio = [h / max(lo, 1e-6) for h, lo in zip(out["high"], out["low"], strict=True)]
+    out["ratio"] = ratio
+    out["starved"] = any(r < 0.5 for r in ratio[1:]) if len(ratio) > 1 else False
+    return out
+
+
 # ------------------------------------------------------------------------------------------- losses --
 def mel_filterbank(sample_rate: int, n_fft: int, n_mels: int, device) -> torch.Tensor:
     """A triangular mel filterbank ``(n_mels, n_fft // 2 + 1)`` without external dependencies."""
