@@ -47,15 +47,16 @@ class Server:
                     self.end_headers()
                     self.wfile.write(body)
                     return
-                start = 0
+                start, end = 0, len(PAYLOAD) - 1
                 rng = self.headers.get("Range")
                 if rng and not server.ignore_range:
-                    start = int(rng.split("=")[1].rstrip("-"))
+                    first, _, last = rng.split("=")[1].partition("-")
+                    start, end = int(first), int(last) if last else len(PAYLOAD) - 1
                     self.send_response(206)
-                    self.send_header("Content-Range", f"bytes {start}-{len(PAYLOAD) - 1}/{len(PAYLOAD)}")
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{len(PAYLOAD)}")
                 else:
                     self.send_response(200)
-                body = PAYLOAD[start:]
+                body = PAYLOAD[start : end + 1]
                 self.send_header("Content-Type", "application/octet-stream")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -66,7 +67,7 @@ class Server:
                     return
                 self.wfile.write(body)
 
-        self.httpd = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/file.zip"
@@ -205,3 +206,26 @@ def test_prepare_folders_match_the_prepare_stage():
     source = Path(molab.__file__).read_text()
     for folder in molab.PREPARE_FOLDERS:
         assert f'("{folder}",' in source
+
+
+def test_parallel_pieces_join_into_the_whole_file(tmp_path):
+    server = Server(cut=50_000)  # the first connection is cut short; its piece resumes
+    try:
+        target = molab.download(server.url, tmp_path / "file.zip", size=len(PAYLOAD), checksum=MD5,
+                                parallel_from=1, log=lambda *_: None)  # fmt: skip
+    finally:
+        server.close()
+    assert target.read_bytes() == PAYLOAD
+    assert not list(tmp_path.glob("file.zip.part*"))
+    assert sum(r.startswith("bytes=") for r in server.requests) >= 16
+
+
+def test_parallel_falls_back_to_one_connection_when_ranges_are_refused(tmp_path):
+    server = Server(ignore_range=True)
+    try:
+        target = molab.download(server.url, tmp_path / "file.zip", size=len(PAYLOAD), checksum=MD5,
+                                parallel_from=1, log=lambda *_: None)  # fmt: skip
+    finally:
+        server.close()
+    assert target.read_bytes() == PAYLOAD
+    assert not list(tmp_path.glob("file.zip.part*"))

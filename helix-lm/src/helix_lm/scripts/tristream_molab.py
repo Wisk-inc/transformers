@@ -638,9 +638,85 @@ def _fetch(url: str, tmp: Path, size: int, log=log) -> int:
                 handle.write(block)
                 written += len(block)
                 if size and time.time() - last > 30:
-                    log(f"  {tmp.stem}: {written / 1e9:.2f} of {size / 1e9:.2f} GB")
+                    log(f"  {tmp.stem}: {written / 1e6:,.0f} of {size / 1e6:,.0f} MB")
                     last = time.time()
     return tmp.stat().st_size if tmp.exists() else 0
+
+
+def _fetch_parallel(url: str, tmp: Path, size: int, log=log, connections: int = 16, attempts: int = 30) -> int:
+    """Fetch ``size`` bytes with ``connections`` ranged requests at once. Zenodo (and many proxies) throttle each
+    connection; sixteen of them fill the link. Each piece lives in its own file and resumes from its own length,
+    so a dropped connection costs only its unfinished piece; the pieces are joined into ``tmp`` at the end.
+    Progress (MB, MB/s, minutes left) is logged every 30 s. Raises when the server refuses ranges."""
+    import urllib.request
+
+    step = -(-size // connections)
+    spans = [(a, min(size, a + step) - 1) for a in range(0, size, step)]
+    pieces = [tmp.with_name(f"{tmp.name}.{i:02d}") for i in range(len(spans))]
+    errors: list[str] = []
+
+    def piece_size(i: int) -> int:
+        return pieces[i].stat().st_size if pieces[i].exists() else 0
+
+    def worker(i: int) -> None:
+        start, end = spans[i]
+        want, stalls = end - start + 1, 0
+        while stalls < attempts:
+            have = piece_size(i)
+            if have >= want:
+                return
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "helix-lm tristream_molab", "Range": f"bytes={start + have}-{end}"}
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    if getattr(response, "status", 200) != 206:
+                        raise OSError("ranges refused")
+                    with open(pieces[i], "ab") as handle:
+                        while True:
+                            block = response.read(1 << 18)
+                            if not block:
+                                break
+                            handle.write(block)
+            except OSError as error:
+                if "ranges refused" in str(error):
+                    errors.append("ranges refused")
+                    return
+            stalls = 0 if piece_size(i) > have else stalls + 1
+            if piece_size(i) < want:
+                time.sleep(min(30, 2 * stalls))
+        errors.append(f"piece {i} stalled")
+
+    threads = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(len(spans))]
+    for thread in threads:
+        thread.start()
+    begin = time.time()
+    first = sum(piece_size(i) for i in range(len(spans)))
+    last_log = begin
+    while any(thread.is_alive() for thread in threads):
+        time.sleep(1)
+        if time.time() - last_log >= 30:
+            got = sum(piece_size(i) for i in range(len(spans)))
+            rate = (got - first) / max(1e-6, time.time() - begin)
+            left = (size - got) / rate / 60 if rate > 0 else float("inf")
+            log(
+                f"  {tmp.stem}: {got / 1e6:,.0f} of {size / 1e6:,.0f} MB, "
+                f"{rate / 1e6:.1f} MB/s, about {left:.0f} min left"
+            )
+            last_log = time.time()
+    if "ranges refused" in errors:
+        for piece in pieces:
+            piece.unlink(missing_ok=True)
+        raise OSError("ranges refused")
+    if any(piece_size(i) < spans[i][1] - spans[i][0] + 1 for i in range(len(spans))):
+        return sum(piece_size(i) for i in range(len(spans)))  # the caller tries again; the pieces stay
+    with open(tmp, "wb") as out:
+        for piece in pieces:
+            with open(piece, "rb") as handle:
+                shutil.copyfileobj(handle, out, length=1 << 22)
+    for piece in pieces:
+        piece.unlink(missing_ok=True)
+    return tmp.stat().st_size
 
 
 def download(
@@ -651,6 +727,7 @@ def download(
     checksum: str = "",
     alternate: str | None = None,
     attempts: int = 6,
+    parallel_from: int = 64 << 20,
 ) -> Path:
     """Fetch ``url`` into ``target`` and keep only a file that is whole: the size (and md5 when the publisher
     lists one) is checked before the file gets its final name; a short body is resumed with a Range request,
@@ -667,13 +744,23 @@ def download(
     tmp = target.with_suffix(target.suffix + ".part")
     routes = [url] + ([alternate] if alternate else [])
     log(f"downloading {url} -> {target.name}" + (f" ({size / 1e9:.2f} GB)" if size else ""))
-    problem, stalls, attempt = "not started", 0, 0
+    problem, stalls, attempt, ranges_refused = "not started", 0, 0, False
     while stalls < attempts:
         route = routes[attempt % len(routes)]
         before = tmp.stat().st_size if tmp.exists() else 0
         attempt += 1
         try:
-            have = _fetch(route, tmp, size, log)
+            if size >= parallel_from and not ranges_refused:
+                try:
+                    have = _fetch_parallel(route, tmp, size, log)
+                except OSError as error:
+                    if "ranges refused" not in str(error):
+                        raise
+                    ranges_refused = True
+                    log("  the server refuses ranged requests; one connection instead")
+                    have = _fetch(route, tmp, size, log)
+            else:
+                have = _fetch(route, tmp, size, log)
         except Exception as error:
             have = tmp.stat().st_size if tmp.exists() else 0
             log(f"  pass {attempt}: {type(error).__name__}: {str(error)[:100]} ({have / 1e6:.0f} MB on disk)")

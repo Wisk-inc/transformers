@@ -318,7 +318,8 @@ stopped at hour 30 of 48 resumes with 18 left. A crashed stage is retried (`--re
 
 **Downloads that are whole.** Every file is checked against the size and md5 the publisher lists before it
 gets its final name. A body cut short by the server or a proxy is resumed with a Range request; a wrong one
-is deleted and fetched again over Zenodo's second route. An archive that fails its zip or tar check is
+is deleted and fetched again over Zenodo's second route. Large files come down over sixteen ranged connections at once, each piece
+resuming on its own, because Zenodo throttles a single connection. An archive that fails its zip or tar check is
 deleted, never half-extracted. The data stage insists on every wanted source for `--data-attempts` runs (5)
 before going on without one, and a source that arrives later is prepared on the next run. One run per root:
 a second process (a notebook cell restarted while the first still runs) refuses to start while `run.lock`
