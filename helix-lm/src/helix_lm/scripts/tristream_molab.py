@@ -39,6 +39,8 @@ singing data in the open is under a hundred hours; the script says what it found
 from __future__ import annotations
 
 import argparse
+import atexit
+import hashlib
 import json
 import os
 import queue
@@ -59,6 +61,7 @@ LAST_PUSH = 0.0
 AUDIO_SUFFIXES = (".wav", ".flac", ".mp3", ".ogg", ".m4a")
 
 STAGES = ("setup", "data", "prepare", "codec", "refiner", "air", "train", "eval", "push", "swap")
+PREPARE_FOLDERS = ("uploads", "raw/vocalset", "raw/dagstuhl-choirset", "raw/esmuc", "raw/emilia-yodas")
 
 
 def log(*parts) -> None:
@@ -76,13 +79,84 @@ def done(root: Path, stage: str) -> bool:
     return (root / "markers" / stage).exists()
 
 
+def has_audio(folder: Path) -> bool:
+    return folder.exists() and any(p.suffix.lower() in AUDIO_SUFFIXES for p in folder.rglob("*"))
+
+
+def source_on_disk(folder: Path) -> bool:
+    """A source counts as present when an archive of it was extracted whole, or it ships plain audio files."""
+    return any((folder / "extracted").rglob(".extracted")) or any(
+        p.suffix.lower() in AUDIO_SUFFIXES for p in folder.glob("*")
+    )
+
+
+def wanted_sources(root: Path, args) -> list[str]:
+    wanted = [n for n in CLEAN_SOURCES if n not in args.skip and n != "slakh2100"]  # Slakh is opt-in (104 GB)
+    if getattr(args, "emilia_hours", 0) > 0 and token():
+        wanted.append("emilia-yodas")
+    return wanted
+
+
+def missing_sources(root: Path, args) -> list[str]:
+    found_file = root / "data_found.json"
+    found = json.loads(found_file.read_text()) if found_file.exists() else {}
+    return [n for n in wanted_sources(root, args) if found.get(n, 0) <= 0 or not source_on_disk(root / "raw" / n)]
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def take_lock(root: Path) -> bool:
+    """One run per root. A notebook cell stopped and started again leaves the first process alive: two runs on
+    one folder race on the same downloads and checkpoints, so the second refuses to start while the first lives."""
+    lock = root / "run.lock"
+    if lock.exists():
+        try:
+            holder = json.loads(lock.read_text())
+            pid = int(holder.get("pid", 0))
+        except Exception:
+            pid = 0
+        if pid and pid != os.getpid() and pid_alive(pid):
+            log(f"!! another run (pid {pid}, started {holder.get('started', '?')}) holds {root}")
+            log("   stop it first (restart the notebook kernel, or kill that pid), or delete run.lock")
+            return False
+    lock.write_text(json.dumps({"pid": os.getpid(), "started": time.strftime("%Y-%m-%d %H:%M:%S")}))
+
+    def release() -> None:
+        try:
+            if lock.exists() and json.loads(lock.read_text()).get("pid") == os.getpid():
+                lock.unlink()
+        except Exception:
+            pass
+
+    atexit.register(release)
+    return True
+
+
 def complete(root: Path, stage: str, args) -> bool:
     """A stage counts as done when its marker AND its artifact exist: a marker pulled from the Hub without the
     file behind it, or a prepared folder that was never copied to this machine, is not done."""
     if not done(root, stage):
         return False
     if stage == "prepare":
-        return any((root / "prepared").rglob("manifest.json"))
+        if not any((root / "prepared").rglob("manifest.json")):
+            return False
+        # a source that arrived after the last prepare (a download retried on a later run) is prepared now
+        for folder in PREPARE_FOLDERS:
+            manifest = root / "prepared" / folder.replace("/", "_") / "manifest.json"
+            if has_audio(root / folder) and not manifest.exists():
+                return False
+        return True
+    if stage == "data":
+        # a source that failed (a cut-short download, a corrupt archive) is fetched again on the next run
+        return not missing_sources(root, args)
     if stage in ("refiner", "air") and getattr(args, f"{stage}_hours", 0) <= 0:
         return True
     artifact = {
@@ -203,11 +277,20 @@ def extract_archives(folder: Path, delete: bool = False) -> int:
         marker = target / ".extracted"
         if marker.exists():
             continue
+        size = archive.stat().st_size
+        valid = zipfile.is_zipfile(archive) if lower.endswith(".zip") else tarfile.is_tarfile(archive)
+        if not valid:
+            log(f"{archive.name} is not a whole archive ({size / 1e6:.1f} MB); deleted, to be downloaded again")
+            archive.unlink()
+            continue
         target.mkdir(parents=True, exist_ok=True)
-        log(f"extracting {archive.name} ({archive.stat().st_size / 1e9:.1f} GB)")
+        log(f"extracting {archive.name} ({size / 1e9:.2f} GB)")
         try:
             if lower.endswith(".zip"):
                 with zipfile.ZipFile(archive) as handle:
+                    bad = handle.testzip()
+                    if bad is not None:
+                        raise zipfile.BadZipFile(f"corrupt member {bad}")
                     handle.extractall(target)
             else:
                 with tarfile.open(archive) as handle:
@@ -217,7 +300,9 @@ def extract_archives(folder: Path, delete: bool = False) -> int:
             if delete:
                 archive.unlink()
         except Exception as error:
-            log(f"  could not extract {archive.name}: {type(error).__name__}: {str(error)[:80]}")
+            log(f"  could not extract {archive.name}: {type(error).__name__}: {str(error)[:80]}; deleted")
+            shutil.rmtree(target, ignore_errors=True)
+            archive.unlink(missing_ok=True)
     return count
 
 
@@ -481,21 +566,134 @@ def zenodo_files(record: str) -> list[dict]:
 
     with urllib.request.urlopen(f"https://zenodo.org/api/records/{record}", timeout=60) as response:
         payload = json.load(response)
-    return [{"name": f["key"], "url": f["links"]["self"], "size": f.get("size", 0)} for f in payload.get("files", [])]
+    return [
+        {
+            "name": f["key"],
+            "url": f["links"]["self"],
+            "size": int(f.get("size", 0) or 0),
+            "checksum": f.get("checksum", ""),
+            "record": record,
+        }
+        for f in payload.get("files", [])
+    ]
 
 
-def download(url: str, target: Path, log=log) -> Path:
+def alternate_url(info: dict) -> str | None:
+    """Zenodo's second download route for the same file (the web one); used when the API route is cut short."""
+    if info.get("record") and info.get("name"):
+        return f"https://zenodo.org/records/{info['record']}/files/{info['name']}?download=1"
+    return None
+
+
+def file_md5(path: Path) -> str:
+    digest = hashlib.md5()  # noqa: S324 - integrity check against the publisher's own md5, not security
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 22), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def verify_file(path: Path, size: int = 0, checksum: str = "") -> str | None:
+    """``None`` when the file matches what the publisher lists, else the reason it does not."""
+    if not path.exists():
+        return "missing"
+    actual = path.stat().st_size
+    if size and actual != size:
+        return f"size {actual} of {size} bytes"
+    if actual < 1024:
+        return f"only {actual} bytes"
+    if checksum and ":" in checksum:
+        algo, _, want = checksum.partition(":")
+        if algo.lower() == "md5" and file_md5(path) != want.lower():
+            return "md5 mismatch"
+    return None
+
+
+def _fetch(url: str, tmp: Path, size: int, log=log) -> int:
+    """One pass of a download into ``tmp``, resumed from its current length with a Range request. Returns the
+    bytes on disk afterwards. ``urllib`` returns a body cut short by the server or a proxy as if it were complete
+    (it never raises IncompleteRead), so the caller compares the length with the published size."""
     import urllib.request
 
+    have = tmp.stat().st_size if tmp.exists() else 0
+    if size and have >= size:
+        return have
+    headers = {"User-Agent": "helix-lm tristream_molab"}
+    if have:
+        headers["Range"] = f"bytes={have}-"
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=120) as response:
+        status = getattr(response, "status", 200)
+        if have and status != 206:
+            have = 0  # the server ignored the range: start over
+        kind = (response.headers.get("Content-Type") or "").lower()
+        if "text/html" in kind or "application/json" in kind:
+            raise OSError(f"the server answered with {kind.split(';')[0]} instead of the file")
+        with open(tmp, "ab" if have else "wb") as handle:
+            written, last = have, time.time()
+            while True:
+                block = response.read(1 << 20)
+                if not block:
+                    break
+                handle.write(block)
+                written += len(block)
+                if size and time.time() - last > 30:
+                    log(f"  {tmp.stem}: {written / 1e9:.2f} of {size / 1e9:.2f} GB")
+                    last = time.time()
+    return tmp.stat().st_size if tmp.exists() else 0
+
+
+def download(
+    url: str,
+    target: Path,
+    log=log,
+    size: int = 0,
+    checksum: str = "",
+    alternate: str | None = None,
+    attempts: int = 6,
+) -> Path:
+    """Fetch ``url`` into ``target`` and keep only a file that is whole: the size (and md5 when the publisher
+    lists one) is checked before the file gets its final name; a short body is resumed with a Range request,
+    a bad one is deleted and fetched again, alternating between the two routes; a file already on disk that
+    does not match is thrown away. Only passes that gain nothing count against ``attempts``: a link that keeps
+    cutting out but moves forward is followed until the file is whole."""
     if target.exists():
-        return target
+        problem = verify_file(target, size, checksum)
+        if problem is None:
+            return target
+        log(f"{target.name} on disk is bad ({problem}); downloading it again")
+        target.unlink()
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(target.suffix + ".part")
-    log(f"downloading {url} -> {target.name}")
-    with urllib.request.urlopen(url, timeout=120) as response, open(tmp, "wb") as handle:
-        shutil.copyfileobj(response, handle, length=1 << 20)
-    tmp.rename(target)
-    return target
+    routes = [url] + ([alternate] if alternate else [])
+    log(f"downloading {url} -> {target.name}" + (f" ({size / 1e9:.2f} GB)" if size else ""))
+    problem, stalls, attempt = "not started", 0, 0
+    while stalls < attempts:
+        route = routes[attempt % len(routes)]
+        before = tmp.stat().st_size if tmp.exists() else 0
+        attempt += 1
+        try:
+            have = _fetch(route, tmp, size, log)
+        except Exception as error:
+            have = tmp.stat().st_size if tmp.exists() else 0
+            log(f"  pass {attempt}: {type(error).__name__}: {str(error)[:100]} ({have / 1e6:.0f} MB on disk)")
+            stalls = 0 if have > before else stalls + 1
+            time.sleep(min(60, 5 * stalls))
+            continue
+        problem = verify_file(tmp, size, checksum)
+        if problem is None:
+            tmp.rename(target)
+            return target
+        if size and have < size:
+            log(f"  pass {attempt}: cut short at {have / 1e6:.0f} of {size / 1e6:.0f} MB; resuming")
+            stalls = 0 if have > before else stalls + 1
+            continue
+        log(f"  pass {attempt}: {problem}; starting over")
+        tmp.unlink(missing_ok=True)
+        stalls += 1
+        time.sleep(min(60, 5 * stalls))
+    tmp.unlink(missing_ok=True)
+    raise OSError(f"{target.name}: {problem} after {attempt} passes")
 
 
 def stage_data(args) -> None:
@@ -517,10 +715,20 @@ def stage_data(args) -> None:
             if gb > args.max_gb:
                 log(f"  skipped: over --max-gb {args.max_gb}")
                 continue
+            fetched = 0
             for f in kept:
-                download(f["url"], raw / name / f["name"])
-            extract_archives(raw / name)
-            found[name] = len(kept)
+                try:
+                    download(f["url"], raw / name / f["name"], size=f["size"], checksum=f["checksum"],
+                             alternate=alternate_url(f))  # fmt: skip
+                    fetched += 1
+                except Exception as error:
+                    log(f"  {f['name']}: not fetched ({type(error).__name__}: {str(error)[:80]})")
+            extracted = extract_archives(raw / name)
+            found[name] = fetched
+            if fetched < len(kept):
+                log(f"  {name}: {fetched} of {len(kept)} files; the rest is retried on the next run")
+            elif extracted == 0 and not any((raw / name / "extracted").rglob(".extracted")):
+                log(f"  {name}: nothing extracted; the archives are retried on the next run")
         except Exception as error:
             log(f"{name}: not fetched ({type(error).__name__}: {str(error)[:80]}); continue without it")
     if args.emilia_hours > 0 and token():
@@ -556,6 +764,16 @@ def stage_data(args) -> None:
     log(f"uploads folder: {sum(p.suffix.lower() in AUDIO_SUFFIXES for p in uploads)} audio files")
     (root / "markers").mkdir(exist_ok=True)
     (root / "data_found.json").write_text(json.dumps(found, indent=1))
+    missing = missing_sources(root, args)
+    if missing:
+        counter = root / "markers" / "data.attempts"
+        tries = (int(counter.read_text()) if counter.exists() else 0) + 1
+        counter.write_text(str(tries))
+        if tries <= args.data_attempts:
+            raise RuntimeError(
+                f"sources not whole yet: {', '.join(missing)}; data attempt {tries} of {args.data_attempts}"
+            )
+        log(f"!! continuing without {', '.join(missing)} after {tries - 1} attempts; they are retried on each run")
     mark(root, "data")
 
 
@@ -1371,6 +1589,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--emilia-hours", type=float, default=300.0, help="data: hours of Emilia-YODAS speech (CC BY) to fetch"
     )
+    parser.add_argument(
+        "--data-attempts", type=int, default=5, help="data: runs that insist on every source before going on"
+    )
     parser.add_argument("--speech-share-start", type=float, default=0.5, help="train: speech share of a batch, start")
     parser.add_argument("--speech-share-end", type=float, default=0.1, help="train: speech share of a batch, end")
     parser.add_argument("--speech-loss-weight", type=float, default=0.5, help="train: loss weight of a spoken clip")
@@ -1405,6 +1626,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.stage != "all" and args.stage not in STAGES:
         parser.error(f"unknown stage {args.stage}")
+    if not take_lock(root):
+        return 3
     gpu_max()
     hub_pull(args)
     if args.stage != "all":

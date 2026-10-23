@@ -316,6 +316,14 @@ repo history is squashed after each push so the Hub holds one copy of each file.
 pulls whichever checkpoint has more steps than the local one. Budgets carry across restarts: a stage
 stopped at hour 30 of 48 resumes with 18 left. A crashed stage is retried (`--retries`, `--retry-wait`).
 
+**Downloads that are whole.** Every file is checked against the size and md5 the publisher lists before it
+gets its final name. A body cut short by the server or a proxy is resumed with a Range request; a wrong one
+is deleted and fetched again over Zenodo's second route. An archive that fails its zip or tar check is
+deleted, never half-extracted. The data stage insists on every wanted source for `--data-attempts` runs (5)
+before going on without one, and a source that arrives later is prepared on the next run. One run per root:
+a second process (a notebook cell restarted while the first still runs) refuses to start while `run.lock`
+names a live pid.
+
 **Memory.** 765M parameters in bf16 with fp32 master weights and Muon momentum is about 8 GB; activations for
 12 s clips (300 codec frames) are small per clip, so the batch is what fills the card. `--batch 0` (the
 default) starts at 64 clips and halves on the first out-of-memory until it fits, which is how the 96 GB is

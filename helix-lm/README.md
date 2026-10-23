@@ -199,6 +199,8 @@ and fallbacks (`docs/TRISTREAM.md` section 12):
   singing-only evaluation; round three (section 14): a sustain-aware alignment prior for melismas, a codebook
   register audit with high-register oversampling, rooms and EQ on every training input against dry targets,
   a per-frame formant curve with a pop detector, and a two-block look-ahead switched on before drops;
+* **2.3.1**: downloads verified by size and md5 with resume and a second route, corrupt archives deleted
+  and fetched again, one run per root (`run.lock`), the data stage retried until every source is whole;
 * **round two** (`docs/TRISTREAM.md` section 13): one global frame grid and measured drift control for long
   tracks (`music.longform`), register physics with a bounded formant move and F1 tuning (`music.register`), an
   air-band extension to 48 kHz with air and pre-echo detectors, an intake that measures and cleans real-world
