@@ -273,9 +273,11 @@ def extract_archives(folder: Path, delete: bool = False) -> int:
         lower = archive.name.lower()
         if not lower.endswith((".zip", ".tar", ".tar.gz", ".tgz")):
             continue
-        target = folder / "extracted" / re.sub(r"\.(zip|tar|tar\.gz|tgz)$", "", archive.name)
+        target = folder / "extracted" / re.sub(ARCHIVE_SUFFIX, "", archive.name)
         marker = target / ".extracted"
         if marker.exists():
+            if delete:
+                archive.unlink(missing_ok=True)  # already unpacked: the archive is only disk space
             continue
         size = archive.stat().st_size
         valid = zipfile.is_zipfile(archive) if lower.endswith(".zip") else tarfile.is_tarfile(archive)
@@ -593,6 +595,44 @@ def file_md5(path: Path) -> str:
     return digest.hexdigest()
 
 
+ARCHIVE_SUFFIX = r"\.(zip|tar|tar\.gz|tgz)$"
+
+
+def archive_extracted(folder: Path, name: str) -> bool:
+    """True when the archive ``name`` was already unpacked whole under ``folder/extracted`` (its marker exists),
+    whether or not the archive itself is still on disk."""
+    if not re.search(ARCHIVE_SUFFIX, name.lower()):
+        return False
+    return (folder / "extracted" / re.sub(ARCHIVE_SUFFIX, "", name) / ".extracted").exists()
+
+
+def _stamp(path: Path) -> Path:
+    return path.with_name(path.name + ".ok")
+
+
+def verified_before(path: Path, size: int, checksum: str) -> bool:
+    """True when ``path`` passed its check on an earlier run and has not changed since (same size and time)."""
+    try:
+        seen = json.loads(_stamp(path).read_text())
+        stat = path.stat()
+    except Exception:
+        return False
+    return seen == {"size": stat.st_size, "mtime": int(stat.st_mtime), "checksum": checksum} and (
+        not size or stat.st_size == size
+    )
+
+
+def mark_verified(path: Path, checksum: str) -> None:
+    stat = path.stat()
+    _stamp(path).write_text(json.dumps({"size": stat.st_size, "mtime": int(stat.st_mtime), "checksum": checksum}))
+
+
+def bytes_on_disk(tmp: Path) -> int:
+    """What an interrupted download left: the single-connection file and the pieces of a parallel one."""
+    total = tmp.stat().st_size if tmp.exists() else 0
+    return total + sum(p.stat().st_size for p in tmp.parent.glob(tmp.name + ".[0-9][0-9]"))
+
+
 def verify_file(path: Path, size: int = 0, checksum: str = "") -> str | None:
     """``None`` when the file matches what the publisher lists, else the reason it does not."""
     if not path.exists():
@@ -654,6 +694,19 @@ def _fetch_parallel(url: str, tmp: Path, size: int, log=log, connections: int = 
     spans = [(a, min(size, a + step) - 1) for a in range(0, size, step)]
     pieces = [tmp.with_name(f"{tmp.name}.{i:02d}") for i in range(len(spans))]
     errors: list[str] = []
+    if tmp.exists() and not any(piece.exists() for piece in pieces):
+        # a one-connection download was interrupted: cut what it got into the pieces instead of starting over
+        have = tmp.stat().st_size
+        if have >= size:
+            return have  # already whole: the caller checks it
+        with open(tmp, "rb") as source:
+            for (start, end), piece in zip(spans, pieces, strict=True):
+                if have <= start:
+                    break
+                source.seek(start)
+                with open(piece, "wb") as out:
+                    out.write(source.read(min(have, end + 1) - start))
+        tmp.unlink()
 
     def piece_size(i: int) -> int:
         return pieces[i].stat().st_size if pieces[i].exists() else 0
@@ -735,15 +788,26 @@ def download(
     does not match is thrown away. Only passes that gain nothing count against ``attempts``: a link that keeps
     cutting out but moves forward is followed until the file is whole."""
     if target.exists():
+        if verified_before(target, size, checksum):
+            log(f"  {target.name}: already on disk and checked, not downloaded again")
+            return target
+        log(f"  {target.name}: already on disk; checking it is whole ({target.stat().st_size / 1e9:.2f} GB)")
         problem = verify_file(target, size, checksum)
         if problem is None:
+            mark_verified(target, checksum)
+            log(f"  {target.name}: whole, not downloaded again")
             return target
-        log(f"{target.name} on disk is bad ({problem}); downloading it again")
+        log(f"  {target.name} on disk is bad ({problem}); downloading it again")
         target.unlink()
+        _stamp(target).unlink(missing_ok=True)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(target.suffix + ".part")
     routes = [url] + ([alternate] if alternate else [])
-    log(f"downloading {url} -> {target.name}" + (f" ({size / 1e9:.2f} GB)" if size else ""))
+    partial = bytes_on_disk(tmp)
+    if partial:
+        log(f"  {target.name}: resuming, {partial / 1e6:,.0f} of {size / 1e6:,.0f} MB already on disk")
+    else:
+        log(f"downloading {url} -> {target.name}" + (f" ({size / 1e9:.2f} GB)" if size else ""))
     problem, stalls, attempt, ranges_refused = "not started", 0, 0, False
     while stalls < attempts:
         route = routes[attempt % len(routes)]
@@ -770,6 +834,7 @@ def download(
         problem = verify_file(tmp, size, checksum)
         if problem is None:
             tmp.rename(target)
+            mark_verified(target, checksum)
             return target
         if size and have < size:
             log(f"  pass {attempt}: cut short at {have / 1e6:.0f} of {size / 1e6:.0f} MB; resuming")
@@ -804,6 +869,10 @@ def stage_data(args) -> None:
                 continue
             fetched = 0
             for f in kept:
+                if archive_extracted(raw / name, f["name"]):
+                    log(f"  {f['name']}: already unpacked on disk, not downloaded again")
+                    fetched += 1
+                    continue
                 try:
                     download(f["url"], raw / name / f["name"], size=f["size"], checksum=f["checksum"],
                              alternate=alternate_url(f))  # fmt: skip
@@ -823,18 +892,26 @@ def stage_data(args) -> None:
             from huggingface_hub import snapshot_download
 
             # Emilia-YODAS is the CC BY 4.0 half (1,362 EN archives named EN-B000000.tar ...; about 50 h each):
-            # fetch exactly the first N, by name
-            patterns = [f"Emilia-YODAS/EN/EN-B{i:06d}.tar" for i in range(max(1, int(args.emilia_hours / 50)))]
-            snapshot_download(
-                "amphion/Emilia-Dataset",
-                repo_type="dataset",
-                allow_patterns=patterns,
-                local_dir=str(raw / "emilia-yodas"),
-                token=token(),
-            )
-            found["emilia-yodas"] = len(list((raw / "emilia-yodas").rglob("*.tar")))
-            log(f"emilia-yodas: {found['emilia-yodas']} archives (CC BY 4.0 half only)")
-            extract_archives(raw / "emilia-yodas", delete=True)  # the tar is gone once its clips are out
+            # fetch exactly the first N, by name, and only those whose clips are not already unpacked (the tar is
+            # deleted once its clips are out, so the tar being gone means nothing)
+            emilia = raw / "emilia-yodas"
+            shards = [f"EN-B{i:06d}" for i in range(max(1, int(args.emilia_hours / 50)))]
+            todo = [s for s in shards if not archive_extracted(emilia, s + ".tar")]
+            if todo:
+                log(f"emilia-yodas: {len(shards) - len(todo)} of {len(shards)} shards already on disk; "
+                    f"downloading {len(todo)}")  # fmt: skip
+                snapshot_download(
+                    "amphion/Emilia-Dataset",
+                    repo_type="dataset",
+                    allow_patterns=[f"Emilia-YODAS/EN/{s}.tar" for s in todo],
+                    local_dir=str(emilia),
+                    token=token(),
+                )
+            else:
+                log(f"emilia-yodas: all {len(shards)} shards already on disk, not downloaded again")
+            extract_archives(emilia, delete=True)  # the tar is gone once its clips are out
+            found["emilia-yodas"] = sum(archive_extracted(emilia, s + ".tar") for s in shards)
+            log(f"emilia-yodas: {found['emilia-yodas']} of {len(shards)} shards unpacked (CC BY 4.0 half only)")
         except Exception as error:
             log(f"emilia-yodas: not fetched ({type(error).__name__}: {str(error)[:80]})")
     if args.include_research and token():

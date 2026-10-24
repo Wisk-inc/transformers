@@ -199,6 +199,9 @@ and fallbacks (`docs/TRISTREAM.md` section 12):
   singing-only evaluation; round three (section 14): a sustain-aware alignment prior for melismas, a codebook
   register audit with high-register oversampling, rooms and EQ on every training input against dry targets,
   a per-frame formant curve with a pop detector, and a two-block look-ahead switched on before drops;
+* **2.3.3**: nothing already on disk is downloaded again: a file checked once is stamped and skipped, an
+  archive already unpacked is skipped even when its zip is gone, Emilia fetches only the shards not yet
+  unpacked, and an interrupted download says it is resuming and reuses every byte it has;
 * **2.3.2**: sixteen ranged connections per download, each resuming on its own (Zenodo throttles one
   connection to about 1 MB/s; sixteen reached 41 MB/s), with MB, MB/s and minutes left in the log;
 * **2.3.1**: downloads verified by size and md5 with resume and a second route, corrupt archives deleted

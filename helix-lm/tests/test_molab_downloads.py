@@ -229,3 +229,142 @@ def test_parallel_falls_back_to_one_connection_when_ranges_are_refused(tmp_path)
         server.close()
     assert target.read_bytes() == PAYLOAD
     assert not list(tmp_path.glob("file.zip.part*"))
+
+
+def test_a_file_already_on_disk_is_checked_once_then_never_fetched(tmp_path, monkeypatch):
+    (tmp_path / "file.zip").write_bytes(PAYLOAD)
+    server = Server()
+    lines: list[str] = []
+    try:
+        molab.download(server.url, tmp_path / "file.zip", size=len(PAYLOAD), checksum=MD5, log=lines.append)
+        assert server.requests == [] and "whole, not downloaded again" in lines[-1]
+        monkeypatch.setattr(molab, "file_md5", lambda *_: pytest.fail("checked again"))
+        molab.download(server.url, tmp_path / "file.zip", size=len(PAYLOAD), checksum=MD5, log=lines.append)
+        assert server.requests == [] and "already on disk and checked" in lines[-1]
+    finally:
+        server.close()
+
+
+def test_a_fresh_download_is_stamped_so_the_next_run_skips_the_check(tmp_path, monkeypatch):
+    server = Server()
+    try:
+        molab.download(server.url, tmp_path / "file.zip", size=len(PAYLOAD), checksum=MD5, log=lambda *_: None)
+        monkeypatch.setattr(molab, "file_md5", lambda *_: pytest.fail("checked again"))
+        molab.download(server.url, tmp_path / "file.zip", size=len(PAYLOAD), checksum=MD5, log=lambda *_: None)
+    finally:
+        server.close()
+    assert len(server.requests) == 1
+
+
+def test_an_unpacked_archive_is_not_fetched_again_even_when_the_zip_is_gone(tmp_path):
+    assert not molab.archive_extracted(tmp_path, "VocalSet.zip")
+    marker = tmp_path / "extracted" / "VocalSet" / ".extracted"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("done")
+    assert molab.archive_extracted(tmp_path, "VocalSet.zip")
+    assert molab.archive_extracted(tmp_path / "x", "EN-B000000.tar") is False
+    assert not molab.archive_extracted(tmp_path, "notes.csv")
+
+
+def test_leftover_archive_of_an_unpacked_shard_is_removed(tmp_path):
+    import tarfile
+
+    shard = tmp_path / "Emilia-YODAS" / "EN" / "EN-B000000.tar"
+    shard.parent.mkdir(parents=True)
+    with tarfile.open(shard, "w"):
+        pass
+    marker = tmp_path / "extracted" / "EN-B000000" / ".extracted"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("done")
+    assert molab.extract_archives(tmp_path, delete=True) == 0
+    assert not shard.exists()
+
+
+def test_an_old_single_connection_partial_is_reused_by_the_parallel_download(tmp_path):
+    (tmp_path / "file.zip.part").write_bytes(PAYLOAD[:200_000])
+    server = Server()
+    lines: list[str] = []
+    try:
+        target = molab.download(server.url, tmp_path / "file.zip", size=len(PAYLOAD), checksum=MD5,
+                                parallel_from=1, log=lines.append)  # fmt: skip
+    finally:
+        server.close()
+    assert target.read_bytes() == PAYLOAD
+    assert any("resuming" in line for line in lines)
+    fetched = 0
+    for r in server.requests:
+        first, _, last = r.split("=")[1].partition("-")
+        fetched += int(last) - int(first) + 1
+    assert fetched <= len(PAYLOAD) - 200_000 + 20_000  # only what the old file did not already hold
+
+
+def test_the_data_stage_run_twice_downloads_nothing_the_second_time(tmp_path, monkeypatch):
+    import io
+    import tarfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as handle:
+        handle.writestr("singer/clip.wav", b"RIFF" + bytes(2000))
+    archive = buffer.getvalue()
+    md5 = "md5:" + hashlib.md5(archive).hexdigest()  # noqa: S324
+    served: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_GET(self):  # noqa: N802
+            served.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(archive)))
+            self.end_headers()
+            self.wfile.write(archive)
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    def fake_zenodo(record):
+        name = {"1193957": "VocalSet.zip", "4607766": "Dagstuhl.zip", "5848990": "Esmuc.zip"}[record]
+        return [{"name": name, "url": f"{base}/{name}", "size": len(archive), "checksum": md5, "record": ""}]
+
+    snapshots: list[list[str]] = []
+
+    def fake_snapshot(repo, repo_type, allow_patterns, local_dir, token):
+        snapshots.append(list(allow_patterns))
+        for pattern in allow_patterns:
+            shard = Path(local_dir) / pattern
+            shard.parent.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(shard, "w") as handle:
+                data = b"RIFF" + bytes(2000)
+                info = tarfile.TarInfo("clip.mp3")
+                info.size = len(data)
+                handle.addfile(info, io.BytesIO(data))
+
+    import huggingface_hub
+
+    monkeypatch.setattr(molab, "zenodo_files", fake_zenodo)
+    monkeypatch.setattr(molab, "token", lambda: "hf_x")
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot)
+    args = SimpleNamespace(root=str(tmp_path), skip=["slakh2100"], max_gb=50.0, emilia_hours=150.0,
+                           include_research=False, data_attempts=5)  # fmt: skip
+    try:
+        molab.stage_data(args)
+        assert len(served) == 3 and snapshots == [[f"Emilia-YODAS/EN/EN-B{i:06d}.tar" for i in range(3)]]
+        assert molab.complete(tmp_path, "data", args)
+        assert not list((tmp_path / "raw" / "emilia-yodas").rglob("*.tar"))  # unpacked, then removed
+        # second run: everything is on disk, so nothing is fetched
+        molab.stage_data(args)
+        assert len(served) == 3 and len(snapshots) == 1
+        # a zip removed by hand: still unpacked, so still not fetched
+        (tmp_path / "raw" / "vocalset" / "VocalSet.zip").unlink()
+        molab.stage_data(args)
+        assert len(served) == 3 and len(snapshots) == 1
+        # one more hour of speech asked for: only the new shard is fetched
+        args.emilia_hours = 200.0
+        molab.stage_data(args)
+        assert snapshots[-1] == ["Emilia-YODAS/EN/EN-B000003.tar"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
