@@ -199,6 +199,10 @@ and fallbacks (`docs/TRISTREAM.md` section 12):
   singing-only evaluation; round three (section 14): a sustain-aware alignment prior for melismas, a codebook
   register audit with high-register oversampling, rooms and EQ on every training input against dry targets,
   a per-frame formant curve with a pop detector, and a two-block look-ahead switched on before drops;
+* **2.3.4**: the GPU is fed by every CPU core but two (worker processes building small chunks, joined on the
+  GPU from pinned memory; threads when `/dev/shm` is small or a worker dies), the batch is the fastest one for
+  the card (doubled while clips per second rise, never just the largest), schedules count clips instead of
+  steps, pitch tracks for the refiner are built off the GPU's path, and raising a stage's hours continues it;
 * **2.3.3**: nothing already on disk is downloaded again: a file checked once is stamped and skipped, an
   archive already unpacked is skipped even when its zip is gone, Emilia fetches only the shards not yet
   unpacked, and an interrupted download says it is resuming and reuses every byte it has;

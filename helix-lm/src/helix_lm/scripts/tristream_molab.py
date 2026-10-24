@@ -157,7 +157,7 @@ def complete(root: Path, stage: str, args) -> bool:
     if stage == "data":
         # a source that failed (a cut-short download, a corrupt archive) is fetched again on the next run
         return not missing_sources(root, args)
-    if stage in ("refiner", "air") and getattr(args, f"{stage}_hours", 0) <= 0:
+    if stage in ("codec", "refiner", "air", "train") and getattr(args, f"{stage}_hours", 0) <= 0:
         return True
     artifact = {
         "codec": root / "codec" / "codec.pt",
@@ -166,7 +166,18 @@ def complete(root: Path, stage: str, args) -> bool:
         "train": root / "runs" / args.size / "latest.pt",
         "eval": root / "eval" / "summary.json",
     }.get(stage)
-    return artifact is None or artifact.exists()
+    if artifact is None:
+        return True
+    if not artifact.exists():
+        return False
+    budget = getattr(args, f"{stage}_hours", None)
+    if budget is not None and checkpoint_meta(artifact).get("hours", budget) + 0.02 < budget:
+        return False  # more hours were asked for than this stage has trained: it continues where it stopped
+    if stage == "eval":
+        # the scores belong to a model: after more training they are measured again
+        trained = root / "runs" / args.size / "latest.pt"
+        return not trained.exists() or artifact.stat().st_mtime >= trained.stat().st_mtime
+    return True
 
 
 class Budget:
@@ -215,18 +226,179 @@ def checkpoint_meta(path: Path) -> dict:
     return {"step": 0 if path.exists() else -1, "hours": 0.0}
 
 
+def warn_if_codec_moved(root: Path, ckpt: Path, what: str) -> None:
+    """The refiner and the singing model learn the codec's frames: when the codec trained again after them, they
+    must train again too, or they speak an older dialect of it."""
+    codec = root / "codec" / "codec.pt"
+    if ckpt.exists() and codec.exists() and codec.stat().st_mtime > ckpt.stat().st_mtime + 60:
+        log(
+            f"!! the codec trained after the {what}: give the {what} more hours too so it adapts to the new codec "
+            "(raising GPU_HOURS in the cell does this for every stage)"
+        )
+
+
+def loader_workers(requested: int = 0) -> int:
+    """CPU threads that build batches: every core but two (one feeds the GPU, one is for the system)."""
+    if requested > 0:
+        return requested
+    return max(2, min(32, (os.cpu_count() or 4) - 2))
+
+
+def _pin(data):
+    import torch
+
+    if isinstance(data, torch.Tensor):
+        return data.pin_memory()
+    if isinstance(data, tuple):
+        return tuple(_pin(x) for x in data)
+    if isinstance(data, list):
+        return [_pin(x) for x in data]
+    return data
+
+
+class _Chunk:
+    """A chunk as it crosses from a worker process: torch's loader turns tuples into lists (and would scramble
+    the fields of a batch); an object of its own passes through untouched, and pins itself."""
+
+    __slots__ = ("data",)
+
+    def __init__(self, data) -> None:
+        self.data = data
+
+    def pin_memory(self, *_):
+        return _Chunk(_pin(self.data))
+
+
+def _identity(item):
+    return item
+
+
+def _combine(items: list, device=None):
+    """Join chunks into one batch: tensors are concatenated (on the GPU when a device is given, so pinned chunks
+    copy asynchronously), lists are joined, counts are added; a tuple is joined field by field."""
+    import torch
+
+    first = items[0]
+    if isinstance(first, torch.Tensor):
+        if device is not None and device.type == "cuda":
+            return torch.cat([x.to(device, non_blocking=True) for x in items])
+        return torch.cat(items)
+    if isinstance(first, tuple):
+        return tuple(_combine([item[k] for item in items], device) for k in range(len(first)))
+    if isinstance(first, list):
+        return [x for item in items for x in item]
+    if isinstance(first, int):
+        return sum(items)
+    return first
+
+
+def _take(item, n: int):
+    """The first ``n`` clips of a batch (the last chunk may overshoot the batch size)."""
+    import torch
+
+    if isinstance(item, (torch.Tensor, list)):
+        return item[:n]
+    if isinstance(item, tuple):
+        return tuple(_take(x, n) for x in item)
+    if isinstance(item, int):
+        return min(item, n)
+    return item
+
+
+def shared_memory_gb() -> float:
+    try:
+        return shutil.disk_usage("/dev/shm").free / 1e9
+    except OSError:
+        return 0.0
+
+
 class Prefetcher:
-    """A thread that builds the next batches while the GPU works on this one (file reads are the CPU cost)."""
+    """
+    Builds the next batches on the CPU while the GPU trains on this one. File reads, augmentation and pitch
+    tracks are CPU work, and one thread cannot keep a Blackwell card busy, so:
 
-    def __init__(self, make, depth: int = 3) -> None:
-        self.make, self.queue, self.stop = make, queue.Queue(depth), threading.Event()
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
+    * **worker processes** (one per core but two) each build small chunks of clips, ``make(gen, n)`` with
+      their own random generator and one CPU thread each; the main process joins the chunks into a batch of
+      ``size()`` clips on the GPU. Chunks keep memory in flight small whatever the batch size, and a resize
+      takes effect on the very next batch;
+    * worker processes pass chunks through shared memory (``/dev/shm``); when it is small (a container
+      started without ``--shm-size``) or a worker dies, the feeder falls back to threads by itself;
+    * on a CPU-only machine one thread builds the batches, as before;
+    * ``wait_share()`` says how much of the time the GPU waited for data: near zero means the GPU is the limit.
+    """
 
-    def _run(self) -> None:
+    def __init__(self, make, size, chunk: int = 16, workers: int = 1, seed: int = 0, device=None,
+                 mode: str = "auto", log=log) -> None:  # fmt: skip
+        self.make, self.size, self.chunk, self.seed, self.device, self.log = make, size, chunk, seed, device, log
+        self.workers = max(1, workers)
+        self.waited, self.started = 0.0, time.time()
+        self.it, self.threads, self.stop, self.queue = None, [], threading.Event(), None
+        self.saved_threads = None
+        on_gpu = device is not None and device.type == "cuda"
+        if mode == "auto":
+            if not on_gpu or self.workers == 1:
+                mode = "thread"
+            elif shared_memory_gb() < 4.0:
+                self.log(
+                    f"  shared memory /dev/shm has {shared_memory_gb():.1f} GB free: batch workers run as threads "
+                    "(start the container with --shm-size=32g for full speed)"
+                )
+                mode = "thread"
+            else:
+                mode = "process"
+        self.mode = mode
+        if mode == "process":
+            self._start_processes()
+        else:
+            self._start_threads(self.workers if on_gpu or mode == "thread-forced" else 1)
+
+    # -- processes
+    def _start_processes(self) -> None:
+        import torch
+
+        make, chunk, seed = self.make, self.chunk, self.seed
+
+        class Chunks(torch.utils.data.IterableDataset):
+            def __iter__(self):
+                info = torch.utils.data.get_worker_info()
+                gen = torch.Generator().manual_seed(seed * 1000 + (info.id if info else 0))
+                while True:
+                    yield _Chunk(make(gen, chunk))
+
+        loader = torch.utils.data.DataLoader(
+            Chunks(),
+            batch_size=None,
+            collate_fn=_identity,
+            num_workers=self.workers,
+            multiprocessing_context="fork",
+            pin_memory=self.device is not None and self.device.type == "cuda",
+            prefetch_factor=4,
+            persistent_workers=False,
+        )
+        self.it = iter(loader)
+
+    # -- threads
+    def _start_threads(self, n: int) -> None:
+        import torch
+
+        if n > 1:
+            # torch's own thread pool fights the workers for the cores: one compute thread per worker instead
+            self.saved_threads = torch.get_num_threads()
+            torch.set_num_threads(1)
+        self.mode = "thread"
+        self.stop = threading.Event()
+        self.queue = queue.Queue(maxsize=max(4, 4 * n))
+        self.threads = []
+        for i in range(n):
+            gen = torch.Generator().manual_seed(self.seed * 1000 + i)
+            thread = threading.Thread(target=self._run, args=(gen,), daemon=True)
+            thread.start()
+            self.threads.append(thread)
+
+    def _run(self, gen) -> None:
         while not self.stop.is_set():
             try:
-                item = self.make()
+                item = self.make(gen, self.chunk)
             except Exception as error:  # surfaces in get()
                 item = error
             while not self.stop.is_set():
@@ -236,21 +408,135 @@ class Prefetcher:
                 except queue.Full:
                     continue
 
-    def get(self):
+    def _next_chunk(self):
+        if self.mode == "process":
+            try:
+                return next(self.it).data
+            except RuntimeError as error:
+                if "DataLoader worker" not in str(error):
+                    raise
+                self.log(f"  a batch worker process died ({str(error)[:100]}); switching to threads")
+                self._stop_processes()
+                self._start_threads(self.workers)
         item = self.queue.get()
         if isinstance(item, Exception):
             raise item
         return item
 
+    def get(self):
+        begin = time.time()
+        n = max(1, int(self.size()))
+        items, have = [], 0
+        while have < n:
+            item = self._next_chunk()
+            items.append(item)
+            have += self._count(item)
+        batch = _take(_combine(items, self.device), n)
+        self.waited += time.time() - begin
+        return batch
+
+    @property
+    def kind(self) -> str:
+        return "worker processes" if self.mode == "process" else ("worker threads" if self.threads[1:] else "thread")
+
+    @staticmethod
+    def _count(item) -> int:
+        import torch
+
+        first = item[0] if isinstance(item, tuple) else item
+        return int(first.shape[0]) if isinstance(first, torch.Tensor) else len(first)
+
+    def wait_share(self, reset: bool = True) -> float:
+        share = self.waited / max(1e-6, time.time() - self.started)
+        if reset:
+            self.waited, self.started = 0.0, time.time()
+        return share
+
     def drain(self) -> None:
-        while True:
-            try:
-                self.queue.get_nowait()
-            except queue.Empty:
-                return
+        if self.queue is not None:
+            while True:
+                try:
+                    self.queue.get_nowait()
+                except queue.Empty:
+                    break
+
+    def _stop_processes(self) -> None:
+        it, self.it = self.it, None
+        if it is not None and hasattr(it, "_shutdown_workers"):
+            it._shutdown_workers()
 
     def close(self) -> None:
+        """Stop every worker and wait for it: a thread killed mid-computation at exit aborts the program."""
+        import torch
+
+        self._stop_processes()
         self.stop.set()
+        self.drain()
+        for thread in self.threads:
+            thread.join(timeout=60)
+        self.threads = []
+        if self.saved_threads is not None:
+            torch.set_num_threads(self.saved_threads)
+            self.saved_threads = None
+
+
+class BatchSizer:
+    """Find the batch that trains fastest on this card, instead of a fixed one. Starting from the stage's batch,
+    it measures clips per second, doubles the batch while that keeps rising by more than 8 %, and keeps the
+    fastest. Past that point a bigger batch only fills memory: the card is already busy and fewer, larger steps
+    learn less per clip. On out-of-memory it goes back to the last batch that fit. ``--batch N`` fixes it."""
+
+    def __init__(self, start: int, name: str, device, fixed: bool = False, cap: int = 2048, log=log) -> None:
+        self.size, self.name, self.cap, self.log = start, name, cap, log
+        self.done = fixed or device.type != "cuda"
+        self.best: tuple[int, float] | None = None
+        self._reset()
+
+    def _reset(self) -> None:
+        self.warm, self.steps, self.clips, self.start = 0, 0, 0, None
+
+    def tick(self, clips: int) -> None:
+        """After every successful step, with the clips that step trained on."""
+        if self.done or clips != self.size:
+            return  # a batch built before the last resize says nothing about the size being measured
+        if self.start is None:  # the first steps at a new size are warm-up (cuDNN autotuning, allocator)
+            self.warm += 1
+            if self.warm >= 5:
+                self.start = time.time()
+            return
+        self.steps += 1
+        self.clips += clips
+        if self.steps < 25:
+            return
+        rate = self.clips / max(1e-6, time.time() - self.start)
+        if self.best is None or rate > 1.08 * self.best[1]:
+            self.best = (self.size, rate)
+            if self.size * 2 > self.cap:
+                self._finish(f"batch {self.size} ({rate:.1f} clips/s), the cap")
+            else:
+                self.size *= 2
+                self.log(f"{self.name}: {rate:.1f} clips/s at batch {self.size // 2}; trying {self.size}")
+        else:
+            self.size = self.best[0]
+            self._finish(f"batch {self.size} is the fastest ({self.best[1]:.1f} clips/s); larger was not faster")
+        self._reset()
+
+    def _finish(self, why: str) -> None:
+        import torch
+
+        self.done = True
+        free, total = torch.cuda.mem_get_info()
+        self.log(f"{self.name}: {why}; GPU memory in use {(total - free) / 1e9:.0f} of {total / 1e9:.0f} GB")
+
+    def out_of_memory(self) -> int:
+        if self.best is not None and self.size > self.best[0]:
+            self.size = self.best[0]  # the doubling did not fit: back to the last size that did
+            self._finish(f"batch {self.size} (the next size did not fit)")
+        else:
+            self.size = max(1, int(self.size * 0.75))
+            self.done = True
+        self._reset()
+        return self.size
 
 
 def gpu_max() -> None:
@@ -966,7 +1252,7 @@ def stage_prepare(args) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     separate = try_pretrained("htdemucs")
     log("separator:", "HT-Demucs (MIT)" if separate else "none (install demucs); full songs will be rejected")
-    log(f"measurements on {device}, {args.prepare_workers} workers")
+    log(f"measurements on {device}, {loader_workers(args.prepare_workers)} workers")
     manifests = {}
     sources = [
         ("uploads", args.uploads_are_mixtures, args.upload_accent, True, None, "singing"),
@@ -995,7 +1281,7 @@ def stage_prepare(args) -> None:
             log=log if folder == "uploads" else (lambda *_: None),
             device=device,
             analysis=analysis,
-            workers=args.prepare_workers,
+            workers=loader_workers(args.prepare_workers),
             singer_of=singer_of,
             domain=domain,
         )
@@ -1045,7 +1331,10 @@ def stage_codec(args) -> None:
     budget = Budget(args.codec_hours, checkpoint_meta(ckpt).get("hours", 0.0) if ckpt.exists() else 0.0)
     crop = int(1.5 * args.sample_rate)
     g = torch.Generator().manual_seed(step)
-    batch_size = args.batch if args.batch > 0 else (96 if device.type == "cuda" else 4)
+    sizer = BatchSizer(args.batch if args.batch > 0 else (96 if device.type == "cuda" else 4), "codec", device,
+                       fixed=args.batch > 0)  # fmt: skip
+    # the schedule counts clips, not steps, so a bigger batch does not delay the discriminator
+    clips_seen = int(state.get("clips", step * 96)) if ckpt.exists() else 0
     speech_files = [f for f in files if "emilia" in str(f)]
     sung_files = [f for f in files if "emilia" not in str(f)] or files
     log(
@@ -1066,38 +1355,41 @@ def stage_codec(args) -> None:
     from helix_lm.audio.refiner import high_band_loss
     from helix_lm.music.regularize import augment
 
-    def pick_file() -> Path:
-        draw = float(torch.rand((), generator=g))
+    def pick_file(gen) -> Path:
+        draw = float(torch.rand((), generator=gen))
         if high_files and draw < args.high_register_share:
             pool = high_files
         elif speech_files and draw < args.high_register_share + 0.5 * (1 - args.high_register_share):
             pool = speech_files
         else:
             pool = sung_files
-        return pool[int(torch.randint(0, len(pool), (), generator=g))]
+        return pool[int(torch.randint(0, len(pool), (), generator=gen))]
 
-    def crop_of(path: Path, length: int) -> torch.Tensor:
+    def crop_of(path: Path, length: int, gen) -> torch.Tensor:
         wave = read_wave(path, args.sample_rate)
         if wave.shape[-1] < length:
             wave = torch.nn.functional.pad(wave, (0, length - wave.shape[-1]))
-        start = int(torch.randint(0, wave.shape[-1] - length + 1, (), generator=g))
+        start = int(torch.randint(0, wave.shape[-1] - length + 1, (), generator=gen))
         return wave[start : start + length]
 
-    def make_batch() -> torch.Tensor:
+    def make_batch(gen, n: int) -> torch.Tensor:
         batch = []
-        for _ in range(batch_size):
-            wave = crop_of(pick_file(), crop)
-            if float(torch.rand((), generator=g)) < args.augment_prob:  # rooms, EQ, noise: "clean" is not a domain
-                wave, _ = augment(wave, args.sample_rate, seed=int(torch.randint(0, 1 << 30, (), generator=g)))
+        for _ in range(n):
+            wave = crop_of(pick_file(gen), crop, gen)
+            if float(torch.rand((), generator=gen)) < args.augment_prob:  # rooms, EQ, noise: "clean" is not a domain
+                wave, _ = augment(wave, args.sample_rate, seed=int(torch.randint(0, 1 << 30, (), generator=gen)))
             batch.append(wave)
         return torch.stack(batch)[:, None]
 
-    audit_high = torch.stack([crop_of(f, crop) for f in high_files[:16]]) if high_files else None
-    audit_low = torch.stack([crop_of(f, crop) for f in low_files[:16]]) if high_files else None
-    prefetch = Prefetcher(make_batch)
+    audit_high = torch.stack([crop_of(f, crop, g) for f in high_files[:16]]) if high_files else None
+    audit_low = torch.stack([crop_of(f, crop, g) for f in low_files[:16]]) if high_files else None
+    prefetch = Prefetcher(make_batch, lambda: sizer.size, chunk=16, workers=loader_workers(args.loader_workers),
+                          seed=step, device=device, mode=args.loader_mode)  # fmt: skip
+    log(f"codec: {prefetch.workers} {prefetch.kind} build the batches")
     last_save = time.time()
     while not budget.over() and not (root / "stop").exists():
         wave = prefetch.get().to(device, non_blocking=True)
+        disc_on = clips_seen > 5000 * 96
         try:
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
                 out = codec(wave)
@@ -1105,8 +1397,8 @@ def stage_codec(args) -> None:
                     out,
                     wave,
                     config,
-                    discriminator=disc if step > 5000 else None,
-                    time_weight=1.0 if step < 20000 else 0.1,
+                    discriminator=disc if disc_on else None,
+                    time_weight=1.0 if clips_seen < 20000 * 96 else 0.1,
                 )
                 terms["high_band"] = 2.0 * high_band_loss(out["recon"].float(), wave.float(), args.sample_rate)
                 terms["total"] = terms["total"] + terms["high_band"]
@@ -1114,7 +1406,7 @@ def stage_codec(args) -> None:
             terms["total"].backward()
             torch.nn.utils.clip_grad_norm_(codec.parameters(), 10.0)
             opt_g.step()
-            if step > 5000:
+            if disc_on:
                 d_loss = discriminator_loss(disc, out["recon"].float(), wave)
                 opt_d.zero_grad()
                 d_loss.backward()
@@ -1124,15 +1416,17 @@ def stage_codec(args) -> None:
             opt_d.zero_grad(set_to_none=True)
             del wave
             torch.cuda.empty_cache()
-            batch_size = max(2, batch_size // 2)
             prefetch.drain()
-            log(f"codec out of memory: batch halved to {batch_size}")
+            log(f"codec out of memory: batch now {sizer.out_of_memory()}")
             continue
         step += 1
+        clips_seen += wave.shape[0]
+        sizer.tick(wave.shape[0])
         if step % 100 == 0:
             log(
                 f"codec step {step}: mel {terms['mel'].item():.3f} high-band {terms['high_band'].item():.3f} "
-                f"commit {terms['commitment'].item():.4f} usage {codec.quantizer.semantic.usage():.0%}"
+                f"commit {terms['commitment'].item():.4f} usage {codec.quantizer.semantic.usage():.0%} "
+                f"batch {wave.shape[0]}, GPU waited for data {prefetch.wait_share():.0%}"
             )
         if step % 2000 == 0 and audit_high is not None:
             codec.eval()
@@ -1152,6 +1446,7 @@ def stage_codec(args) -> None:
                     "codec": codec.state_dict(),
                     "disc": disc.state_dict(),
                     "step": step,
+                    "clips": clips_seen,
                     "config": config.__dict__,
                     "hours": budget.elapsed,
                 },
@@ -1165,6 +1460,7 @@ def stage_codec(args) -> None:
             "codec": codec.state_dict(),
             "disc": disc.state_dict(),
             "step": step,
+            "clips": clips_seen,
             "config": config.__dict__,
             "hours": budget.elapsed,
         },
@@ -1244,10 +1540,12 @@ def stage_refiner(args) -> None:
         disc.load_state_dict(state["disc"])
         step = state["step"]
         log(f"refiner resumed at step {step}")
+        warn_if_codec_moved(root, ckpt, "refiner")
     log(f"refiner: {refiner.num_parameters() / 1e6:.1f}M parameters, {len(files)} clips, {args.refiner_hours:.0f} h")
     budget = Budget(args.refiner_hours, checkpoint_meta(ckpt).get("hours", 0.0) if ckpt.exists() else 0.0)
-    g = torch.Generator().manual_seed(step)
-    batch_size = max(4, args.batch if args.batch > 0 else (48 if device.type == "cuda" else 4))
+    sizer = BatchSizer(max(4, args.batch if args.batch > 0 else (48 if device.type == "cuda" else 4)), "refiner",
+                       device, fixed=args.batch > 0)  # fmt: skip
+    clips_seen = int(state.get("clips", step * 48)) if ckpt.exists() else 0
     need = int(2.0 * args.sample_rate)
     hop_fine = config.hop
     tf = need // hop_fine
@@ -1260,6 +1558,7 @@ def stage_refiner(args) -> None:
                 "refiner": refiner.state_dict(),
                 "disc": disc.state_dict(),
                 "step": step,
+                "clips": clips_seen,
                 "config": config.__dict__,
                 "hours": budget.elapsed,
             },
@@ -1268,49 +1567,60 @@ def stage_refiner(args) -> None:
 
     from helix_lm.music.regularize import augment
 
-    def make_batch() -> torch.Tensor:
+    def make_batch(gen, n: int):
         waves = []
-        for _ in range(batch_size):
-            wave = read_wave(files[int(torch.randint(0, len(files), (), generator=g))], args.sample_rate)
+        for _ in range(n):
+            wave = read_wave(files[int(torch.randint(0, len(files), (), generator=gen))], args.sample_rate)
             if wave.shape[-1] < need:
                 wave = torch.nn.functional.pad(wave, (0, need - wave.shape[-1]))
-            start = int(torch.randint(0, wave.shape[-1] - need + 1, (), generator=g))
+            start = int(torch.randint(0, wave.shape[-1] - need + 1, (), generator=gen))
             wave = wave[start : start + need]
-            if float(torch.rand((), generator=g)) < args.augment_prob:
-                wave, _ = augment(wave, args.sample_rate, seed=int(torch.randint(0, 1 << 30, (), generator=g)))
+            if float(torch.rand((), generator=gen)) < args.augment_prob:
+                wave, _ = augment(wave, args.sample_rate, seed=int(torch.randint(0, 1 << 30, (), generator=gen)))
             waves.append(wave)
-        return torch.stack(waves)
+        waves = torch.stack(waves)
+        # the pitch track is CPU work: done here, in the workers, so the GPU never waits on it
+        f0_fine = estimate_f0(waves, args.sample_rate, frame_rate=config.fine_rate)[:, :tf]
+        return waves, torch.nn.functional.pad(f0_fine, (0, tf - f0_fine.shape[-1]))
 
-    prefetch = Prefetcher(make_batch)
+    prefetch = Prefetcher(make_batch, lambda: sizer.size, chunk=8, workers=loader_workers(args.loader_workers),
+                          seed=step, device=device, mode=args.loader_mode)  # fmt: skip
+    log(f"refiner: {prefetch.workers} {prefetch.kind} build the batches and their pitch tracks")
     while not budget.over() and not (root / "stop").exists():
-        wave = prefetch.get().to(device, non_blocking=True)
+        wave, f0_fine = prefetch.get()
+        wave = wave.to(device, non_blocking=True)
+        f0_fine = f0_fine.to(device, non_blocking=True)
+        disc_on = clips_seen > 2000 * 48
         try:
             with torch.no_grad():
                 frames = codec.listen(wave)
                 recon = codec.decode_frames(frames)[:, :, :need]
-                f0_fine = estimate_f0(wave.cpu(), args.sample_rate, frame_rate=config.fine_rate).to(device)[:, :tf]
-                f0_fine = torch.nn.functional.pad(f0_fine, (0, tf - f0_fine.shape[-1]))
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
                 out = refiner(recon, frames, f0_fine)
-                terms = refiner_losses(out, wave, args.sample_rate, disc if step > 2000 else None)
+                terms = refiner_losses(out, wave, args.sample_rate, disc if disc_on else None)
             opt.zero_grad()
             terms["total"].backward()
             torch.nn.utils.clip_grad_norm_(refiner.parameters(), 1.0)
             opt.step()
-            if step > 2000:
+            if disc_on:
                 opt_d.zero_grad()
                 discriminator_loss(disc, out["wave"].detach(), wave[:, None]).backward()
                 opt_d.step()
         except torch.cuda.OutOfMemoryError:
             opt.zero_grad(set_to_none=True)
             torch.cuda.empty_cache()
-            batch_size = max(2, batch_size // 2)
             prefetch.drain()
-            log(f"refiner out of memory: batch halved to {batch_size}")
+            log(f"refiner out of memory: batch now {sizer.out_of_memory()}")
             continue
         step += 1
+        clips_seen += wave.shape[0]
+        sizer.tick(wave.shape[0])
         if step % 50 == 0:
-            log(f"refiner step {step}: " + " ".join(f"{k} {float(v.detach()):.3f}" for k, v in terms.items()))
+            log(
+                f"refiner step {step}: "
+                + " ".join(f"{k} {float(v.detach()):.3f}" for k, v in terms.items())
+                + f" batch {wave.shape[0]}, GPU waited for data {prefetch.wait_share():.0%}"
+            )
         if time.time() - last_save > 1800:
             save()
             last_save = time.time()
@@ -1400,9 +1710,9 @@ def stage_train(args) -> None:
     if codec is None:
         log("!! no codec (run the codec stage, or point --codec at a saved one)")
         return
+    sizer = BatchSizer(args.batch if args.batch > 0 else 64, "train", device, fixed=args.batch > 0)
     if args.batch <= 0:
-        args.batch = 64  # auto: the largest batch that fits is found by halving on out-of-memory
-        log("auto batch size: starting at 64 clips and halving on out-of-memory until it fits")
+        log("auto batch size: starting at 64 clips, then the fastest size for this card is measured")
     records = []
     for manifest in (root / "prepared").rglob("manifest.json"):
         data = json.loads(manifest.read_text())
@@ -1420,7 +1730,10 @@ def stage_train(args) -> None:
         f"{args.speech_share_start:.0%} -> {args.speech_share_end:.0%} of each batch, spoken loss weight "
         f"{args.speech_loss_weight}"
     )
-    weights = mixture_weights(train_tags, speech_share_at(0.0, args.speech_share_start, args.speech_share_end))
+    # shared memory: the curriculum updates it in place and the batch workers (other processes) read it
+    weights = mixture_weights(
+        train_tags, speech_share_at(0.0, args.speech_share_start, args.speech_share_end)
+    ).share_memory_()
     config = TriStreamConfig.named(
         args.size,
         frame_dim=codec.config.dim,
@@ -1443,6 +1756,7 @@ def stage_train(args) -> None:
         optimizer.load_state_dict(state["optimizer"])
         step = state["step"]
         log(f"resumed at step {step}")
+        warn_if_codec_moved(root, ckpt, "singing model")
     log(
         f"TriStream-2 {args.size}: {model.num_parameters() / 1e6:.0f}M parameters, {len(train_idx)} training clips, "
         f"{len(records) - len(train_idx)} validation clips (singer-disjoint)"
@@ -1450,12 +1764,11 @@ def stage_train(args) -> None:
     budget = Budget(args.train_hours, checkpoint_meta(ckpt).get("hours", 0.0) if ckpt.exists() else 0.0)
     log(f"train: {budget.remaining:.1f} h left of {args.train_hours} h")
     frames_per_clip = int(args.clip_seconds * config.frame_rate)
-    g = torch.Generator().manual_seed(step)
     singer_ids = {t.singer: i % config.num_singers for i, t in enumerate(tags)}
     last_save = time.time()
 
-    def make_batch():
-        chosen = torch.multinomial(weights, args.batch, replacement=True, generator=g).tolist()
+    def make_batch(gen, n: int):
+        chosen = torch.multinomial(weights, n, replacement=True, generator=gen).tolist()
         batch_rows = [records[train_idx[i]] for i in chosen]
         waves, f0s, accents, singers = [], [], [], []
         loss_weights = [
@@ -1469,7 +1782,7 @@ def stage_train(args) -> None:
             if wave.shape[-1] < need:
                 wave = torch.nn.functional.pad(wave, (0, need - wave.shape[-1]))
                 f0 = torch.nn.functional.pad(f0, (0, max(0, frames_per_clip - f0.shape[-1])))
-            start = int(torch.randint(0, wave.shape[-1] - need + 1, (), generator=g))
+            start = int(torch.randint(0, wave.shape[-1] - need + 1, (), generator=gen))
             f_start = int(start / args.sample_rate * config.frame_rate)
             waves.append(wave[start : start + need])
             f0s.append(f0[f_start : f_start + frames_per_clip])
@@ -1480,18 +1793,22 @@ def stage_train(args) -> None:
             clean.clone()
         )  # what the model hears: the dry take through rooms, EQ, noise, holes; the target stays dry
         for i in range(clean.shape[0]):
-            if float(torch.rand((), generator=g)) < args.augment_prob:
-                dirty[i], _ = augment(clean[i], args.sample_rate, seed=int(torch.randint(0, 1 << 30, (), generator=g)))
+            if float(torch.rand((), generator=gen)) < args.augment_prob:
+                dirty[i], _ = augment(
+                    clean[i], args.sample_rate, seed=int(torch.randint(0, 1 << 30, (), generator=gen))
+                )
         return clean, dirty, f0s, accents, singers, len(batch_rows), torch.tensor(loss_weights)
 
-    prefetch = Prefetcher(make_batch)
+    prefetch = Prefetcher(make_batch, lambda: sizer.size, chunk=8, workers=loader_workers(args.loader_workers),
+                          seed=step, device=device, mode=args.loader_mode)  # fmt: skip
+    log(f"train: {prefetch.workers} {prefetch.kind} build the batches")
     last_share = -1.0
     while not budget.over() and not (root / "stop").exists():
         share = speech_share_at(
             budget.elapsed / max(budget.hours, 1e-6), args.speech_share_start, args.speech_share_end
         )
-        if abs(share - last_share) >= 0.05:  # re-derive the sampler as the curriculum moves
-            weights = mixture_weights(train_tags, share)
+        if abs(share - last_share) >= 0.05:  # re-derive the sampler as the curriculum moves (in place: shared)
+            weights.copy_(mixture_weights(train_tags, share))
             last_share = share
             log(f"curriculum: speech share now {share:.0%}")
         wave, dirty, f0s, accents, singers, rows, loss_weights = prefetch.get()
@@ -1523,15 +1840,16 @@ def stage_train(args) -> None:
             optimizer.zero_grad(set_to_none=True)
             del batch, frames
             torch.cuda.empty_cache()
-            args.batch = max(1, args.batch // 2)
             prefetch.drain()
-            log(f"out of memory: batch halved to {args.batch} clips of {args.clip_seconds:.0f} s")
+            log(f"out of memory: batch now {sizer.out_of_memory()} clips of {args.clip_seconds:.0f} s")
             continue
         step += 1
+        sizer.tick(rows)
         if step % 20 == 0:
             log(
                 f"step {step}: "
                 + " ".join(f"{k} {float(v.detach()):.3f}" for k, v in losses.items() if k != "mask_fraction")
+                + f" batch {rows}, GPU waited for data {prefetch.wait_share():.0%}"
             )
         if time.time() - last_save > 1800:
             save_checkpoint(
@@ -1746,7 +2064,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-squash", action="store_true", help="keep every pushed checkpoint in the Hub history")
     parser.add_argument("--retries", type=int, default=1000, help="all: restart a crashed stage this many times")
     parser.add_argument("--retry-wait", type=float, default=120.0, help="seconds between restarts")
-    parser.add_argument("--prepare-workers", type=int, default=8, help="prepare: file threads")
+    parser.add_argument("--prepare-workers", type=int, default=0, help="prepare: file threads (0 = every core)")
+    parser.add_argument(
+        "--loader-workers", type=int, default=0, help="training: CPU workers that build batches (0 = all but two)"
+    )
+    parser.add_argument(
+        "--loader-mode", default="auto", choices=["auto", "process", "thread", "thread-forced"],
+        help="training: batch workers as processes (fastest), threads, or auto (processes on a GPU machine)",
+    )  # fmt: skip
     parser.add_argument(
         "--max-gb", type=float, default=50.0, help="data: skip a source bigger than this (Slakh2100 is 104 GB)"
     )

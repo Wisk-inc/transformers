@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "helix-lm"
-version = "2.3.3"
+version = "2.3.4"
 description = "HELIX, ANANSI and TriStream-2: linear-scaling sequence architectures with exact long-range recall, the engine that trains them (Muon, muP, growth), and a music stack (analysis, frisson critic, conductor, separation, singing voice conversion)"
 readme = "README.md"
 requires-python = ">=3.10"

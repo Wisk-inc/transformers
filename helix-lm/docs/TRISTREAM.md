@@ -327,6 +327,26 @@ before going on without one, and a source that arrives later is prepared on the 
 a second process (a notebook cell restarted while the first still runs) refuses to start while `run.lock`
 names a live pid.
 
+**Feeding the GPU.** A Blackwell card trains faster than one CPU thread can read, augment and pitch-track
+clips, so the batches are built by worker processes, one per core but two (`--loader-workers`), each making
+small chunks of 8-16 clips with its own random stream and one compute thread; the main process joins the chunks
+on the GPU from pinned memory. Chunks keep the memory in flight small whatever the batch, and a resize applies to
+the very next batch. Worker processes pass chunks through `/dev/shm`: when it is under 4 GB (a container started
+without `--shm-size`), or a worker dies, the feeder runs as threads instead (`--loader-mode`). Every log line
+says how much of the time the GPU waited for data; near zero means the GPU, not the CPU, sets the pace.
+
+**The batch is the fastest one, not the largest.** Each stage starts at its usual batch, measures clips per
+second, and doubles the batch while that rises by more than 8 %, then keeps the fastest. Past that point a
+bigger batch only fills memory: the card is already busy, and fewer, larger steps learn less per clip, so
+filling a 288 GB card to the brim would make the model worse per hour, not better. An out-of-memory goes back
+to the last size that fit. Schedules (when the discriminators join) count clips, not steps, so a bigger batch
+does not delay them. `--batch N` fixes the batch.
+
+**More hours later.** A stage whose checkpoint has trained fewer hours than asked for is not finished: raise
+its hours and it continues where it stopped, from the Hub if the machine is new. When the codec trains again
+after the refiner or the singing model, they warn that they need more hours too, and the evaluation is
+measured again whenever the singing model has trained since.
+
 **Memory.** 765M parameters in bf16 with fp32 master weights and Muon momentum is about 8 GB; activations for
 12 s clips (300 codec frames) are small per clip, so the batch is what fills the card. `--batch 0` (the
 default) starts at 64 clips and halves on the first out-of-memory until it fits, which is how the 96 GB is
