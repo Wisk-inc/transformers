@@ -30,6 +30,9 @@ def test_acc_and_sharpness():
     assert acc_per_run(rng.permutation(ob), ob, clim, blocks) < 0.2
     assert abs(sharpness(ob, ob, blocks) - 1.0) < 1e-9
     assert sharpness(0.5 * ob + 0.5 * ob.mean(), ob, blocks) < 0.6         # a blurred field is less sharp
+    dry = np.concatenate([ob, np.r_[np.zeros(199), 0.1]])                   # a nearly flat (dry) day
+    fc = np.concatenate([ob, rng.gamma(1.0, 1.0, 200)])
+    assert sharpness(fc, dry, np.repeat([1, 2, 3], 200)) < 1.5              # a dry day cannot dominate
 
 
 def test_crps_of_quantiles_matches_samples():

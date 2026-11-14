@@ -4,7 +4,7 @@ Every module of the package, what it is for, and its size. Generated from the mo
 
 | Module | Lines | Purpose |
 |---|---|---|
-| `pluvium/__init__.py` | 15 | Pluvium: hour-by-hour rain forecasts for every Caribbean town, on the NatureV1 / iHELIX engine. |
+| `pluvium/__init__.py` | 17 | Pluvium: rain forecasts for every town, in any country, on the NatureV1 / iHELIX engine. |
 | `pluvium/advection.py` | 70 | Rain already falling, carried forward (experimental as an input to a neural forecaster of this kind). |
 | `pluvium/area.py` | 195 | Where Pluvium forecasts: one country, several, or any box between 60 S and 60 N. |
 | `pluvium/atmos/__init__.py` | 33 | Theoretical atmospheric physics computed from the driving fields and given to the network as inputs. |
@@ -19,14 +19,14 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/atmos/waves.py` | 39 | Tropical (easterly) waves: the main source of Caribbean rain from June to November. |
 | `pluvium/bench.py` | 254 | A fair fight between architectures on real, held-out Caribbean data. |
 | `pluvium/benchmarks/__init__.py` | 3 | Benchmarks that need more than :mod:`pluvium.bench`: Pluvium against the operational forecasting systems on real forecasts (:mod:`pluvium.benchmarks.operational`). |
-| `pluvium/benchmarks/fullyear.py` | 684 | A full year, 14 days ahead, around the world: Pluvium Blend against the operational systems. |
+| `pluvium/benchmarks/fullyear.py` | 913 | A full year, 14 days ahead, around the world: Pluvium Blend against the operational systems. |
 | `pluvium/benchmarks/operational.py` | 885 | Pluvium against the operational forecasting systems, on real forecasts only. |
-| `pluvium/blend.py` | 181 | Pluvium Blend: one calibrated forecast from every operational system and Pluvium's own network. |
-| `pluvium/blendlive.py` | 169 | Pluvium Blend for any country, every day. |
+| `pluvium/blend.py` | 301 | Pluvium Blend: one calibrated forecast from every operational system and Pluvium's own network. |
+| `pluvium/blendlive.py` | 221 | Pluvium Blend for any country, every day. |
 | `pluvium/calibrate.py` | 147 | Making the stated chances true: isotonic recalibration fitted on held-out forecasts. |
 | `pluvium/card.py` | 146 | The model card written next to a trained Pluvium: what it is, how it was trained, and how well it did. |
 | `pluvium/chain.py` | 256 | The intensity chain (experimental): rain at a place as a hidden Markov chain over *intensity states* -- dry, light, moderate, heavy -- whose hour-by-hour transition matrix the network writes for every place. |
-| `pluvium/cli.py` | 233 | ``pluvium forecast / place / program / info``. |
+| `pluvium/cli.py` | 234 | ``pluvium forecast / place / program / info``. |
 | `pluvium/convection.py` | 90 | The convective environment: how ready the air is to make thunderstorms, from the driving model's temperature, humidity and wind at 850, 700, 500 and 200 hPa (the forecaster's classic instability and moisture indices). |
 | `pluvium/dataset.py` | 424 | Training examples: one forecast issued at hour ``t0``, built from the staged caches. |
 | `pluvium/domain.py` | 551 | The ground Pluvium forecasts for: the Caribbean as points the model thinks on, the cells it learns from, the towns it speaks about, and what the terrain looks like under each of them. |
@@ -99,4 +99,4 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/weather.py` | 283 | What the weather *is*, in the words people use: intensity classes, drizzle versus rain versus showers, thunder. |
 | `pluvium/zarrlite.py` | 166 | A minimal reader for consolidated Zarr v2 stores over HTTPS (the public ERA5 stores on Google Cloud). |
 
-94 modules, 13,900 lines.
+94 modules, 14,304 lines.

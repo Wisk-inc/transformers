@@ -4,15 +4,16 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pluvium"
-version = "0.1.0"
-description = "Hour-by-hour rain forecasts for every Caribbean town: when rain starts, how long it lasts, how much falls and why, on the NatureV1 / iHELIX engine"
+version = "0.2.0"
+description = "Rain forecasts for every town, in any country: hour by hour for three days and daily for 14, blending ECMWF, NOAA and AI weather models, on the NatureV1 / iHELIX engine"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Nathan" }]
 keywords = ["weather", "rain", "precipitation", "forecasting", "caribbean", "nowcasting", "probabilistic-forecasting",
-            "hidden-markov-model", "orographic-precipitation", "geometric-deep-learning", "pytorch"]
+            "multi-model-ensemble", "post-processing", "hidden-markov-model", "orographic-precipitation",
+            "geometric-deep-learning", "pytorch"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",

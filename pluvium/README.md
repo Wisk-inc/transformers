@@ -1,16 +1,21 @@
 # Pluvium
 
-Hour-by-hour rain forecasts for every town and village in the Caribbean, three days ahead. For each place Pluvium
-answers the questions people actually ask:
+Rain forecasts for every town and village, in any country between 60 S and 60 N: hour by hour for three days, and day
+by day for 14. It started in Jamaica and the Caribbean. For each place Pluvium answers the questions people actually
+ask:
 
 * will it rain, hour by hour, and is that drizzle, showers, steady rain, heavy rain or a thunderstorm?
 * when will it most likely start, in local time and with a window, and when will it be heaviest?
 * how long will it last, and how much will fall (median and a bad case)?
 * is lightning active nearby right now, and could it flood?
 
-Pluvium runs on the NatureV1 / iHELIX engine (geometric attention on the sphere). **Pluvium-500** is the full-size
-model: 57.9M parameters ("500" is its name, not its parameter count). It is trained on one GPU by a single resumable
-program.
+Two products, one package:
+
+* **Pluvium's network** runs on the NatureV1 / iHELIX engine (geometric attention on the sphere) and forecasts hour by
+  hour. **Pluvium-500** is the full-size model: 57.9M parameters ("500" is its name, not its parameter count). It is
+  trained on one GPU by a single resumable program.
+* **Pluvium Blend** forecasts each day's rain out to 14 days. It reads every operational system at once: ECMWF ENS, HRES
+  and AIFS, NOAA GEFS, GFS and GraphCast, and Pluvium's network where it runs. It needs no GPU.
 
 > Research model, not an official forecast. Follow your national meteorological service.
 

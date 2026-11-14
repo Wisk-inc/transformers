@@ -2,19 +2,25 @@
 """
 Pluvium Blend: one calibrated forecast from every operational system and Pluvium's own network.
 
-For each place and day ahead, the blend reads what each system says (its members' mean and spread, its chances of 1,
-10 and 25 mm, and the same over everything within half a degree) together with the climatology of that place and
-season, and writes the whole distribution of the day's rain: the chance of at least 0.2, 0.5, 1, 2 ... 150 mm. The
-chances fall with the threshold by construction (cumulative softplus steps), so they never contradict each other.
-
-It is trained on the sum of the Brier scores at those thresholds, each a proper score. Integrated over thresholds,
+For each place and day ahead, a small network (:class:`BlendNet`) reads what systems say: their members' mean and
+spread, their chances of 1, 10 and 25 mm, and the same over everything within half a degree. It also reads the
+climatology of that place and season. It writes the whole distribution of the day's rain: the chance of at least 0.2,
+0.5, 1, 2 ... 150 mm. The chances fall with the threshold by construction (cumulative softplus steps), so they never
+contradict each other. It is trained on the sum of the Brier scores at those thresholds. Integrated over thresholds,
 the Brier score is the CRPS, so the same training serves yes/no questions (Brier, CSI), amounts (RMSE, ACC, from the
-distribution's mean) and the full distribution (CRPS, from quantiles). The same small network trained on one system's
-inputs alone is that system's post-processed forecast: a fair rival, since every system then gets identical
-treatment.
+distribution's mean) and the full distribution (CRPS, from quantiles).
 
-Experimental: learned multi-model blending in the style of the National Blend of Models and ecPoint, with one
-distributional network instead of per-threshold regressions.
+Pluvium Blend has two layers:
+* the network trained on each system alone (that system's post-processed forecast, and a fair rival in the
+  benchmarks), plus the network trained on all systems at once;
+* a pool (:class:`StackPool`) that weighs those forecasts by threshold band and lead. It is fitted on forecasts the
+  components made for weeks they were not trained on.
+
+One network over all systems learns combinations of systems that may not carry over to a new season; the pool keeps
+what each system knows and falls back to the best of them.
+
+Experimental: learned multi-model blending in the style of the National Blend of Models and ecPoint, with
+distributional networks instead of per-threshold regressions and a stacked logarithmic pool on top.
 """
 
 from __future__ import annotations

@@ -9,8 +9,9 @@ A full year, 14 days ahead, around the world: Pluvium Blend against the operatio
   They are refitted every quarter on everything verified by then (expanding window, never a future day).
 * **How far**: days 1 to 3 from runs every second day, days 1 to 14 from runs every fourth day.
 * **Who**: ECMWF ENS, NOAA GEFS, ECMWF HRES, ECMWF AIFS, NOAA GraphCast (to day 10) and NOAA GFS. Each is scored
-  raw and post-processed with the same small network trained on its own inputs alone. Pluvium Blend is that network
-  trained on all six at once and, where it runs, on Pluvium's own network too.
+  raw and post-processed with the same small network trained on its own inputs alone. Pluvium Blend pools those
+  post-processed forecasts and the same network trained on all six at once (and, where it runs, Pluvium's own
+  network), with weights fitted on weeks the components were not trained on (:class:`pluvium.blend.StackPool`).
 * **Scores**: Brier score and skill against the training year's climatology, critical success index (the chance cut
   chosen on training data), CRPS, RMSE and anomaly correlation of the daily amount, ROC area, the spatial sharpness of
   the expected field (does it blur with lead?), by season, with a block bootstrap over runs for Pluvium Blend against
@@ -293,14 +294,18 @@ def acc_per_run(fc: np.ndarray, ob: np.ndarray, clim: np.ndarray, blocks: np.nda
 
 
 def sharpness(fc: np.ndarray, ob: np.ndarray, blocks: np.ndarray) -> float:
-    """Mean over runs of (spatial std of the forecast mean field) / (spatial std of the observed field)."""
-    vals = []
+    """How much spatial structure the forecast field has next to the observed one: the root of the forecast's spatial
+    variance over the observed, each summed over every day (run and lead). 1 is as varied as reality; an expected
+    value falls below 1 as uncertainty grows. Summing before dividing keeps dry days, when the observed field is
+    almost flat, from dominating (a mean of daily ratios explodes on them)."""
+    var_fc = var_ob = 0.0
     for b in np.unique(blocks):
         m = (blocks == b) & np.isfinite(ob)
-        if m.sum() < 10 or np.std(ob[m]) < 1e-6:
+        if m.sum() < 10:
             continue
-        vals.append(float(np.std(fc[m]) / np.std(ob[m])))
-    return float(np.mean(vals)) if vals else float("nan")
+        var_fc += float(np.var(fc[m])) * int(m.sum())
+        var_ob += float(np.var(ob[m])) * int(m.sum())
+    return float(np.sqrt(var_fc / var_ob)) if var_ob > 0 else float("nan")
 
 
 def block_bootstrap(diff_by_run: np.ndarray, resamples: int = 1000, block: int = 5, seed: int = 0) -> tuple:
