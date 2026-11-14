@@ -21,6 +21,10 @@ Pluvium. For each it gives how the failure is detected and what the system does,
 | Clock or feed time errors | Observation times in the future or too old | Not used as current; noted | `guard/freshness.py` |
 | Memory exhausted by global fields (three models at 0.25 degrees hold thousands of 4 MB fields) | Found in a live test, killed at 9.4 GB | Every field is cut to the domain as soon as it is decoded; a run now peaks at about 0.3 GB | `sources/nwp.py` |
 | An archive throttles bursts (ECMWF's AWS bucket answers with HTTP 503) | Retries exhausted | ECMWF runs are read from Google Cloud's copy first, AWS second | `sources/baselines.py` |
+| AWS answers requests for missing files with HTTP 503, not 404 | A path probe retried for seconds per step | A 404 from Google Cloud is final for probes (AIFS: 0.04 to 0.8 runs a second) | `sources/baselines.py`, `sources/archive.py` |
+| A producer changes its publishing path (AIFS: experimental to AIFS Single, February 2025) | No rain messages under either path for a few days | Both paths are tried; runs in the gap are missing, and Pluvium Blend forecasts from the other systems (`present` flags) | `sources/archive.py`, `blend.py` |
+| No geostationary rain product for an area (outside GOES-East and GOES-West) | The area's satellite is `none` | Forecast made without rain now, as a third of training forecasts were | `area.py`, `forecast.py` |
+| An area crossing longitude 0 or the date line | Box check | Longitude 0 is handled (windows wrap); the date line is refused with a clear message | `domain.py` |
 
 ## The model
 

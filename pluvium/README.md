@@ -50,6 +50,27 @@ result = fc.run(out_dir="forecast")
 print(place_timeline(fc.towns, result["summary"], "Mandeville", country="JM", hours=24))
 ```
 
+## Use Pluvium in your country
+
+Nothing in Pluvium is tied to Jamaica. The engine works on the sphere, and every source it learns from is global:
+terrain, borders, towns, satellite rain, airports and the driving models. Any country between 60 S and 60 N can be
+set up in minutes:
+
+```bash
+pluvium setup --country TT --root ~/pluvium-TT     # area, terrain, provinces and every town (Trinidad and Tobago)
+pluvium blend train --root ~/pluvium-TT            # learn Pluvium Blend from a year of archived runs (CPU, ~2 h)
+pluvium blend forecast --root ~/pluvium-TT         # 14 days of daily rain chances for every town
+pluvium program --root ~/pluvium-TT --country TT   # train Pluvium's own network for the country (GPU)
+```
+
+* `--country` takes ISO codes, one or several (`DO,HT` for Hispaniola). `--box south,north,west,east` sets the extent
+  by hand; split large countries into regions.
+* Bulletins come in each country's languages: English, Spanish or French, and Jamaican Patois for Jamaica.
+* Live "rain now" comes from GOES-East or GOES-West wherever they see (the Americas and the Pacific). Elsewhere
+  Pluvium forecasts without it; its network was trained to.
+* Set up and tested from live data: Jamaica, Trinidad and Tobago, Sri Lanka (eastern hemisphere) and Ghana (which
+  straddles longitude 0).
+
 ## Train Pluvium-500 on one GPU
 
 `notebooks/rtx6000_pluvium.py` is one copy-paste cell for an NVIDIA RTX PRO 6000 Blackwell (96 GB). Set

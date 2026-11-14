@@ -133,7 +133,38 @@ depth, each aimed at a specific weakness.
 Every module and its purpose is listed in [MODULES.md](MODULES.md). What can go wrong in operation, and what the
 system does about it, is in [FAILURE_MODES.md](FAILURE_MODES.md).
 
-## 3b. Live data
+## 3a. Pluvium Blend: every operational system in one forecast
+
+Pluvium's network reads one driving model at a time. Pluvium Blend reads all six operational systems at once:
+ECMWF ENS, NOAA GEFS, ECMWF HRES, ECMWF AIFS, NOAA GraphCast and NOAA GFS. Where it runs, it also reads Pluvium's
+network. It then writes one calibrated forecast of the day's rain for every place, out to 14 days.
+
+* **Inputs per system and place:** the members' mean and spread, the chances of 1, 10 and 25 mm, and the same over
+  everything within half a degree. A `present` flag marks a system that is missing (GraphCast stops at day 10).
+* **Context:** the climatology of the place and month.
+* **Output:** the chance of at least 0.2, 0.5, 1, 2 ... 150 mm. The chances fall with the threshold by construction, so
+  they never contradict each other. Quantiles give the median and heavy amounts, and the mean the expected amount.
+* **Training:** the sum of the Brier scores at those thresholds. Integrated over thresholds, the Brier score is the
+  CRPS, so one fit serves yes/no questions, amounts and the whole distribution.
+* **A fair rival for every system:** the same network trained on one system's inputs alone is that system's
+  post-processed forecast. Pluvium Blend has to beat each system after equal treatment, not just its raw output.
+
+Training a blend for a new country needs a year of archived runs and satellite truth: about two hours of downloads
+and minutes of CPU (`pluvium blend train`).
+
+## 3b. Any country
+
+An `Area` (`pluvium/area.py`) says where a deployment works:
+* its countries (ISO codes);
+* where forecasts are made (their outline from geoBoundaries, plus a margin);
+* where the mesh and the driving fields reach (six degrees more on every side, so weather can arrive);
+* the bulletin languages;
+* the satellite that sees it.
+
+Geographies save their area and their own satellite-rain window. Windows work in both hemispheres and across
+longitude 0. `pluvium setup --country XX` builds everything for a country.
+
+## 3c. Live data
 
 | Feed | Used for |
 |---|---|
