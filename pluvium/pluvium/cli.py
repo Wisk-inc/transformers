@@ -94,6 +94,30 @@ def cmd_info(args) -> None:
     print(json.dumps({k: meta.get(k) for k in ("config", "parameters", "data", "scores", "truth_sources")}, indent=1))
 
 
+def cmd_setup(args) -> None:
+    """Prepare Pluvium for any country: its area, terrain, coasts, provinces and every town, ready to train."""
+    from .area import Area
+    from .domain import Geography, build_gazetteer
+
+    root = Path(args.root).expanduser()
+    codes = [c.strip() for c in args.country.split(",") if c.strip()]
+    box = tuple(float(x) for x in args.box.split(",")) if args.box else None
+    area = Area.for_countries(codes, box=box, cache=root / "cache" / "areas")
+    root.mkdir(parents=True, exist_ok=True)
+    area.save(root / "area.json")
+    geo = Geography.build(cache=root / "cache" / "geography", area=area)
+    geo.save(root / "geography")
+    towns = build_gazetteer(geo.terrain, countries=area.iso2, cache=root / "cache" / "geonames", box=area.target_box)
+    towns.points.save(root / "towns.npz")
+    s, n, w, e = area.target_box
+    print(f"{area.name}: {', '.join(area.countries.values())}")
+    print(f"  forecasts for {s:.2f} to {n:.2f} N, {w:.2f} to {e:.2f} E; weather read over {area.domain}")
+    print(f"  mesh {len(geo.mesh):,} points, {len(geo.targets):,} truth cells, {len(towns.points):,} places")
+    print(f"  live rain now from {area.satellite}; bulletins in "
+          + "; ".join(f"{cc}: {', '.join(area.bulletin_languages(cc))}" for cc in area.iso2))
+    print(f"next: pluvium program --root {root} --country {','.join(codes)}")
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(prog="pluvium", description="Hour-by-hour rain forecasts for Caribbean towns.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -127,6 +151,11 @@ def main(argv=None) -> None:
     p.add_argument("--model", default=None)
     p.add_argument("--state", default="~/.cache/pluvium/live")
     p.set_defaults(func=cmd_learn)
+    p = sub.add_parser("setup", help="prepare Pluvium for any country: area, terrain, provinces, towns")
+    p.add_argument("--country", required=True, help="ISO codes, e.g. TT or DO,HT")
+    p.add_argument("--box", default=None, help="south,north,west,east instead of the countries' own extent")
+    p.add_argument("--root", default="pluvium-area", help="folder for the area (then: pluvium program --root ...)")
+    p.set_defaults(func=cmd_setup)
     p = sub.add_parser("program", add_help=False, help="train, calibrate, score and publish on one GPU (see pluvium.program)")
     p.set_defaults(func=None)
     p = sub.add_parser("bench", add_help=False, help="train and score architectures on held-out data (see pluvium.bench)")

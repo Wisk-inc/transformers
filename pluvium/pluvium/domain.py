@@ -55,13 +55,31 @@ def cmorph_axes() -> tuple[np.ndarray, np.ndarray]:
     return lat, lon
 
 
-def cmorph_window(box=DOMAIN) -> tuple[slice, slice]:
-    """Row and column slices of the CMORPH 8 km grid covering ``box`` (longitudes on its 0-360 axis)."""
+def signed_lon(lon):
+    """Longitudes on -180..180 (CMORPH and some archives count 0..360)."""
+    return (np.asarray(lon, np.float64) + 180.0) % 360.0 - 180.0
+
+
+def cmorph_window(box=DOMAIN):
+    """Rows and columns of the CMORPH 8 km grid covering ``box``, west to east. The columns are a slice, or an index
+    array when the box crosses the prime meridian (CMORPH counts longitude 0..360). Boxes crossing the date line are
+    not supported."""
     lat, lon = cmorph_axes()
     s, n, w, e = box
+    if e - w >= 360 or w < -180 or e > 180:
+        raise ValueError(f"box {box}: longitudes must lie within -180..180 without crossing the date line")
     rows = np.nonzero((lat >= s) & (lat <= n))[0]
-    cols = np.nonzero((lon >= w % 360) & (lon <= e % 360))[0]
-    return slice(int(rows[0]), int(rows[-1]) + 1), slice(int(cols[0]), int(cols[-1]) + 1)
+    signed = signed_lon(lon)
+    cols = np.nonzero((signed >= w) & (signed <= e))[0]
+    cols = cols[np.argsort(signed[cols], kind="stable")]
+    if cols.size and np.all(np.diff(cols) == 1):
+        cols = slice(int(cols[0]), int(cols[-1]) + 1)
+    return slice(int(rows[0]), int(rows[-1]) + 1), cols
+
+
+def window_lon(cols) -> np.ndarray:
+    """Signed longitudes of a CMORPH window's columns (see :func:`cmorph_window`), ascending."""
+    return signed_lon(cmorph_axes()[1][cols])
 
 
 # ------------------------------------------------------------------------------------------------ terrain --
@@ -270,13 +288,13 @@ def build_mesh(terrain: Terrain, box=DOMAIN, land_step: float = 0.1, coast_step:
 
 
 def build_targets(terrain: Terrain, box=TARGET_BOX, coast_km: float = 30.0, ocean_cells: int = 4000,
-                  seed: int = 0) -> PointSet:
+                  seed: int = 0, cmorph_box=DOMAIN) -> PointSet:
     """CMORPH 8 km cells to learn from: all over land or within ``coast_km`` of it, plus ``ocean_cells`` open-sea
-    cells drawn once. ``extra["row"]``/``extra["col"]`` index the cell in the CMORPH window over DOMAIN."""
-    lat, lon = cmorph_axes()
-    rows_d, cols_d = cmorph_window(DOMAIN)
+    cells drawn once. ``extra["row"]``/``extra["col"]`` index the cell in the CMORPH window over ``cmorph_box``."""
+    lat, _ = cmorph_axes()
+    rows_d, cols_d = cmorph_window(cmorph_box)
     s, n, w, e = box
-    la, lo = np.meshgrid(lat[rows_d], lon[cols_d] - 360.0, indexing="ij")
+    la, lo = np.meshgrid(lat[rows_d], window_lon(cols_d), indexing="ij")
     inside = (la >= s) & (la <= n) & (lo >= w) & (lo <= e)
     coast = terrain.sample(terrain.coast_km, la.ravel(), lo.ravel()).reshape(la.shape)
     near = inside & (coast > -coast_km)
@@ -458,33 +476,45 @@ class Geography:
     targets: PointSet
     tiles: list
     attribution: str = ""
+    #: the CMORPH window the targets' ``row``/``col`` index (geographies saved before areas existed used DOMAIN)
+    cmorph_box: tuple = DOMAIN
+    target_box: tuple = TARGET_BOX
+    mesh_box: tuple = DOMAIN
+    #: which countries this geography serves (:class:`pluvium.area.Area`); None means the original Caribbean
+    area: object = None
 
     @classmethod
     def build(cls, cache="~/.cache/pluvium/geography", step_deg: float = 0.02, region=None, verbose: bool = True,
-              mesh_box=DOMAIN, target_box=TARGET_BOX, ocean_cells: int = 4000, **mesh_kwargs) -> Geography:
-        """Rasterise the Caribbean (``naturev1.swarm.geography.RegionMap``, geoBoundaries + Terrarium), then derive the
-        mesh, the CMORPH targets and the orographic tiles. ``region`` may be given (tests use a synthetic island, with
-        smaller boxes)."""
+              mesh_box=None, target_box=None, ocean_cells: int = 4000, area=None, **mesh_kwargs) -> Geography:
+        """Rasterise the area's countries (``naturev1.swarm.geography.RegionMap``: geoBoundaries + Terrarium), then
+        derive the mesh, the CMORPH targets and the orographic tiles. Without ``area`` it is the Caribbean.
+        ``mesh_box``/``target_box`` override the area's boxes (sub-domains); ``region`` may be given (tests use a
+        synthetic island)."""
         cache = Path(cache).expanduser()
         cache.mkdir(parents=True, exist_ok=True)
+        countries = area.countries if area is not None else None
+        target_box = tuple(target_box or (area.target_box if area is not None else TARGET_BOX))
+        mesh_box = tuple(mesh_box or (area.domain if area is not None else DOMAIN))
+        cmorph_box = tuple(area.domain) if area is not None else DOMAIN
         if region is None:
             from naturev1.swarm.geography import CARIBBEAN, RegionMap
 
-            region_path = cache / f"region_{step_deg:.3f}.npz"
+            tag = "" if area is None else f"_{area.name}"
+            region_path = cache / f"region{tag}_{step_deg:.3f}.npz"
             if region_path.exists():
                 region = RegionMap.load(region_path)
             else:
-                region = RegionMap.build(CARIBBEAN, box=TARGET_BOX, step_deg=step_deg, cache=cache / "naturev1",
-                                         verbose=verbose)
+                region = RegionMap.build(countries or CARIBBEAN, box=area.target_box if area is not None else TARGET_BOX,
+                                         step_deg=step_deg, cache=cache / "naturev1", verbose=verbose)
                 region.save(region_path)
         terrain = Terrain.from_region(region)
         mesh = build_mesh(terrain, box=mesh_box, **mesh_kwargs)
-        targets = build_targets(terrain, box=target_box, ocean_cells=ocean_cells)
+        targets = build_targets(terrain, box=target_box, ocean_cells=ocean_cells, cmorph_box=cmorph_box)
         tiles = build_tiles(terrain, box=target_box)
         if verbose:
-            log(f"geography: mesh {len(mesh):,} points ({int((mesh.kind == 0).sum()):,} land), "
-                f"{len(targets):,} CMORPH target cells, {len(tiles)} orographic tiles")
-        return cls(terrain, mesh, targets, tiles, getattr(region, "attribution", ""))
+            log(f"geography{'' if area is None else ' for ' + area.name}: mesh {len(mesh):,} points "
+                f"({int((mesh.kind == 0).sum()):,} land), {len(targets):,} CMORPH target cells, {len(tiles)} orographic tiles")
+        return cls(terrain, mesh, targets, tiles, getattr(region, "attribution", ""), cmorph_box, target_box, mesh_box, area)
 
     def save(self, directory) -> Path:
         d = Path(directory).expanduser()
@@ -493,18 +523,29 @@ class Geography:
         self.mesh.save(d / "mesh.npz")
         self.targets.save(d / "targets.npz")
         save_tiles(self.tiles, d / "tiles.npz")
-        (d / "geography.json").write_text(json.dumps({"attribution": self.attribution, "domain": DOMAIN,
-                                                      "target_box": TARGET_BOX}, indent=1))
+        meta = {"attribution": self.attribution, "domain": list(self.cmorph_box), "cmorph_box": list(self.cmorph_box),
+                "target_box": list(self.target_box), "mesh_box": list(self.mesh_box)}
+        if self.area is not None:
+            meta["area"] = self.area.to_json()
+        (d / "geography.json").write_text(json.dumps(meta, indent=1))
         return d
 
     @classmethod
     def load(cls, directory) -> Geography:
         d = Path(directory).expanduser()
         meta = json.loads((d / "geography.json").read_text()) if (d / "geography.json").exists() else {}
+        area = None
+        if meta.get("area"):
+            from .area import Area
+
+            area = Area.from_json(meta["area"])
+        cmorph_box = tuple(meta.get("cmorph_box", meta.get("domain", DOMAIN)))      # older files: the Caribbean window
         return cls(Terrain.load(d / "terrain.npz"), PointSet.load(d / "mesh.npz"), PointSet.load(d / "targets.npz"),
-                   load_tiles(d / "tiles.npz"), meta.get("attribution", ""))
+                   load_tiles(d / "tiles.npz"), meta.get("attribution", ""), cmorph_box,
+                   tuple(meta.get("target_box", TARGET_BOX)), tuple(meta.get("mesh_box", cmorph_box)), area)
 
 
 __all__ = ["CARIBBEAN_ISO2", "DOMAIN", "STATIC_FEATURES", "TARGET_BOX", "Gazetteer", "Geography", "OroTile", "PointSet",
            "Terrain", "build_gazetteer", "build_mesh", "build_targets", "build_tiles", "cmorph_axes", "cmorph_window",
+           "signed_lon", "window_lon",
            "gazetteer_from_rows", "load_tiles", "parse_geonames", "save_tiles"]

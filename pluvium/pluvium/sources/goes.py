@@ -21,6 +21,8 @@ import numpy as np
 from ..util import fetch, hour_to_datetime64, log
 
 BUCKETS = ("noaa-goes19", "noaa-goes16")
+#: the archive buckets for each geostationary view, newest satellite first
+SATELLITES = {"goes-east": ("noaa-goes19", "noaa-goes16"), "goes-west": ("noaa-goes18", "noaa-goes17")}
 LIST = "https://{bucket}.s3.amazonaws.com/?list-type=2&prefix={prefix}"
 OBJECT = "https://{bucket}.s3.amazonaws.com/{key}"
 
@@ -75,13 +77,13 @@ def list_keys(bucket: str, prefix: str) -> list[str]:
     return re.findall(r"<Key>([^<]+)</Key>", text.decode()) if text else []
 
 
-def scene_near(product: str, hour: int, band: str | None = None) -> tuple[str, str] | None:
+def scene_near(product: str, hour: int, band: str | None = None, buckets=BUCKETS) -> tuple[str, str] | None:
     """``(bucket, key)`` of the full-disk scene closest to the middle of ``hour``, newest satellite first."""
     when = hour_to_datetime64(hour)
     s = str(when)
     doy = int((when.astype("datetime64[D]") - when.astype("datetime64[Y]")).astype(int)) + 1
     prefix = f"{product}/{s[:4]}/{doy:03d}/{s[11:13]}/"
-    for bucket in BUCKETS:
+    for bucket in buckets:
         keys = list_keys(bucket, prefix)
         if band:
             keys = [k for k in keys if f"M6{band}_" in k or f"-{band}_" in k]
@@ -134,15 +136,18 @@ def read_scene(bucket: str, key: str, lat: np.ndarray, lon: np.ndarray, half_wid
     return out
 
 
-def recent_rain(lat: np.ndarray, lon: np.ndarray, half_width_deg: np.ndarray, hours: list[int]) -> tuple[np.ndarray, str]:
-    """``(len(hours), N)`` rain rates at points for the given hours, and which product supplied them."""
+def recent_rain(lat: np.ndarray, lon: np.ndarray, half_width_deg: np.ndarray, hours: list[int],
+                satellite: str = "goes-east") -> tuple[np.ndarray, str]:
+    """``(len(hours), N)`` rain rates at points for the given hours, and which product supplied them, from
+    ``satellite`` (``goes-east`` or ``goes-west``)."""
+    buckets = SATELLITES[satellite]
     out = np.full((len(hours), lat.size), np.nan, np.float32)
     used = set()
     for k, h in enumerate(hours):
-        hit = scene_near("ABI-L2-RRQPEF", h)
+        hit = scene_near("ABI-L2-RRQPEF", h, buckets=buckets)
         product = "GOES rain rate (RRQPE)"
         if hit is None:
-            hit = scene_near("ABI-L2-CMIPF", h, band="C13")
+            hit = scene_near("ABI-L2-CMIPF", h, band="C13", buckets=buckets)
             product = "GOES infrared (band 13, auto-estimator)"
         if hit is None:
             continue

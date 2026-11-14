@@ -58,6 +58,8 @@ class ProgramConfig:
     lr: float = 3e-4
     forecast: bool = True
     report_countries: tuple | None = None
+    countries: tuple | None = None       # ISO codes of the area to serve (None: the Caribbean)
+    box: tuple | None = None             # (south, north, west, east) instead of the countries' own extent
     overrides: dict = field(default_factory=dict)
 
     @classmethod
@@ -73,6 +75,10 @@ class ProgramConfig:
         cfg.hf_token = cfg.hf_token or env.get("HF_TOKEN") or None
         if env.get("PLUVIUM_SIZE"):
             cfg.size = env["PLUVIUM_SIZE"]
+        if env.get("PLUVIUM_COUNTRIES"):
+            cfg.countries = tuple(c.strip() for c in env["PLUVIUM_COUNTRIES"].split(",") if c.strip())
+        if env.get("PLUVIUM_BOX"):
+            cfg.box = tuple(float(x) for x in env["PLUVIUM_BOX"].split(","))
         return cfg
 
 
@@ -115,6 +121,18 @@ class Program:
             self.mirror.push(local, repo_path, what=what)
 
     # ---------------------------------------------------------------------------------- geography --
+    def area(self):
+        """The countries this run serves (:class:`pluvium.area.Area`), or None for the Caribbean."""
+        if not self.cfg.countries and not self.cfg.box:
+            return None
+        from .area import Area
+
+        if self.cfg.countries:
+            return Area.for_countries(self.cfg.countries, box=self.cfg.box, cache=self.root / "cache" / "areas")
+        from .domain import CARIBBEAN_ISO2
+
+        raise ValueError(f"--box needs --country too (which countries' towns and borders to use, e.g. {CARIBBEAN_ISO2[0]})")
+
     def geography(self):
         from .domain import Gazetteer, Geography, PointSet, build_gazetteer
 
@@ -123,8 +141,9 @@ class Program:
         for name in files:
             self.pull(d / name, f"geography/{name}")
         if not all((d / n).exists() for n in files):
-            log("geography: building the Caribbean (terrain, coasts, parishes) ...")
-            geo = Geography.build(cache=self.root / "cache" / "geography")
+            area = self.area()
+            log(f"geography: building {'the Caribbean' if area is None else area.name} (terrain, coasts, parishes) ...")
+            geo = Geography.build(cache=self.root / "cache" / "geography", area=area)
             geo.save(d)
             for name in files:
                 self.push(d / name, f"geography/{name}")
@@ -133,7 +152,10 @@ class Program:
         self.pull(towns_path, "towns.npz", "town list")
         if not towns_path.exists():
             log("towns: reading every populated place from GeoNames ...")
-            gaz = build_gazetteer(geo.terrain, cache=self.root / "cache" / "geonames")
+            area = geo.area
+            gaz = (build_gazetteer(geo.terrain, cache=self.root / "cache" / "geonames") if area is None else
+                   build_gazetteer(geo.terrain, countries=area.iso2, cache=self.root / "cache" / "geonames",
+                                   box=area.target_box))
             gaz.points.save(towns_path)
             self.push(towns_path, "towns.npz")
         towns = Gazetteer(PointSet.load(towns_path))
@@ -166,9 +188,9 @@ class Program:
         # stage the rest, the three sources at once (all network-bound)
         began = time.time()
         jobs = {
-            "era5": (_stage_era5_job, (str(era5_dir), list(years))),
+            "era5": (_stage_era5_job, (str(era5_dir), list(years), list(geo.mesh_box))),
             "cmorph": (_stage_cmorph_job, (str(cm_dir), str(self.root / "geography"), list(years))),
-            "stations": (_stage_stations_job, (str(st_dir), list(years))),
+            "stations": (_stage_stations_job, (str(st_dir), list(years), list(geo.target_box))),
         }
         ctx = multiprocessing.get_context("spawn")
         procs = {name: ctx.Process(target=fn, args=args, name=f"stage-{name}") for name, (fn, args) in jobs.items()}
@@ -498,10 +520,11 @@ def _merge_years(era5_json: Path, years, cmorph_json: Path) -> None:
         path.write_text(json.dumps(meta))
 
 
-def _stage_era5_job(root: str, years: list) -> None:
+def _stage_era5_job(root: str, years: list, box: list | None = None) -> None:
+    from .domain import DOMAIN
     from .sources.era5 import stage_era5
 
-    stage_era5(root, years=years, workers=48)
+    stage_era5(root, years=years, box=tuple(box) if box else DOMAIN, workers=48)
 
 
 def _stage_cmorph_job(root: str, geo_dir: str, years: list) -> None:
@@ -509,13 +532,15 @@ def _stage_cmorph_job(root: str, geo_dir: str, years: list) -> None:
     from .sources.cmorph import stage_cmorph
 
     geo = Geography.load(geo_dir)
-    stage_cmorph(root, geo.targets, geo.mesh, years=years, workers=max(8, min(32, (os.cpu_count() or 8))))
+    stage_cmorph(root, geo.targets, geo.mesh, years=years, workers=max(8, min(32, (os.cpu_count() or 8))),
+                 cmorph_box=geo.cmorph_box)
 
 
-def _stage_stations_job(root: str, years: list) -> None:
+def _stage_stations_job(root: str, years: list, box: list | None = None) -> None:
+    from .domain import TARGET_BOX
     from .sources.stations import stage_stations
 
-    stage_stations(root, years, workers=32)
+    stage_stations(root, years, box=tuple(box) if box else TARGET_BOX, workers=32)
 
 
 def _prefetch_job(root: str, grids: dict, inits: list, period: list) -> None:
@@ -533,10 +558,11 @@ def _prefetch_job(root: str, grids: dict, inits: list, period: list) -> None:
             (r / "stage_b_data" / "stations" / "stations").mkdir(parents=True, exist_ok=True)
             shutil.copy2(listed, r / "stage_b_data" / "stations" / "stations" / "stations.json")
         a, b = hour_of(period[0]), hour_of(period[1])
-        stage_cmorph(r / "stage_b_data" / "cmorph", geo.targets, geo.mesh, period=(a, b), workers=8, verbose=False)
+        stage_cmorph(r / "stage_b_data" / "cmorph", geo.targets, geo.mesh, period=(a, b), workers=8, verbose=False,
+                     cmorph_box=geo.cmorph_box)
         years = sorted({int(str(np.datetime64(h, "h"))[:4]) for h in (a, b - 1)})
         try:
-            stage_stations(r / "stage_b_data" / "stations", years, workers=16, verbose=False)
+            stage_stations(r / "stage_b_data" / "stations", years, box=geo.target_box, workers=16, verbose=False)
         except Exception as error:
             log(f"stage B airports not staged ({error})")
         lat1, lon1, lat2, lon2 = (np.asarray(grids[k]) for k in ("lat1", "lon1", "lat2", "lon2"))
@@ -565,6 +591,8 @@ def main(argv=None) -> None:
     parser.add_argument("--no-stage-b", action="store_true")
     parser.add_argument("--no-forecast", action="store_true")
     parser.add_argument("--batch", type=int, default=0)
+    parser.add_argument("--country", default=None, help="ISO codes of the area to serve, e.g. TT or DO,HT (default: the Caribbean)")
+    parser.add_argument("--box", default=None, help="south,north,west,east instead of the countries' own extent")
     args = parser.parse_args(argv)
     cfg = ProgramConfig.from_env()
     if args.hours is not None:
@@ -582,6 +610,10 @@ def main(argv=None) -> None:
         cfg.stage_b = False
     cfg.forecast = not args.no_forecast
     cfg.batch_size = args.batch
+    if args.country:
+        cfg.countries = tuple(c.strip() for c in args.country.split(",") if c.strip())
+    if args.box:
+        cfg.box = tuple(float(x) for x in args.box.split(","))
     Program(cfg).run()
 
 

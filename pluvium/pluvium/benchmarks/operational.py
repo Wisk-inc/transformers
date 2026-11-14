@@ -257,7 +257,8 @@ class Operational:
         a = hour_of(self.cfg.train_period[0]) - 24 * 30 - 6
         b = int(self.eval_inits[-1]) + 96
         log(f"operational: CMORPH {_day(a)} to {_day(b)}")
-        stage_cmorph(self.root / "cmorph", self.geo.targets, self.geo.mesh, period=(a, b), workers=workers)
+        stage_cmorph(self.root / "cmorph", self.geo.targets, self.geo.mesh, period=(a, b), workers=workers,
+                     cmorph_box=self.geo.cmorph_box)
         if self.cfg.stations:
             listed = Path(self.cfg.stations).expanduser() / "stations" / "stations.json"
             dest = self.root / "stations" / "stations" / "stations.json"
@@ -276,7 +277,8 @@ class Operational:
         for year in self.cfg.reference_years:
             later = year + int(str(b)[:4]) - int(str(a)[:4])            # a period may cross into the next year
             p = (hour_of(f"{year}{str(a)[4:]}T00"), hour_of(f"{later}{str(b)[4:]}T00"))
-            stage_cmorph(self.root / "cmorph_reference", self.geo.targets, self.geo.mesh, period=p, workers=workers)
+            stage_cmorph(self.root / "cmorph_reference", self.geo.targets, self.geo.mesh, period=p, workers=workers,
+                         cmorph_box=self.geo.cmorph_box)
 
     def reader(self):
         from ..sources.nwp import NWPReader

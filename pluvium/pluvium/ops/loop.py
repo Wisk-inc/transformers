@@ -39,7 +39,7 @@ def run_cycle(forecaster, root, countries=None, keep: int = 48, attempts: int = 
     """One cycle; returns ``{"ok", "folder", "notes"}``."""
     from ..guard.consistency import check_summary
     from ..render.alerts import cap_alerts
-    from ..render.bulletin import bulletin
+    from ..render.bulletin import bulletins
 
     root = Path(root).expanduser()
     root.mkdir(parents=True, exist_ok=True)
@@ -82,11 +82,8 @@ def run_cycle(forecaster, root, countries=None, keep: int = 48, attempts: int = 
             for k, xml in enumerate(alerts):
                 (folder / "alerts" / f"alert_{k:03d}.xml").write_text(xml, encoding="utf-8")
             for country in sorted({p["country"] for p in parishes}):
-                (folder / f"bulletin_{country}.txt").write_text(bulletin(parishes, country, result["info"]["issued"]),
-                                                               encoding="utf-8")
-                if country == "JM":
-                    (folder / "bulletin_JM_patois.txt").write_text(
-                        bulletin(parishes, country, result["info"]["issued"], "jam"), encoding="utf-8")
+                for name, text in bulletins(parishes, country, result["info"]["issued"]).items():
+                    (folder / name).write_text(text, encoding="utf-8")
             _publish(folder, root)
             notes += repaired
             break

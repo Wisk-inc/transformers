@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..domain import DOMAIN
+from ..domain import DOMAIN, signed_lon
 from ..features import HOURLY_SHORT, HOURLY_VARS, LEVELS, UPPER_SHORT, UPPER_VARS
 from ..util import atomic_save, calendar, hour_of, log, year_hours
 from ..zarrlite import ZarrStore, axis_window
@@ -37,9 +37,12 @@ def _box_slices(store: ZarrStore, box, pad: float) -> tuple[slice, slice, np.nda
     lat = store.coordinate("latitude")
     lon = store.coordinate("longitude")
     s, n, w, e = box
+    if w - pad < 0 < e + pad:
+        raise ValueError(f"box {box} crosses longitude 0, which ERA5 staging does not handle yet; train stage B on "
+                         "GFS runs from an existing checkpoint instead")
     la = axis_window(lat, s - pad, n + pad)
     lo = axis_window(lon, w - pad, e + pad, wrap=360.0)
-    return la, lo, lat[la].astype(np.float64), (lon[lo] - 360.0).astype(np.float64)
+    return la, lo, lat[la].astype(np.float64), signed_lon(lon[lo]).astype(np.float64)
 
 
 def _transpose(block: np.ndarray, dims: list) -> np.ndarray:

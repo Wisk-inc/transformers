@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..domain import DOMAIN, PointSet, cmorph_axes, cmorph_window
+from ..domain import DOMAIN, PointSet, cmorph_axes, cmorph_window, window_lon
 from ..util import FetchError, atomic_save, fetch, hour_to_datetime64, log, year_hours
 
 URL = ("https://noaa-cdr-precip-cmorph-pds.s3.amazonaws.com/data/30min/8km/{y}/{m}/{d}/"
@@ -42,7 +42,7 @@ def read_hour(blob: bytes, rows: slice, cols: slice) -> np.ndarray:
     import h5py
 
     with h5py.File(io.BytesIO(blob), "r") as f:
-        raw = f["cmorph"][:, rows, cols].astype(np.float32)
+        raw = read_window(f["cmorph"], rows, cols).astype(np.float32)
         scale = float(np.ravel(f["cmorph"].attrs.get("scale_factor", [0.01]))[0])
     valid = raw >= 0
     rate = np.where(valid, raw * scale, 0.0)
@@ -51,13 +51,22 @@ def read_hour(blob: bytes, rows: slice, cols: slice) -> np.ndarray:
         return np.where(count > 0, rate.sum(0) / np.maximum(count, 1), np.nan).astype(np.float32)
 
 
+def read_window(var, rows: slice, cols) -> np.ndarray:
+    """``var[:, rows, cols]`` where ``cols`` is a slice or (across the prime meridian) an index array in two runs."""
+    if isinstance(cols, slice):
+        return var[:, rows, cols]
+    cols = np.asarray(cols)
+    breaks = np.nonzero(np.diff(cols) != 1)[0] + 1
+    return np.concatenate([var[:, rows, int(run[0]):int(run[-1]) + 1] for run in np.split(cols, breaks)], axis=-1)
+
+
 def mesh_operator(mesh: PointSet, window: tuple[slice, slice], half_widths_deg: np.ndarray):
     """Sparse ``(mesh points, window cells)`` averaging operator: each point takes the cells in a box of
     ``half_widths_deg`` around it."""
     from scipy import sparse
 
-    lat, lon = cmorph_axes()
-    lat, lon = lat[window[0]], lon[window[1]] - 360.0
+    lat, _ = cmorph_axes()
+    lat, lon = lat[window[0]], window_lon(window[1])
     rows, cols, vals = [], [], []
     for k in range(len(mesh)):
         hw = float(half_widths_deg[k])
@@ -158,14 +167,14 @@ class CMORPHCache:
 
 
 def stage_cmorph(root, targets: PointSet, mesh: PointSet, years=None, period=None, workers: int = 16,
-                 template: str = URL, verbose: bool = True) -> CMORPHCache:
+                 template: str = URL, verbose: bool = True, cmorph_box=None) -> CMORPHCache:
     """
     Fetch and reduce CMORPH for whole ``years`` or ``period = (first_hour, end_hour)`` into the cache (hours already
     staged are skipped). ``workers`` processes each fetch and decode their own hours.
     """
     root = Path(root).expanduser() / "cmorph"
     root.mkdir(parents=True, exist_ok=True)
-    window = cmorph_window(DOMAIN)
+    window = cmorph_window(tuple(cmorph_box) if cmorph_box is not None else DOMAIN)   # the geography's own window
     op = mesh_operator(mesh, window, default_half_widths(mesh))
     meta_path = root / "cmorph.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {"years": []}

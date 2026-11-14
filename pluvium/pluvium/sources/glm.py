@@ -54,13 +54,15 @@ def flashes(keys: list[str], bucket: str = BUCKET, workers: int = 16) -> np.ndar
     return np.concatenate(got) if got else np.zeros((0, 2))
 
 
-def flashes_near(lat: np.ndarray, lon: np.ndarray, minutes: int = 15, radius_km: float = 10.0) -> tuple[np.ndarray, str]:
+def flashes_near(lat: np.ndarray, lon: np.ndarray, minutes: int = 15, radius_km: float = 10.0,
+                 satellite: str = "goes-east") -> tuple[np.ndarray, str]:
     """Number of flashes within ``radius_km`` of each point in the last ``minutes``, and a note of the source."""
     from scipy.spatial import cKDTree
 
     try:
-        keys = recent_files(minutes)
-        pts = flashes(keys)
+        bucket = {"goes-east": "noaa-goes19", "goes-west": "noaa-goes18"}[satellite]
+        keys = recent_files(minutes, bucket=bucket)
+        pts = flashes(keys, bucket=bucket)
     except Exception as error:
         log(f"lightning not read ({type(error).__name__}: {error})")
         return np.zeros(np.size(lat), np.int32), "none"

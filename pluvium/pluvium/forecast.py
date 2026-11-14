@@ -156,14 +156,17 @@ class Forecaster:
         obs = {"mesh": None, "targets": None, "towns": None, "product": "not used", "station_codes": None,
                "lightning": None, "lightning_note": "not used"}
         mesh, towns, t = self.geo.mesh, self.towns.points, self.geo.targets
-        if rain:
+        satellite = self.geo.area.satellite if getattr(self.geo, "area", None) is not None else "goes-east"
+        if rain and satellite == "none":
+            obs["product"] = "no geostationary rain product read for this area yet; forecast made without rain now"
+        elif rain:
             try:
                 from .sources.goes import recent_rain
 
                 obs["mesh"], obs["product"] = recent_rain(mesh.lat, mesh.lon, default_half_widths(mesh),
-                                                          [t0 - 3, t0 - 2, t0 - 1])
-                obs["targets"], _ = recent_rain(t.lat, t.lon, np.full(len(t), 0.04), [t0 - 1])
-                obs["towns"], _ = recent_rain(towns.lat, towns.lon, np.full(len(towns), 0.04), [t0 - 1])
+                                                          [t0 - 3, t0 - 2, t0 - 1], satellite)
+                obs["targets"], _ = recent_rain(t.lat, t.lon, np.full(len(t), 0.04), [t0 - 1], satellite)
+                obs["towns"], _ = recent_rain(towns.lat, towns.lon, np.full(len(towns), 0.04), [t0 - 1], satellite)
             except Exception as error:
                 log(f"recent rain not read ({type(error).__name__}: {error}); forecasting without it")
             try:
@@ -185,11 +188,13 @@ class Forecaster:
         if airports and self.station_meta:
             from .sources.metar import live_station_codes
 
-            obs["station_codes"] = live_station_codes(self.station_meta, [t0 - 3, t0 - 2, t0 - 1])
-        if lightning:
+            s, n, w, e = self.geo.target_box
+            obs["station_codes"] = live_station_codes(self.station_meta, [t0 - 3, t0 - 2, t0 - 1],
+                                                      box=(s - 1.0, n + 1.0, w - 1.0, e + 1.0))
+        if lightning and satellite != "none":
             from .sources.glm import flashes_near
 
-            obs["lightning"], obs["lightning_note"] = flashes_near(towns.lat, towns.lon)
+            obs["lightning"], obs["lightning_note"] = flashes_near(towns.lat, towns.lon, satellite=satellite)
         return obs
 
     # ------------------------------------------------------------------------------------ forecast --
@@ -490,14 +495,13 @@ def write_outputs(out_dir, towns: Gazetteer, summary: dict, info: dict, schedule
                         place=towns.names.astype(str))
     (d / "forecast.json").write_text(json.dumps({**info, "parishes": parishes}, indent=1, default=str))
     (d / "report.txt").write_text(report_text(info, parishes, countries), encoding="utf-8")
-    from .render import bulletin, cap_alerts
+    from .render import bulletins, cap_alerts
 
     for country in sorted({r["country"] for r in parishes}):
         if countries and country not in countries:
             continue
-        (d / f"bulletin_{country}.txt").write_text(bulletin(parishes, country, info["issued"]), encoding="utf-8")
-        if country == "JM":
-            (d / "bulletin_JM_patois.txt").write_text(bulletin(parishes, country, info["issued"], "jam"), encoding="utf-8")
+        for name, text in bulletins(parishes, country, info["issued"]).items():
+            (d / name).write_text(text, encoding="utf-8")
     alerts = cap_alerts(parishes, rows, info["issued"] + ":00")
     if alerts:
         (d / "alerts").mkdir(exist_ok=True)
