@@ -61,7 +61,7 @@ def fallback_summary(t0: int, driving_mm: np.ndarray, clim_classes: np.ndarray, 
             "start_early": nan, "start_late": nan, "start_median_24": nan, "start_early_24": nan,
             "start_late_24": nan, "start_within": nan, "start_within_24": nan, "heavy_start_median": nan,
             "heavy_within": nan, "stop_median": nan, "thunder": None, "kind": None, "totals": totals, "bursts": {},
-            "cause": np.zeros((1, p.shape[0], 6), np.float32), "fallback": True}
+            "cause": np.zeros((40, p.shape[0], 6), np.float32), "fallback": True}
 
 
 __all__ = ["DEFAULT", "fallback_summary", "fit_fallback"]

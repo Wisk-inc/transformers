@@ -238,6 +238,8 @@ class Program:
     def train_cfg(self, hours: float, **kw):
         from .train import TrainConfig
 
+        v3 = not self.cfg.size.endswith(("-v1", "-v2"))
+        kw = {"ema_decay": 0.999 if v3 else 0.0, "curriculum": v3, **kw}
         return TrainConfig(size=self.cfg.size, batch_size=self.cfg.batch_size, workers=self.cfg.workers,
                            checkpointing=self.cfg.checkpointing, lr=self.cfg.lr, hours=hours,
                            overrides=self.cfg.overrides, **kw)
@@ -277,7 +279,8 @@ class Program:
         self.start_prefetch(grids)
         st_points = station_points(geo, stations)
         st_clim = borrowed_climatology(clim, nearest_target(geo, stations.lat, stations.lon)) if len(stations) else None
-        builder = SampleBuilder(geo, era5, cmorph, stations if len(stations) else None, clim, st_clim)
+        builder = SampleBuilder(geo, era5, cmorph, stations if len(stations) else None, clim, st_clim,
+                                augment=not cfg.size.endswith(("-v1", "-v2")))
         train_hours = np.concatenate([np.arange(*year_hours(y)) for y in self.years])
         hold = np.arange(*year_hours(cfg.holdout_year))
         log("issue times: checking which have complete data ...")
@@ -338,10 +341,11 @@ class Program:
             log(format_report(scores["gfs_driven"]))
         # package
         out = self.root / "release"
+        extras = self.release_extras(builder, train_starts, cal_data, cmorph, geo, towns)
         save_checkpoint(out, model, loss, None, {"stage": "release"}, calibrator,
                         extra={"scores": scores, "data": {"train_years": list(self.years),
                                                           "holdout_year": cfg.holdout_year,
-                                                          "stage_b": bool(live_builder is not None)}})
+                                                          "stage_b": bool(live_builder is not None)}, **extras})
         for name in ("terrain.npz", "mesh.npz", "targets.npz", "tiles.npz", "geography.json"):
             (out / "geography").mkdir(exist_ok=True)
             shutil.copy2(self.root / "geography" / name, out / "geography" / name)
@@ -369,6 +373,43 @@ class Program:
             self.mirror.wait()
         log(f"done in {(time.time() - self.started) / 3600:.2f} h; the release is in {out}")
         return {"scores": scores, "release": str(out)}
+
+    def release_extras(self, builder, train_starts, cal_data: dict, cmorph, geo, towns) -> dict:
+        """What the live forecast needs besides the weights: the training distribution of the inputs (to notice
+        unusual situations), conformal margins for totals, extreme-value tails per country (return periods), and
+        the fallback's coefficients."""
+        from .features import HOURLY_CHANNELS
+        from .guard.drift import InputStats
+        from .guard.fallback import fit_fallback
+        from .prob.extremes import RainfallTails
+
+        rng = np.random.default_rng(0)
+        extras = {}
+        try:
+            pick = rng.choice(train_starts, min(120, train_starts.size), replace=False)
+            sample = np.stack([builder.example(int(t), False, np.arange(1), emulate=False)["hourly"] for t in pick])
+            extras["input_stats"] = InputStats(list(HOURLY_CHANNELS)).fit(sample.reshape((-1,) + sample.shape[2:])).to_json()
+        except Exception as error:
+            log(f"input statistics skipped ({type(error).__name__}: {error})")
+        try:
+            from .forecast import nearest_target_town
+
+            country = towns.points.extra["country"].astype(str)[nearest_target_town(towns, geo.targets.lat, geo.targets.lon)]
+            cols = np.arange(0, len(geo.targets), 4)
+            hours = np.concatenate([np.arange(*year_hours(y)) for y in self.years])[::1]
+            record = np.concatenate([cmorph.targets(hours[a: a + 2000], cols) for a in range(0, hours.size, 2000)])
+            tails = RainfallTails().fit(record, country[cols], years=hours.size / 8766.0)
+            extras["tails"] = {f"{g}|{k}": [t.u, t.xi, t.sigma, t.rate] for (g, k), t in tails.tails.items()}
+        except Exception as error:
+            log(f"rain tails skipped ({type(error).__name__}: {error})")
+        try:
+            obs = np.where(cal_data["known"], cal_data["wet"], np.nan).ravel()
+            pick = rng.choice(obs.size, min(500_000, obs.size), replace=False)
+            extras["fallback"] = fit_fallback(cal_data["driving"].ravel()[pick], cal_data["clim_wet"].ravel()[pick],
+                                              obs[pick])
+        except Exception as error:
+            log(f"fallback fit skipped ({type(error).__name__}: {error})")
+        return extras
 
     def finish_stage_b(self, model, loss, geo, grids, clim, stations, st_points, st_clim, batch_size: int):
         """Stage B on the GFS runs fetched so far; returns ``(model, loss, builder, held-out starts)`` or None."""

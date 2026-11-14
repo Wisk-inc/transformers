@@ -501,7 +501,7 @@ def hindcast(model: PluviumModel, builder: SampleBuilder, starts, batch_size: in
     clim = borrowed_climatology(builder.clim, targets)
     board = Scoreboard()
     pool = {"p": [], "wet": [], "known": [], "win_p": {h: [] for h in WINDOWS}, "win_y": {h: [] for h in WINDOWS},
-            "p_moderate": [], "y_moderate": [], "p_heavy": [], "y_heavy": [],
+            "p_moderate": [], "y_moderate": [], "p_heavy": [], "y_heavy": [], "driving": [], "clim_wet": [],
             "thunder_p": [], "thunder_obs": [], "thunder_known": [], "station_hours": []}
     starts = np.asarray(starts)
     for k in range(0, starts.size, batch_size):
@@ -533,6 +533,8 @@ def hindcast(model: PluviumModel, builder: SampleBuilder, starts, batch_size: in
             pool["p_moderate"].append((raw[..., 2] + raw[..., 3]).astype(np.float32))
             pool["y_moderate"].append((np.nan_to_num(truth) >= 2.5).astype(np.float32))
             pool["p_heavy"].append(raw[..., 3].astype(np.float32))
+            pool["driving"].append(driving.astype(np.float32))
+            pool["clim_wet"].append(clim_w.T.astype(np.float32))
             pool["y_heavy"].append((np.nan_to_num(truth) >= 7.6).astype(np.float32))
             pool["known"].append(known)
             for h in WINDOWS:
@@ -548,7 +550,8 @@ def hindcast(model: PluviumModel, builder: SampleBuilder, starts, batch_size: in
                 pool["thunder_known"].append(d["known"])
                 pool["station_hours"].append(hours)
     data = {"p": np.concatenate(pool["p"]), "wet": np.concatenate(pool["wet"]), "known": np.concatenate(pool["known"]),
-            **{k: np.concatenate(pool[k]) for k in ("p_moderate", "y_moderate", "p_heavy", "y_heavy")},
+            **{k: np.concatenate(pool[k]) for k in ("p_moderate", "y_moderate", "p_heavy", "y_heavy", "driving",
+                                                    "clim_wet")},
             "win_p": {h: np.concatenate(v) for h, v in pool["win_p"].items()},
             "win_y": {h: np.concatenate(v) for h, v in pool["win_y"].items()}}
     if pool["thunder_p"]:

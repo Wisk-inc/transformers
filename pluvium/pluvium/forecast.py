@@ -111,6 +111,7 @@ class Forecaster:
         self.town_clim = borrowed_climatology(self.clim, nearest_target(self.geo, p.lat, p.lon))
         self.town_groups = groups_of(self.towns)
         self._catchments = None
+        self._urban = None
 
     def catchments(self):
         if self._catchments is None:
@@ -138,7 +139,13 @@ class Forecaster:
             except Exception as error:
                 log(f"{name}: run {hour_to_iso(init)} not usable ({type(error).__name__}: {error}); left out")
                 continue
-            got.append({"model": name, "init": init, **frames})
+            from .guard.inputs import check_driving
+
+            fields, upper, notes = check_driving(frames["fields"], frames["upper"])
+            notes = list(frames.get("notes", [])) + [f"{name}: {n}" for n in notes]
+            if t0 - init > 18:
+                notes.append(f"{name}: run {t0 - init} h old")
+            got.append({"model": name, "init": init, "fields": fields, "upper": upper, "notes": notes})
         return got
 
     def observations(self, t0: int, rain: bool = True, airports: bool = True, lightning: bool = True) -> dict:
@@ -159,6 +166,22 @@ class Forecaster:
                 obs["towns"], _ = recent_rain(towns.lat, towns.lon, np.full(len(towns), 0.04), [t0 - 1])
             except Exception as error:
                 log(f"recent rain not read ({type(error).__name__}: {error}); forecasting without it")
+            try:
+                from .sources.mrms import at_points
+
+                radar_t, note = at_points("rate", t.lat, t.lon, 4.0)
+                if np.isfinite(radar_t).any():
+                    radar_w, _ = at_points("rate", towns.lat, towns.lon, 4.0)
+                    radar_m, _ = at_points("rate", mesh.lat, mesh.lon, 15.0)
+                    for key, radar in (("targets", radar_t), ("towns", radar_w)):
+                        if obs[key] is None:
+                            obs[key] = np.full((1, radar.size), np.nan, np.float32)
+                        obs[key][0] = np.where(np.isfinite(radar), radar, obs[key][0])
+                    if obs["mesh"] is not None:
+                        obs["mesh"][-1] = np.where(np.isfinite(radar_m), radar_m, obs["mesh"][-1])
+                    obs["product"] = f"{obs['product']}; {note} where in range"
+            except Exception as error:
+                log(f"radar not read ({type(error).__name__}: {error})")
         if airports and self.station_meta:
             from .sources.metar import live_station_codes
 
@@ -218,6 +241,13 @@ class Forecaster:
                         batch, t, torch.from_numpy(tctx[None]).to(self.device), chunk=chunk, latent=latent).items()})
             outs.append({k: v.float().cpu() for k, v in out.items()})
         weights = mixture_weights([c.get("model", "") for c in components])
+        drift = None
+        if self.meta.get("input_stats") and components:
+            from .guard.drift import InputStats
+
+            stats = InputStats.from_json(self.meta["input_stats"])
+            first = self.builder.frames_from(components[0]["fields"], components[0]["upper"], t0)
+            drift = stats.score(first["hourly"])
         parts = []
         for start in range(0, len(towns), chunk):
             sl = slice(start, min(len(towns), start + chunk))
@@ -225,11 +255,48 @@ class Forecaster:
                                    weights=weights, corrector=self.corrector, places=self.town_groups[sl],
                                    place_lon=towns.lon[sl]))
         summary = _concat(parts)
+        if drift is not None and drift["weight"] > 0:
+            hours = t0 + np.arange(summary["p_wet"].shape[1])
+            clim_cls = np.moveaxis(self.town_clim.classes_at(hours, towns.lon), 0, 1)
+            w = drift["weight"]
+            summary["classes"] = (1 - w) * summary["classes"] + w * clim_cls
+            summary["p_wet"] = 1 - summary["classes"][..., 0]
+        summary["drift"] = drift
+        if self.meta.get("tails"):
+            from .prob.extremes import GPDTail
+
+            country = self.towns.points.extra.get("country", np.array([""] * len(towns))).astype(str)
+            rp = {}
+            for kind, amount in (("day", summary["totals"][24]["p90"]), ("hour", summary["bursts"].get(1, {}).get("p90"))):
+                if amount is None:
+                    continue
+                out = np.full(len(towns), np.inf)
+                for c in np.unique(country):
+                    spec = self.meta["tails"].get(f"{c}|{kind}")
+                    if spec:
+                        tail = GPDTail(*spec)
+                        m = country == c
+                        out[m] = np.where(amount[m] > tail.u, tail.return_period_years(amount[m]), np.inf)
+                rp[kind] = out
+            summary["return_period"] = rp
+        from .guard.consistency import check_summary
+
+        summary["repairs"] = check_summary(summary)
         if st_outs:
             summary["airports"] = summarize(st_outs, t0, samples=20, calibrator=self.calibrator, weights=weights)
         if target_outs:
             cells = summarize(target_outs, t0, samples=20, calibrator=self.calibrator, weights=weights)
-            summary["catchment24"] = self.catchments().catchment_mean(cells["expected_mm"][:, :24].sum(-1))
+            catch = self.catchments()
+            summary["catchment24"] = catch.catchment_mean(cells["expected_mm"][:, :24].sum(-1))
+            from .hydro import curve_number, peak_timing
+            from .hydro.runoff import urban_share
+
+            hourly = catch.catchment_mean(cells["expected_mm"].T).T                     # (towns, T)
+            if self._urban is None:
+                self._urban = urban_share(towns.lat, towns.lon, self.towns.points.extra.get(
+                    "population", np.zeros(len(towns))).astype(np.float64))
+            cn = curve_number(catch.slope, self._urban)
+            summary["flood_peak"] = peak_timing(hourly, cn, catch.upstream_km2, catch.slope)
         return summary
 
     def run(self, now=None, models=MODELS, use_memory: bool = True, out_dir=None, countries=None,
@@ -241,8 +308,27 @@ class Forecaster:
         if not components:
             raise RuntimeError("no driving model run is available; try again later or pass now= an earlier hour")
         obs = self.observations(t0, rain=use_memory, airports=airports, lightning=lightning)
-        summary = self.from_fields(components, t0, obs, flood=flood)
-        notes = sorted({n for c in components for n in c.get("notes", [])})
+        try:
+            summary = self.from_fields(components, t0, obs, flood=flood)
+        except Exception as error:                     # the network failed: issue the statistical fallback
+            from .dataset import bilinear
+            from .guard.fallback import fallback_summary
+
+            log(f"model forecast failed ({type(error).__name__}: {error}); issuing the statistical fallback")
+            towns = self.towns.points
+            sch = self.model.schedule
+            hf, _ = sch.hour_frame()
+            rain = bilinear(np.clip(components[0]["fields"]["tp"], 0, None), self.builder.lat1, self.builder.lon1,
+                            towns.lat, towns.lon)[hf].T
+            hours = t0 + np.arange(sch.num_hours)
+            clim = np.moveaxis(self.town_clim.classes_at(hours, towns.lon), 0, 1)
+            summary = fallback_summary(t0, rain, clim, self.meta.get("fallback"))
+            flood = False
+        notes = sorted({n for c in components for n in c.get("notes", [])}) + list(summary.get("repairs", []))
+        if summary.get("drift") and summary["drift"]["weight"] > 0:
+            d = summary["drift"]
+            notes.append(f"unusual inputs (score {d['score']:.1f}: {', '.join(d['outside'])}); forecast pulled "
+                         f"{d['weight']:.0%} towards climatology")
         n_airports = 0 if obs.get("station_codes") is None else int((obs["station_codes"] >= 0).any(0).sum())
         info = {"t0": hour_to_iso(t0), "issued": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
                 "driving": [{"model": c["model"], "run": hour_to_iso(c["init"])} for c in components],
@@ -258,7 +344,7 @@ class Forecaster:
                                                             self.model.stations.lon)
         if out_dir is not None:
             write_outputs(out_dir, self.towns, summary, info, self.model.schedule, countries,
-                          lightning=obs.get("lightning"))
+                          lightning=obs.get("lightning"), terrain=self.geo.terrain)
         return {"info": info, "summary": summary}
 
 
@@ -326,6 +412,12 @@ def town_rows(towns: Gazetteer, s: dict, schedule, lightning: np.ndarray | None 
             "wettest_3h_mm_p90": round(float(s["bursts"][3]["p90"][k]), 1) if 3 in s.get("bursts", {}) else None,
             "catchment_rain_24h_mm": None if catch is None else round(float(catch[k]), 1),
             "flood_risk": str(fl["text"][k]), "flood_reason": str(fl["reason"][k]),
+            "flood_peak": (local_time(t0 + s["flood_peak"]["peak_hour"][k], zones[k], p.lon[k])
+                           if s.get("flood_peak") and np.isfinite(s["flood_peak"]["peak_hour"][k]) else ""),
+            "runoff_24h_mm": (round(float(s["flood_peak"]["runoff_mm"][k]), 1) if s.get("flood_peak") else None),
+            "rain_24h_p90_return_years": (None if not s.get("return_period") or "day" not in s["return_period"]
+                                          or not np.isfinite(s["return_period"]["day"][k])
+                                          else round(float(s["return_period"]["day"][k]), 1)),
             "lightning_now": 0 if lightning is None else int(lightning[k]),
             "cause": REGIMES[cause[k]] if cause[k] >= 0 else "-",
         }
@@ -375,7 +467,7 @@ def report_text(info: dict, parishes: list[dict], countries=None) -> str:
 
 
 def write_outputs(out_dir, towns: Gazetteer, summary: dict, info: dict, schedule, countries=None,
-                  lightning: np.ndarray | None = None) -> Path:
+                  lightning: np.ndarray | None = None, terrain=None) -> Path:
     d = Path(out_dir).expanduser()
     d.mkdir(parents=True, exist_ok=True)
     rows = town_rows(towns, summary, schedule, lightning)
@@ -396,8 +488,29 @@ def write_outputs(out_dir, towns: Gazetteer, summary: dict, info: dict, schedule
                         thunder=(summary["thunder"] if summary.get("thunder") is not None
                                  else np.zeros_like(summary["p_wet"])).astype(np.float16),
                         place=towns.names.astype(str))
-    (d / "forecast.json").write_text(json.dumps({**info, "parishes": parishes}, indent=1))
+    (d / "forecast.json").write_text(json.dumps({**info, "parishes": parishes}, indent=1, default=str))
     (d / "report.txt").write_text(report_text(info, parishes, countries), encoding="utf-8")
+    from .render import bulletin, cap_alerts
+
+    for country in sorted({r["country"] for r in parishes}):
+        if countries and country not in countries:
+            continue
+        (d / f"bulletin_{country}.txt").write_text(bulletin(parishes, country, info["issued"]), encoding="utf-8")
+        if country == "JM":
+            (d / "bulletin_JM_patois.txt").write_text(bulletin(parishes, country, info["issued"], "jam"), encoding="utf-8")
+    alerts = cap_alerts(parishes, rows, info["issued"] + ":00")
+    if alerts:
+        (d / "alerts").mkdir(exist_ok=True)
+        for k, xml in enumerate(alerts):
+            (d / "alerts" / f"alert_{k:03d}.xml").write_text(xml, encoding="utf-8")
+    if terrain is not None:
+        from .render import draw_map
+
+        lat = np.array([r["lat"] for r in rows])
+        lon = np.array([r["lon"] for r in rows])
+        p24 = np.array([r["any_rain_24h"] for r in rows])
+        box = (float(lat.min()) - 0.3, float(lat.max()) + 0.3, float(lon.min()) - 0.3, float(lon.max()) + 0.3)
+        draw_map(d / "map_rain_24h.png", terrain, lat, lon, p24, box, f"Chance of rain in the next 24 h from {info['t0']}")
     log(f"wrote {len(rows):,} places and {len(parishes):,} parishes to {d}")
     return d
 
