@@ -128,14 +128,20 @@ class BlendBag(nn.Module):
 
 def fit(x: np.ndarray, y: np.ndarray, seed: int = 0, epochs: int = 6, max_rows: int = 400_000, batch: int = 2048,
         lr: float = 3e-3, width: int = 48, min_steps: int = 1200, members: int = 1, groups: list | None = None,
-        drop: float = 0.0) -> BlendNet | BlendBag:
+        drop: float = 0.0, weights: np.ndarray | None = None) -> BlendNet | BlendBag:
     """Train on rows ``x`` (N, F) and observed daily rain ``y`` (N,) mm; rows with NaN rain are dropped. With
     ``members`` > 1, a bag of that many nets (seeds ``seed``, ``seed + 1`` ...), each on its own subsample.
 
     ``groups`` (column indices of each system, its ``present`` flag included) and ``drop`` hide each system from each
     training row with that chance, as if it had not arrived: the blend then cannot lean on one combination of systems
-    and still forecasts well when one is missing."""
-    one = lambda k: _fit_one(x, y, seed + k, epochs, max_rows, batch, lr, width, min_steps, groups, drop)   # noqa: E731
+    and still forecasts well when one is missing.
+
+    ``weights`` (N,) weigh the rows in the loss. With rows drawn unevenly on purpose (every heavy-rain row, a share of
+    the rest; see :mod:`pluvium.tails.stratify`), the inverse of each row's chance of being drawn keeps the loss an
+    unbiased estimate of the loss over all rows, so the chances stay calibrated while the tail is learned from far
+    more events."""
+    one = lambda k: _fit_one(x, y, seed + k, epochs, max_rows, batch, lr, width, min_steps, groups, drop,   # noqa: E731
+                             weights)
     return BlendBag([one(k) for k in range(members)]) if members > 1 else one(0)
 
 
@@ -146,13 +152,17 @@ def system_groups(systems: list[str], ensembles: set) -> list[np.ndarray]:
 
 
 def _fit_one(x: np.ndarray, y: np.ndarray, seed: int, epochs: int, max_rows: int, batch: int, lr: float, width: int,
-             min_steps: int, groups: list | None = None, drop: float = 0.0) -> BlendNet:
+             min_steps: int, groups: list | None = None, drop: float = 0.0,
+             weights: np.ndarray | None = None) -> BlendNet:
     rng = np.random.default_rng(seed)
     keep = np.isfinite(y)
     x, y = x[keep], y[keep]
+    w = None if weights is None else np.asarray(weights, np.float32)[keep]
     if x.shape[0] > max_rows:
         pick = rng.choice(x.shape[0], max_rows, replace=False)
         x, y = x[pick], y[pick]
+        w = None if w is None else w[pick]
+    wt = None if w is None else torch.from_numpy(w / max(float(w.mean()), 1e-12))
     torch.manual_seed(seed)
     net = BlendNet(x.shape[1], width)
     net.mu.copy_(torch.from_numpy(x.mean(0)))
@@ -178,7 +188,11 @@ def _fit_one(x: np.ndarray, y: np.ndarray, seed: int, epochs: int, max_rows: int
                 for g, cols in enumerate(groups):
                     keep[:, torch.as_tensor(cols)] = (~hide[:, g:g + 1]).float()
                 xb = xb * keep
-            loss = nn.functional.binary_cross_entropy_with_logits(net.logits(xb), yt[idx])
+            if wt is None:
+                loss = nn.functional.binary_cross_entropy_with_logits(net.logits(xb), yt[idx])
+            else:
+                rows = nn.functional.binary_cross_entropy_with_logits(net.logits(xb), yt[idx], reduction="none").mean(1)
+                loss = (rows * wt[idx]).sum() / wt[idx].sum().clamp_min(1e-12)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -277,25 +291,33 @@ def exceed(p: np.ndarray, threshold: float) -> np.ndarray:
     return p[:, lo] * (1 - w) + p[:, hi] * w
 
 
+def quantile_at(p: np.ndarray, u: np.ndarray) -> np.ndarray:
+    """The amount (mm) at probability levels ``u`` (N, L), which may differ from row to row, of the distributions
+    ``p`` (N, K): zero below the chance of rain, linear in log-amount between thresholds, an exponential tail above
+    the last. :func:`quantiles` is this at the same levels for every row; ensemble copula coupling uses it with each
+    row's own levels (:mod:`pluvium.scenarios.ecc`)."""
+    k_max = len(THRESHOLDS)
+    cdf = (1.0 - p).astype(np.float64)                               # P(rain < threshold), increasing
+    u = np.asarray(u, np.float64)
+    logt = np.log(THRESHOLDS.astype(np.float64))
+    k = (cdf[:, None, :] < u[:, :, None]).sum(-1)                    # thresholds each quantile lies above, (N, L)
+    kk = np.clip(k, 1, k_max - 1)
+    c0 = np.take_along_axis(cdf, kk - 1, 1)
+    c1 = np.take_along_axis(cdf, kk, 1)
+    w = np.clip((u - c0) / np.maximum(c1 - c0, 1e-9), 0.0, 1.0)
+    val = np.exp(logt[kk - 1] * (1 - w) + logt[kk] * w)
+    tail = THRESHOLDS[-1] * (1.0 + np.log(np.maximum(1 - cdf[:, -1:], 1e-9) / np.maximum(1 - u, 1e-9)))
+    out = np.where(k == 0, 0.0, np.where(k < k_max, val, np.maximum(tail, THRESHOLDS[-1])))
+    return out.astype(np.float32)
+
+
 def quantiles(p: np.ndarray, levels=LEVELS) -> np.ndarray:
     """Quantiles (N, L) of the predicted distribution: zero below the chance of rain, linear in log-amount between
     thresholds, an exponential tail above the last."""
-    n = p.shape[0]
-    cdf = 1.0 - p                                    # P(rain < threshold), increasing
-    logt = np.log(THRESHOLDS)
-    out = np.zeros((n, len(levels)), np.float32)
-    for j, q in enumerate(levels):
-        k = (cdf < q).sum(1)                         # thresholds the quantile lies above
-        inside = (k > 0) & (k < len(THRESHOLDS))
-        kk = np.clip(k, 1, len(THRESHOLDS) - 1)
-        c0, c1 = cdf[np.arange(n), kk - 1], cdf[np.arange(n), kk]
-        w = np.clip((q - c0) / np.maximum(c1 - c0, 1e-9), 0, 1)
-        val = np.exp(logt[kk - 1] * (1 - w) + logt[kk] * w)
-        tail = THRESHOLDS[-1] * (1.0 + np.log(np.maximum(1 - cdf[:, -1], 1e-9) / np.maximum(1 - q, 1e-9)))
-        out[:, j] = np.where(k == 0, 0.0, np.where(inside, val, np.maximum(tail, THRESHOLDS[-1])))
-    return out
+    levels = np.asarray(levels, np.float64)
+    return quantile_at(p, np.broadcast_to(levels[None, :], (p.shape[0], levels.size)))
 
 
 __all__ = ["CLIM_FEATURES", "ENSEMBLE_FEATURES", "LEVELS", "SCORED", "SINGLE_FEATURES", "THRESHOLDS", "BlendBag",
            "BlendNet", "StackPool", "assemble", "exceed", "feature_names", "fit", "fit_stack", "predict",
-           "predict_stack", "quantiles", "system_features", "system_groups", "to_logits"]
+           "predict_stack", "quantile_at", "quantiles", "system_features", "system_groups", "to_logits"]

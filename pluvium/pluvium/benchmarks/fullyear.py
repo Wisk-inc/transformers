@@ -199,13 +199,21 @@ class Table:
 
 
 def build_table(cells: CellSet, reader: ArchiveReader, region: str, runs: np.ndarray, long_runs: set,
-                systems=ARCHIVE_SYSTEMS, neural=None, scores=None, test_window=None) -> dict:
+                systems=ARCHIVE_SYSTEMS, neural=None, scores=None, test_window=None, keep_raw: bool = False) -> dict:
     """Everything needed to train and score in one region: per (run, lead) the features of every system, the
-    climatology and the truth. Raw systems are scored into ``scores`` here for runs in ``test_window``."""
+    climatology and the truth. Raw systems are scored into ``scores`` here for runs in ``test_window``.
+
+    With ``keep_raw`` the table also keeps the raw systems' consensus for every block (see
+    :func:`pluvium.tails.consensus.raw_consensus`): ``raw_p`` the chance of every threshold, ``raw_mean`` the mean
+    amount and ``raw_n`` how many systems were there."""
     t0 = time.time()
     out = {"run": [], "lead": [], "y": [], "clim": [], "feats": {s: [] for s in systems}}
     if neural is not None:
         out["feats"]["neural"] = []
+    if keep_raw:
+        from ..tails.consensus import raw_consensus
+
+        out.update({"raw_p": [], "raw_mean": [], "raw_n": []})
     for k, run in enumerate(runs):
         loaded = {s: reader.load(region, s, int(run)) for s in systems}
         leads = range(1, 15) if int(run) in long_runs else range(1, 4)
@@ -220,12 +228,20 @@ def build_table(cells: CellSet, reader: ArchiveReader, region: str, runs: np.nda
             out["y"].append(y.astype(np.float32))
             out["clim"].append(clim)
             testing = scores is not None and test_window[0] <= int(run) < test_window[1]
+            raw = {}
             for s in systems:
                 f = system_at_cells(loaded[s], lead, cells) if loaded[s] is not None and lead <= LIMIT.get(s, 14) else None
                 members = None if f is None else f.pop("_members")
                 if testing and members is not None:
                     _score_raw(scores, s, int(run), lead, y, clim, members)
+                if keep_raw and members is not None:
+                    raw[s] = members
                 out["feats"][s].append(f)
+            if keep_raw:
+                p_raw, mean_raw = raw_consensus(raw, len(cells))
+                out["raw_p"].append(p_raw.astype(np.float16))
+                out["raw_mean"].append(mean_raw.astype(np.float32))
+                out["raw_n"].append(len(raw))
             if neural is not None:
                 f = neural(int(run), lead)
                 members = None if f is None else f.pop("_members")
