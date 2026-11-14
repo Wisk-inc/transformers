@@ -86,6 +86,7 @@ against brute-force enumeration in the tests.
 | Feed | Used for |
 |---|---|
 | GFS (NOAA), ECMWF IFS and AIFS open data | The driving fields; one forecast per model, mixed (disagreement widens the windows) |
+| GFS ensemble (GEFS, 31 members at 0.5 degrees, optional: `--ensemble 31`) | More members in the mixture: the spread of the start window and the totals then reflects the atmosphere's own uncertainty; the members together weigh as much as two deterministic models |
 | GOES-East rain rate (or infrared when that product is unavailable) | Rain falling now, and the field that is advected |
 | METAR from ~80 Caribbean airports (aviationweather.gov) | The last three hours of weather read into the mesh; the truth that online learning checks forecasts against |
 | GOES-East Geostationary Lightning Mapper | Lightning within 10 km of each town in the last 15 minutes |

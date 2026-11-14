@@ -13,6 +13,7 @@ derived from what it has, and the substitution is recorded. A run is cached by m
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -30,8 +31,20 @@ NCEP_SURFACE = {"tcwv": ("PWAT", "entire atmosphere (considered as a single laye
                 "tcc": ("TCDC", "entire atmosphere")}
 NCEP_UPPER = {"u": "UGRD", "v": "VGRD", "q": "SPFH", "t": "TMP"}
 ECMWF_SURFACE = {"tcwv": "tcwv", "u10": "10u", "v10": "10v", "t2m": "2t", "msl": "msl", "tcc": "tcc"}
-#: Output steps of each model (hours) and how far it runs.
-STEPS = {"gfs": (1, 120), "ifs": (3, 144), "aifs": (6, 240)}
+GEFS = ("https://noaa-gefs-pds.s3.amazonaws.com/gefs.{day}/{hour:02d}/atmos/pgrb2ap5/"
+        "{member}.t{hour:02d}z.pgrb2a.0p50.f{lead:03d}")
+#: Output steps of each model (hours) and how far it runs. GFS ensemble members are named ``gefs-c00`` (control)
+#: and ``gefs-p01`` ... ``gefs-p30``.
+STEPS = {"gfs": (1, 120), "ifs": (3, 144), "aifs": (6, 240), "gefs": (3, 384)}
+
+
+def family(model: str) -> str:
+    return "gefs" if model.startswith("gefs") else model
+
+
+def ensemble(members: int) -> list[str]:
+    """The control and ``members - 1`` perturbed GFS ensemble members."""
+    return ["gefs-c00"] + [f"gefs-p{k:02d}" for k in range(1, max(1, members))]
 
 
 def _index_ncep(text: str) -> list:
@@ -99,8 +112,8 @@ class NWPReader:
 
     def __init__(self, model: str, lat1, lon1, lat2, lon2, cache="~/.cache/pluvium/nwp", schedule: Schedule = DEFAULT,
                  workers: int = 24) -> None:
-        if model not in STEPS:
-            raise ValueError(f"unknown model {model!r}; choose from {', '.join(STEPS)}")
+        if family(model) not in STEPS:
+            raise ValueError(f"unknown model {model!r}; choose from gfs, ifs, aifs, gefs-c00, gefs-p01 ... gefs-p30")
         self.model, self.schedule, self.workers = model, schedule, workers
         self.lat1, self.lon1, self.lat2, self.lon2 = (np.asarray(x, np.float64) for x in (lat1, lon1, lat2, lon2))
         self.cache = Path(cache).expanduser()
@@ -113,23 +126,27 @@ class NWPReader:
         day, hour = s[:10].replace("-", ""), int(s[11:13])
         if self.model == "gfs":
             return [GFS.format(day=day, hour=hour, lead=lead)]
+        if family(self.model) == "gefs":
+            member = "gec00" if self.model.endswith("c00") else "gep" + self.model[-2:]
+            return [GEFS.format(day=day, hour=hour, lead=lead, member=member)]
         name = "ifs" if self.model == "ifs" else "aifs-single"
         return [u.format(day=day, hour=hour, lead=lead, model=name) for u in (ECMWF, ECMWF_SITE)]
 
     def _index(self, init: int, lead: int):
         last = None
         for url in self._urls(init, lead):
-            suffix = ".idx" if self.model == "gfs" else ".index"
+            ncep = family(self.model) in ("gfs", "gefs")
+            suffix = ".idx" if ncep else ".index"
             try:
                 text = fetch(url + suffix, timeout=60.0, attempts=3).decode()
-                return url, (_index_ncep(text) if self.model == "gfs" else _index_ecmwf(text))
+                return url, (_index_ncep(text) if ncep else _index_ecmwf(text))
             except Exception as error:
                 last = error
         raise RuntimeError(f"{self.model} {str(hour_to_datetime64(init))[:13]}Z +{lead} h: no index ({last})")
 
     def available(self, init: int, lead: int | None = None) -> bool:
         lead = self.schedule.three_hourly_until if lead is None else lead
-        step = STEPS[self.model][0]
+        step = STEPS[family(self.model)][0]
         try:
             self._index(init, int(np.ceil(lead / step) * step))
             return True
@@ -145,8 +162,9 @@ class NWPReader:
     def _surface_at(self, init: int, lead: int) -> dict:
         url, index = self._index(init, lead)
         out = {}
+        ncep = family(self.model) in ("gfs", "gefs")
         for short in ("tcwv", "u10", "v10", "t2m", "msl", "tcc"):
-            if self.model == "gfs":
+            if ncep:
                 var, level = NCEP_SURFACE[short]
                 got = self._message(url, index, var, level)
             else:
@@ -155,7 +173,16 @@ class NWPReader:
                 out[short] = got
         # cumulative rain to this lead (mm)
         if lead > 0:
-            if self.model == "gfs":
+            if family(self.model) == "gefs":
+                # rain in buckets that restart every 6 hours ("6-9 hour acc"); made cumulative in frames()
+                for row in index:
+                    if row["var"] == "APCP" and row["level"] == "surface" and "acc" in row["desc"]:
+                        a, b = (int(x) for x in re.findall(r"(\d+)-(\d+) hour", row["desc"])[0])
+                        if b == lead:
+                            values, la, lo = decode(fetch(url, row["start"], row["end"]))
+                            out["tp_bucket"] = (a, (values, la, lo))
+                            break
+            elif self.model == "gfs":
                 want = f"0-{lead // 24} day acc fcst" if lead % 24 == 0 else f"0-{lead} hour acc fcst"
                 got = self._message(url, index, "APCP", "surface", want)
                 out["tp_cum"] = got
@@ -167,14 +194,26 @@ class NWPReader:
     def _upper_at(self, init: int, lead: int) -> dict:
         url, index = self._index(init, lead)
         out = {}
+        gefs = family(self.model) == "gefs"
         for short in UPPER_SHORT:
             for p in LEVELS:
                 if self.model == "gfs":
                     got = self._message(url, index, NCEP_UPPER[short], f"{p} mb")
+                elif gefs:
+                    var = "RH" if short == "q" else NCEP_UPPER[short]
+                    got = self._message(url, index, var, f"{p} mb")
                 else:
                     got = self._message(url, index, short, str(p))
                 if got is not None:
                     out[f"{short}{p}"] = got
+        if gefs:                                   # relative humidity -> specific humidity
+            for p in LEVELS:
+                if f"q{p}" in out and f"t{p}" in out:
+                    rh, la, lo = out[f"q{p}"]
+                    t = out[f"t{p}"][0]
+                    es = 6.112 * np.exp(17.67 * (t - 273.15) / (t - 273.15 + 243.5))
+                    e = np.clip(rh, 0, 100) / 100.0 * es
+                    out[f"q{p}"] = (0.622 * e / (p - 0.378 * e), la, lo)
         return out
 
     # ------------------------------------------------------------------------------------- frames --
@@ -190,7 +229,7 @@ class NWPReader:
                     "upper": {k[2:]: z[k] for k in z.files if k.startswith("u_")},
                     "notes": json.loads(str(z["notes"]))}
         sch = self.schedule
-        step, horizon = STEPS[self.model]
+        step, horizon = STEPS[family(self.model)]
         need = offset + sch.three_hourly_until
         if need > horizon:
             raise RuntimeError(f"{self.model} runs to {horizon} h, the forecast needs {need} h")
@@ -213,6 +252,18 @@ class NWPReader:
             return box_average(values, lat, lon, self.lat2, self.lon2, 0.75)
 
         # surface fields at every model step, then interpolated to the frame centres
+        if family(self.model) == "gefs":                # buckets -> cumulative
+            cum = {0: None}
+            for L in sorted(surface):
+                got = surface[L]
+                if L == 0 or "tp_bucket" not in got:
+                    continue
+                a, item = got.pop("tp_bucket")
+                base = cum.get(a)
+                values, la, lo = item
+                total = values if base is None else base + values
+                cum[L] = total
+                got["tp_cum"] = (total, la, lo)
         grid1 = {short: {} for short in HOURLY_SHORT}
         for L, got in surface.items():
             for short in ("tcwv", "u10", "v10", "t2m", "msl", "tcc"):
@@ -281,7 +332,7 @@ class NWPReader:
 
 def latest_cycle(model: str, now_hour: int, reader: NWPReader, look_back: int = 30) -> int | None:
     """The newest cycle of ``model`` that has published far enough to cover a forecast issued at ``now_hour``."""
-    step = 6 if model == "gfs" else 12 if model == "ifs" else 6
+    step = 6 if family(model) in ("gfs", "gefs") else 12 if model == "ifs" else 6
     start = now_hour - now_hour % step
     for back in range(0, look_back + 1, step):
         init = start - back
@@ -290,4 +341,4 @@ def latest_cycle(model: str, now_hour: int, reader: NWPReader, look_back: int = 
     return None
 
 
-__all__ = ["ECMWF", "GFS", "NWPReader", "STEPS", "box_average", "decode", "latest_cycle"]
+__all__ = ["ECMWF", "GEFS", "GFS", "NWPReader", "STEPS", "box_average", "decode", "ensemble", "family", "latest_cycle"]

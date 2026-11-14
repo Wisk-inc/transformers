@@ -184,6 +184,35 @@ def format_compare(summary: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def markdown(results: dict, setup: str = "") -> str:
+    """A Markdown report of a benchmark: one table per test, contenders as columns, references in the text."""
+    names = list(results)
+    lines = ["# Benchmark: Pluvium version 2 against version 1", "", setup, ""]
+    for label, title in (("emulated_errors", "Driving fields with emulated forecast errors (closer to live)"),
+                         ("reanalysis_driven", "Reanalysis as a perfect forecast (upper bound on live skill)")):
+        lines += [f"## {title}", "", "| Score | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
+        for key, text in KEYS:
+            vals = []
+            for n in names:
+                v = _get(results[n].get(label, {}), key)
+                if v is None:
+                    vals.append("n/a")
+                elif key.endswith("median_h"):
+                    vals.append(f"{v:.1f} h")
+                else:
+                    vals.append(f"{v:+.1%}" if "bss" in key or "rpss" in key or "crpss" in key else f"{v:.3f}")
+            lines.append(f"| {text} | " + " | ".join(vals) + " |")
+        r0 = results[names[0]].get(label, {})
+        if r0:
+            lines += ["", f"References on the same hours: climatology Brier {r0.get('brier_clim', float('nan')):.4f}, "
+                          f"persistence {r0.get('brier_persist', float('nan')):.4f}, driving model's rain "
+                          f"{r0.get('brier_driving', float('nan')):.4f}; {r0.get('hours_scored', 0):,} target-hours, "
+                          f"{r0.get('wet_share', 0):.1%} wet.", ""]
+    lines += ["Training: " + "; ".join(f"{n}: {results[n]['parameters']:,} parameters, {results[n]['steps']:,} steps in "
+                                       f"{results[n]['train_minutes']:.0f} min" for n in names), ""]
+    return "\n".join(lines)
+
+
 def main(argv=None) -> None:
     import argparse
 
@@ -208,4 +237,4 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["compare", "format_compare", "main", "run_bench", "thunder_climatology", "thunder_scores"]
+__all__ = ["compare", "format_compare", "main", "markdown", "run_bench", "thunder_climatology", "thunder_scores"]

@@ -217,16 +217,18 @@ class Forecaster:
                     target_outs.append({k: v.float().cpu() for k, v in self.model.forecast_points(
                         batch, t, torch.from_numpy(tctx[None]).to(self.device), chunk=chunk, latent=latent).items()})
             outs.append({k: v.float().cpu() for k, v in out.items()})
+        weights = mixture_weights([c.get("model", "") for c in components])
         parts = []
         for start in range(0, len(towns), chunk):
             sl = slice(start, min(len(towns), start + chunk))
             parts.append(summarize([_slice_points(o, sl) for o in outs], t0, samples=samples, calibrator=self.calibrator,
-                                   corrector=self.corrector, places=self.town_groups[sl], place_lon=towns.lon[sl]))
+                                   weights=weights, corrector=self.corrector, places=self.town_groups[sl],
+                                   place_lon=towns.lon[sl]))
         summary = _concat(parts)
         if st_outs:
-            summary["airports"] = summarize(st_outs, t0, samples=20, calibrator=self.calibrator)
+            summary["airports"] = summarize(st_outs, t0, samples=20, calibrator=self.calibrator, weights=weights)
         if target_outs:
-            cells = summarize(target_outs, t0, samples=20, calibrator=self.calibrator)
+            cells = summarize(target_outs, t0, samples=20, calibrator=self.calibrator, weights=weights)
             summary["catchment24"] = self.catchments().catchment_mean(cells["expected_mm"][:, :24].sum(-1))
         return summary
 
@@ -258,6 +260,13 @@ class Forecaster:
             write_outputs(out_dir, self.towns, summary, info, self.model.schedule, countries,
                           lightning=obs.get("lightning"))
         return {"info": info, "summary": summary}
+
+
+def mixture_weights(models: list[str], ensemble_share: float = 2.0) -> np.ndarray:
+    """Each deterministic model counts once; the GFS ensemble's members share ``ensemble_share`` between them (as
+    much as two deterministic models), so 30 members do not drown out ECMWF."""
+    members = sum(m.startswith("gefs") for m in models)
+    return np.array([ensemble_share / members if m.startswith("gefs") else 1.0 for m in models], np.float64)
 
 
 def nearest_target_town(towns: Gazetteer, lat, lon) -> np.ndarray:
@@ -414,5 +423,5 @@ def place_timeline(towns: Gazetteer, summary: dict, query: str, country: str | N
     return "\n".join(lines)
 
 
-__all__ = ["Forecaster", "MODELS", "groups_of", "parish_rows", "place_timeline", "report_text", "town_rows",
+__all__ = ["Forecaster", "MODELS", "groups_of", "mixture_weights", "parish_rows", "place_timeline", "report_text", "town_rows",
            "write_outputs"]

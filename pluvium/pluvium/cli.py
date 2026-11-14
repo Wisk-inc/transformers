@@ -28,9 +28,16 @@ def _forecaster(args):
     return Forecaster(folder, device=args.device)
 
 
+def _models(args) -> tuple:
+    from .sources.nwp import ensemble
+
+    models = tuple(m.strip() for m in args.models.split(",") if m.strip())
+    return models + (tuple(ensemble(args.ensemble)) if getattr(args, "ensemble", 0) else ())
+
+
 def cmd_forecast(args) -> None:
     fc = _forecaster(args)
-    models = tuple(m.strip() for m in args.models.split(",") if m.strip())
+    models = _models(args)
     result = fc.run(now=args.time, models=models, use_memory=not args.no_memory, out_dir=args.out,
                     countries=tuple(args.country.upper().split(",")) if args.country else None)
     print((Path(args.out).expanduser() / "report.txt").read_text())
@@ -49,7 +56,7 @@ def cmd_place(args) -> None:
     one = Gazetteer(fc.towns.points.subset(idx[:1]))
     fc.towns = one
     fc._town_setup()
-    models = tuple(m.strip() for m in args.models.split(",") if m.strip())
+    models = _models(args)
     result = fc.run(now=args.time, models=models, use_memory=not args.no_memory, flood=False, archive=False)
     print(place_timeline(one, result["summary"], args.name, hours=args.hours))
 
@@ -96,6 +103,7 @@ def main(argv=None) -> None:
         p.add_argument("--model", default=None, help="a local model folder instead of --repo")
         p.add_argument("--device", default=None)
         p.add_argument("--models", default="gfs,ifs,aifs", help="driving models to mix")
+        p.add_argument("--ensemble", type=int, default=0, help="also mix this many GFS ensemble members (up to 31)")
         p.add_argument("--time", default=None, help="issue time (UTC, e.g. 2026-11-14T06); default: now")
         p.add_argument("--no-memory", action="store_true", help="do not read the rain already falling (GOES)")
 

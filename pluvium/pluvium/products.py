@@ -166,9 +166,13 @@ def summarize(out, t0: int, prefix: str = "", batch_index: int = 0, samples: int
     }
 
 
+#: thresholds whose exceedance chances are kept for every total and burst (the flood rule reads 40, 60 and 75)
+EXCEEDANCE = tuple(sorted(set(TOTAL_THRESHOLDS) | {40.0, 60.0, 75.0}))
+
+
 def _distribution(v: np.ndarray) -> dict:
     return {"median": np.median(v, 0), "p10": np.quantile(v, 0.1, 0), "p90": np.quantile(v, 0.9, 0), "mean": v.mean(0),
-            **{f"p_ge_{int(x)}": (v >= x).mean(0) for x in TOTAL_THRESHOLDS}}
+            **{f"p_ge_{int(x)}": (v >= x).mean(0) for x in EXCEEDANCE}}
 
 
 def dominant_cause(summary: dict, frames_for_hours: np.ndarray, point: int, window: int = 24) -> str:
