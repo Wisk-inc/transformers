@@ -174,6 +174,12 @@ bound) and with emulated forecast errors (closer to live).
 `pluvium bench` trains competing architectures from scratch on identical data with identical budgets and reports
 all of these side by side.
 
+`pluvium operational` is the stricter test. It puts Pluvium against the operational systems: ECMWF ENS, ECMWF HRES,
+ECMWF AIFS, NOAA GEFS, NOAA GraphCast and NOAA GFS. Only real archived runs are used, with no reanalysis anywhere.
+Pluvium is driven by that morning's GFS run, after fine-tuning on earlier GFS runs. Every system is calibrated the
+same causal way, on the 30 runs before each test day. Results are in [OPERATIONAL_BENCHMARK.md](OPERATIONAL_BENCHMARK.md)
+and the version comparison is in [BENCHMARK.md](BENCHMARK.md).
+
 ## 7. Honest limits
 
 * Truth is satellite rain at 8 km and point reports at airports; neither sees every shower.
