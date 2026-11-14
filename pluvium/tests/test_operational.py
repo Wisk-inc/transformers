@@ -72,3 +72,44 @@ def test_ecmwf_index_members_sorted():
             {"param": "tp", "number": "4", "_offset": 200, "_length": 30, "type": "pf"}]
     text = "\n".join(json.dumps(r) for r in rows)
     assert _ecmwf_rows(text) == [(0, 5, 24), (4, 200, 229), (21, 100, 109)]
+
+
+def test_evaluate_end_to_end_on_synthetic_systems(tmp_path):
+    """A skilful system beats a noisy one, blends at least match their parts, and every score is finite."""
+    from pluvium.benchmarks.operational import PLUVIUM, Operational, OperationalConfig, markdown
+
+    rng = np.random.default_rng(4)
+    R, P = 50, 60
+    inits = hour_of("2025-04-01T00") + 24 * np.arange(R)
+    signal = rng.gamma(0.6, 8.0, size=(R, 3, P)).astype(np.float32)                 # the "true" daily rain
+    obs = signal * rng.lognormal(0, 0.3, size=signal.shape).astype(np.float32)
+    cfg = OperationalConfig(root=str(tmp_path), geography="", checkpoint="", systems=("ens", "gfs"),
+                            test_period=("2025-05-01T00", "2025-05-20T00"), window_days=20, lag_days=3)
+    op = Operational.__new__(Operational)
+    op.cfg, op.root = cfg, tmp_path
+    op.land = np.arange(P)
+    op.lat, op.lon = np.linspace(17.8, 18.3, P), np.linspace(-78, -76.5, P)
+    op.eval_inits, op.test_inits = inits, inits[(inits >= hour_of("2025-05-01T00")) & (inits < hour_of("2025-05-20T00"))]
+    op.train_inits = inits[:1]
+    op.thr = (1.0, 10.0)
+
+    def system(noise, members):
+        m = signal[:, None] * rng.lognormal(0, noise, size=(R, members, 3, P))
+        point = np.stack([(m >= t).mean(1) for t in op.thr], 2).astype(np.float32)
+        return {"point": point, "nbhd": point.copy(), "amount": m.mean(1).astype(np.float32),
+                "members": m.astype(np.float32), "inits": inits}
+
+    fake = {PLUVIUM: system(0.3, 40), "ens": system(0.8, 20), "gfs": system(1.2, 1)}
+    op.predictors = lambda name: fake.get(name)
+    op.truth = lambda _: obs
+    op.reference = lambda sel: np.broadcast_to(np.stack([(obs >= t).mean((0, 2)) for t in op.thr], 1)[None, :, :, None],
+                                               (len(sel), 3, 2, P)).astype(np.float32)
+    res = op.evaluate(resamples=200)
+    s = res["systems"]
+    assert len(res["test_runs"]) == 19
+    for d in ("1", "2", "3"):
+        assert s[PLUVIUM]["days"][d]["1"]["bs"] < s["gfs"]["days"][d]["1"]["bs"]
+        assert np.isfinite(s["blend_all"]["days"][d]["10"]["bs"])
+    assert res["versus"]["gfs"]["day1_1mm"]["delta_bs"] < 0
+    text = markdown(res)
+    assert "Pluvium" in text and "ECMWF ENS" in text

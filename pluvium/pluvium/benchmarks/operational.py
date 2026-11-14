@@ -381,15 +381,15 @@ class Operational:
                                "runs": int(train.size), "first": _day(train[0]), "last": _day(train[-1])})
         return trainer.model
 
-    def forecast(self, model) -> None:
-        """Pluvium's daily-total samples and chances for every calibration and test run (cached per run)."""
+    def forecast(self, model, inits=None, out_dir=None) -> None:
+        """Pluvium's daily-total samples for every calibration and test run (or ``inits``), cached per run."""
         import torch
 
         from ..chain import sample_paths
         from ..dataset import collate
         from ..products import component
 
-        out_dir = self.root / "forecasts"
+        out_dir = Path(out_dir) if out_dir is not None else self.root / "forecasts"
         out_dir.mkdir(parents=True, exist_ok=True)
         model.eval()
         builder = self.builder(model, augment=False)
@@ -397,7 +397,8 @@ class Operational:
         sea = sea[np.isin(sea, self.sea)]
         groups = [np.arange(k, self.land.size, math.ceil(self.land.size / self.cfg.group_size))
                   for k in range(math.ceil(self.land.size / self.cfg.group_size))]
-        todo = [int(i) for i in self.eval_inits if not (out_dir / f"{_day(i)}.npz").exists()]
+        inits = self.eval_inits if inits is None else np.asarray(inits, np.int64)
+        todo = [int(i) for i in inits if not (out_dir / f"{_day(i)}.npz").exists()]
         usable = set(self.usable(np.array(todo, np.int64)).tolist()) if todo else set()
         t_start = time.time()
         for n, t0 in enumerate(todo):
@@ -598,6 +599,12 @@ class Operational:
         for n in available:
             have &= np.isfinite(preds[n]["point"]).all((1, 2, 3))
         test_idx = test_idx[have[test_idx]]
+
+        def window(t0):
+            return np.flatnonzero((inits >= t0 - 24 * (cfg.lag_days + cfg.window_days)) &
+                                  (inits <= t0 - 24 * cfg.lag_days) & have)
+
+        test_idx = np.array([i for i in test_idx if window(inits[i]).size >= 10], np.int64)
         log(f"operational: {test_idx.size} test runs with every system; calibrating on the {cfg.window_days} runs "
             f"before each (outcomes known {cfg.lag_days} days earlier)")
         K = len(self.thr)
@@ -607,11 +614,7 @@ class Operational:
         chosen = {n: dict.fromkeys(kinds, 0) for n in available}
         ops = [n for n in available if n != PLUVIUM]
         for i in test_idx:
-            t0 = inits[i]
-            win = np.flatnonzero((inits >= t0 - 24 * (cfg.lag_days + cfg.window_days)) &
-                                 (inits <= t0 - 24 * cfg.lag_days) & have)
-            if win.size < 10:
-                continue
+            win = window(inits[i])
             for d in range(DAYS):
                 y_win = obs[win, d]                                                         # (W, P)
                 ok = np.isfinite(y_win)
@@ -638,12 +641,12 @@ class Operational:
                         beta = logistic_fit(feats_w, yy)
                         feats_t = np.stack([_logit(calibrated[n][i, d, k]) for n in members], 1)
                         calibrated[blend][i, d, k] = logistic_apply(beta, feats_t)
-        results = {"config": asdict(cfg), "test_runs": [_day(inits[i]) for i in test_idx],
+        results = {"config": asdict(cfg), "thresholds": list(self.thr), "test_runs": [_day(inits[i]) for i in test_idx],
                    "cells": int(self.land.size), "systems": {}, "chosen_predictor": chosen, "versus": {}}
         y_test = obs[test_idx]                                                              # (T, 3, P)
         ok_test = np.isfinite(y_test)
         ref = self.reference(inits[test_idx])                                               # (T, 3, K, P)
-        for n in available + [BLEND_OPS, BLEND_ALL]:
+        for n in available + ([BLEND_OPS, BLEND_ALL] if len(ops) > 1 else []):
             row = {"label": LABELS[n], "days": {}}
             for d in range(DAYS):
                 day_row = {}
@@ -671,7 +674,8 @@ class Operational:
                 row["days"][str(d + 1)] = day_row
             results["systems"][n] = row
         # Pluvium against every other system: per-day Brier differences, moving-block bootstrap over days
-        for other in [n for n in available + [BLEND_OPS, BLEND_ALL] if n != PLUVIUM]:
+        rivals = [n for n in available + [BLEND_OPS, BLEND_ALL] if n != PLUVIUM] if PLUVIUM in available else []
+        for other in rivals:
             comp = {}
             for d in range(DAYS):
                 for k, t in enumerate(self.thr):
@@ -696,7 +700,7 @@ def markdown(results: dict) -> str:
     cfg = results["config"]
     sys = results["systems"]
     order = [n for n in [PLUVIUM, "ens", "gefs", "ifs", "aifs", "graphcast", "gfs", BLEND_OPS, BLEND_ALL] if n in sys]
-    thr = [f"{float(t):g}" for t in cfg["thresholds"]]
+    thr = [f"{float(t):g}" for t in results.get("thresholds", cfg["thresholds"])]
     lines = [
         "# Pluvium against the operational systems",
         "",
