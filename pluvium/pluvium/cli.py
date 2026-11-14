@@ -134,7 +134,8 @@ def cmd_blend(args) -> None:
         root.mkdir(parents=True, exist_ok=True)
         area.save(root / "area.json")
         model = BlendModel.train(area, root, start=args.start, end=args.end)
-        print(f"blend for {area.name} trained on {model.meta['rows']:,} rows from {model.meta['runs']} runs; saved in {root / 'blend'}")
+        print(f"blend for {area.name} trained on {model.meta['runs']} runs at {model.meta['cells']:,} places "
+              f"({len(model.meta['components'])} components pooled); saved in {root / 'blend'}")
         return
     model = BlendModel.load(root / "blend")
     towns_path = root / "towns.npz"

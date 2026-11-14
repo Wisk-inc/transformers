@@ -38,6 +38,8 @@ Pluvium. For each it gives how the failure is detected and what the system does,
 | Hour-to-hour jitter in start times | Start-time error | Attention along each point's future, then one chain per place | `engine/temporal_mixer.py`, `chain.py` |
 | Neighbouring villages with contradicting hours | Neighbour attention | Coherent fields; correlated sampling for areas | `engine/refiner.py`, `prob/copula.py` |
 | Overconfident long range | Lead-time scores | Learned shrinkage of transitions towards climatology with lead | `engine/lead_film.py` |
+| One network over many systems learns combinations that do not carry over to a new season | Validation inside the training year: it lost to the best single system | Pluvium Blend pools each system's own post-processed forecast with about 70 weights fitted on weeks the components did not train on; it falls back towards its best component | `blend.py` (`StackPool`), `benchmarks/fullyear.py` |
+| An operational run is late or missing in daily use | No archive file for the newest run | The previous run is used at the matching lead; a system missing altogether drops out of the pool and the others are re-weighted | `blendlive.py` |
 | The network cannot run (bad checkpoint, no GPU, broken inputs) | Any exception in the forecast | A statistical fallback forecast is issued, labelled as such | `guard/fallback.py`, `forecast.py` |
 | Satellite truth under-reports downpours | Learned confusion matrices | Training never takes an instrument's word as truth | `losses.py`, `chain.py` |
 

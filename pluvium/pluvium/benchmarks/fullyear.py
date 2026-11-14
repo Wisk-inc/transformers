@@ -51,6 +51,16 @@ class FullYearConfig:
     refit_months: int = 3
     max_cells: int = 1500
     max_rows: int = 250_000
+    #: nets per model, each on its own subsample of ``members * max_rows`` training rows, chances averaged
+    members: int = 1
+    #: lead ranges (days, inclusive) that get their own nets; one range means one net for every lead
+    lead_ranges: tuple = ((1, 14),)
+    #: chance of hiding each system from a training row (blends only: the blend cannot lean on one combination)
+    system_drop: float = 0.0
+    #: Pluvium Blend as the pool of every model (each system post-processed, and the networks over several)
+    stack: bool = True
+    #: training rows for the pool's weights
+    stack_rows: int = 200_000
     thresholds: tuple = B.SCORED
     seed: int = 0
     #: days whose forecasts are kept in full for case studies (Hurricane Melissa struck Jamaica on 28 October 2025)
@@ -372,10 +382,84 @@ class Scores:
 
 # ------------------------------------------------------------------------------------ one region --
 
+def _fit_model(table: dict, idx: np.ndarray, members: list, n: int, cfg: FullYearConfig):
+    """One model (a single system, or a network over several) on blocks ``idx``: the net and its CSI cuts."""
+    x, y, _ = rows_for(table, idx, members, n, max_rows=cfg.max_rows * cfg.members, seed=cfg.seed)
+    if x.shape[0] == 0:
+        return None
+    groups = B.system_groups(members, ENSEMBLES) if len(members) > 1 else None
+    net = B.fit(x, y, seed=cfg.seed, max_rows=cfg.max_rows, members=cfg.members, groups=groups, drop=cfg.system_drop)
+    pick = np.random.default_rng(cfg.seed).choice(x.shape[0], min(200_000, x.shape[0]), replace=False)
+    p = B.predict(net, x[pick])
+    return net, {f"{t:g}": best_cut(B.exceed(p, t), y[pick] >= t) for t in cfg.thresholds}
+
+
+def _usable(table: dict, blocks, name: str, members: list, systems) -> np.ndarray:
+    """Blocks a model can forecast: single systems only where they exist, networks over several where any does."""
+    if name in systems or name == "neural_pp":
+        return np.asarray([i for i in blocks if table["feats"][members[0]][i] is not None], np.int64)
+    return np.asarray([i for i in blocks if any(table["feats"][s][i] is not None for s in members)], np.int64)
+
+
+def _rows_x(table: dict, i: int, members: list, n: int) -> np.ndarray:
+    return B.assemble({s: table["feats"][s][i] for s in members}, members, ENSEMBLES, table["clim"][i],
+                      float(table["lead"][i]), n)
+
+
+def torch_lead(days: np.ndarray):
+    """Leads in days as the pool's input (days / 14)."""
+    import torch
+
+    return torch.from_numpy(np.asarray(days, np.float32) / 14.0)
+
+
+def _fit_stack(table: dict, train: np.ndarray, models: dict, systems, n: int, cfg: FullYearConfig):
+    """Pluvium Blend's pool, fitted on forecasts each component made for weeks it was not trained on (two folds
+    of alternate weeks, by the day forecast, so no fold model ever saw the truth it is judged on)."""
+    runs, leads = table["run"], table["lead"]
+    week = ((runs + 24 * (leads - 1)) // (24 * 7)) % 2
+    names = list(models)
+    rows = _usable(table, train, "stack", sorted({s for m in models.values() for s in m}), systems)
+    rng = np.random.default_rng(cfg.seed + 7)
+    take = max(1, min(n, int(np.ceil(cfg.stack_rows / max(rows.size, 1)))))
+    cells = {int(i): (np.arange(n) if take >= n else np.sort(rng.choice(n, take, replace=False))) for i in rows}
+    order = [(int(i), c) for i in rows for c in [cells[int(i)]]]
+    offsets = np.cumsum([0] + [c.size for _, c in order])
+    total = int(offsets[-1])
+    z = np.zeros((total, len(names), len(B.THRESHOLDS)), np.float32)
+    present = np.zeros((total, len(names)), np.float32)
+    for k, name in enumerate(names):
+        members = models[name]
+        usable = _usable(table, train, name, members, systems)
+        for fold in (0, 1):
+            fitted = _fit_model(table, usable[week[usable] != fold], members, n, cfg)
+            if fitted is None:
+                continue
+            net, _ = fitted
+            for r, (i, c) in enumerate(order):
+                if week[i] != fold or (name in systems or name == "neural_pp") and table["feats"][members[0]][i] is None:
+                    continue
+                if not any(table["feats"][s][i] is not None for s in members):
+                    continue
+                z[offsets[r]:offsets[r + 1], k] = B.to_logits(B.predict(net, _rows_x(table, i, members, n)[c]))
+                present[offsets[r]:offsets[r + 1], k] = 1.0
+    y = np.concatenate([table["y"][i][c] for i, c in order])
+    lead = np.concatenate([np.full(c.size, float(leads[i])) for i, c in order])
+    pool = B.fit_stack(z, present, lead, y)
+    p = B.predict_stack(pool, z, present, lead)
+    ok = np.isfinite(y)
+    cuts = {f"{t:g}": best_cut(B.exceed(p[ok], t), y[ok] >= t) for t in cfg.thresholds}
+    w = pool.weights(torch_lead(np.array([1.0, 7.0, 14.0]))).detach().numpy()[:, [2, 7]]   # 1 and 10 mm
+    log("  pool weights at 1 mm and 10 mm (days 1, 7, 14): " + ", ".join(
+        f"{m} {w[0, 0, j]:.2f}/{w[1, 0, j]:.2f}/{w[2, 0, j]:.2f} | {w[0, 1, j]:.2f}/{w[1, 1, j]:.2f}/{w[2, 1, j]:.2f}"
+        for j, m in enumerate(names)))
+    return pool, names, cuts
+
+
 def evaluate_cells(cells: CellSet, table: dict, cfg: FullYearConfig, systems, with_neural: bool = False,
                    scores=None) -> dict:
     """Train (quarterly, expanding) and score every model on one set of cells (``scores`` already holds the raw
-    systems, scored while the table was built)."""
+    systems, scored while the table was built). With ``cfg.stack``, Pluvium Blend is the pool of every model."""
     n = len(cells)
     runs, leads = table["run"], table["lead"]
     valid_end = runs + 24 * leads                                                 # when each block's truth is known
@@ -392,6 +476,7 @@ def evaluate_cells(cells: CellSet, table: dict, cfg: FullYearConfig, systems, wi
     if with_neural:
         models["neural_pp"] = ["neural"]
         models["blend"] = list(systems) + ["neural"]
+    stacking = cfg.stack and len(cfg.lead_ranges) == 1
     scores = scores if scores is not None else Scores(cfg.thresholds)
     test_blocks = np.flatnonzero((runs >= test_start) & (runs < test_end))
     for a, b in zip(refits[:-1], refits[1:]):
@@ -400,27 +485,32 @@ def evaluate_cells(cells: CellSet, table: dict, cfg: FullYearConfig, systems, wi
         if test.size == 0 or train.size == 0:
             continue
         log(f"  {cells.name}: fitting for {_day(a)} to {_day(b)} on {train.size} blocks ({train.size * n:,} rows)")
+        fitted = {}
         for name, members in models.items():
-            usable = [i for i in train if any(table["feats"][s][i] is not None for s in members)]
-            if name in systems or name == "neural_pp":                       # single systems: only where they exist
-                usable = [i for i in train if table["feats"][members[0]][i] is not None]
-            x, y, _ = rows_for(table, np.asarray(usable, np.int64), members, n, max_rows=cfg.max_rows, seed=cfg.seed)
-            if x.shape[0] == 0:
-                continue
-            net = B.fit(x, y, seed=cfg.seed, max_rows=cfg.max_rows)
-            cut_rows = np.random.default_rng(cfg.seed).choice(x.shape[0], min(200_000, x.shape[0]), replace=False)
-            p_train = B.predict(net, x[cut_rows])
-            cuts = {f"{t:g}": best_cut(B.exceed(p_train, t), y[cut_rows] >= t) for t in cfg.thresholds}
-            for i in test:
-                if name in systems and table["feats"][name][i] is None:
+            usable = _usable(table, train, name, members, systems)
+            fitted[name] = [(lo, hi, _fit_model(table, usable[(leads[usable] >= lo) & (leads[usable] <= hi)], members,
+                                                n, cfg)) for lo, hi in cfg.lead_ranges]
+        pool = _fit_stack(table, train, models, systems, n, cfg) if stacking else None
+        for i in test:
+            z = np.zeros((n, len(models), len(B.THRESHOLDS)), np.float32)
+            present = np.zeros((n, len(models)), np.float32)
+            for k, (name, members) in enumerate(models.items()):
+                if (name in systems or name == "neural_pp") and table["feats"][members[0]][i] is None:
                     continue
-                if name == "neural_pp" and table["feats"]["neural"][i] is None:
+                if not any(table["feats"][s][i] is not None for s in members):
                     continue
-                xi = B.assemble({s: table["feats"][s][i] for s in members}, members, ENSEMBLES, table["clim"][i],
-                                float(leads[i]), n)
-                p = B.predict(net, xi)
-                q = B.quantiles(p)
-                _score(scores, name, i, table, p=p, q=q, cuts=cuts)
+                fit_ = next((f for lo, hi, f in fitted[name] if lo <= leads[i] <= hi), None)
+                if fit_ is None:
+                    continue
+                net, cuts = fit_
+                p = B.predict(net, _rows_x(table, i, members, n))
+                _score(scores, name, i, table, p=p, q=B.quantiles(p), cuts=cuts)
+                z[:, k], present[:, k] = B.to_logits(p), 1.0
+            if pool is not None and present.any():
+                p = B.predict_stack(pool[0], z, present, float(leads[i]))
+                _score(scores, "stack", i, table, p=p, q=B.quantiles(p), cuts=pool[2])
+    if stacking:
+        models["stack"] = list(models)
     return _report(scores, cells, models, systems, with_neural, cfg)
 
 
@@ -465,11 +555,12 @@ def _report(scores: Scores, cells: CellSet, models: dict, systems, with_neural: 
     for g, leads in LEAD_GROUPS.items():
         out["groups"][g] = {m: scores.summary(m, leads) for m in names}
         out["seasons"][g] = {season: {m: scores.summary(m, leads, season) for m in names} for season in SEASONS}
-    top = "blend" if with_neural else "blend_ops"
+    top = "stack" if "stack" in models else ("blend" if with_neural else "blend_ops")
+    rivals = list(systems) + [m for m in ("blend_ops", "neural_pp", "blend") if m in models and m != top]
     for g, leads in LEAD_GROUPS.items():
         for t in cfg.thresholds[:2]:
             mine = scores.by_run(top, leads, t)
-            for rival in [s for s in systems] + (["blend_ops"] if with_neural else []):
+            for rival in rivals:
                 theirs = scores.by_run(rival, leads, t)
                 common = sorted(set(mine) & set(theirs))
                 if len(common) < 3:
@@ -585,12 +676,20 @@ def main(argv=None) -> None:
     p.add_argument("--out", required=True)
     p.add_argument("--regions", default=",".join(REGIONS))
     p.add_argument("--threads", type=int, default=None)
+    p.add_argument("--members", type=int, default=FullYearConfig.members, help="nets per model (a bag)")
+    p.add_argument("--max-rows", type=int, default=FullYearConfig.max_rows, help="training rows per net")
+    p.add_argument("--lead-ranges", default=None, help="lead ranges with their own nets, e.g. 1-3,4-14")
+    p.add_argument("--system-drop", type=float, default=FullYearConfig.system_drop,
+                   help="chance of hiding each system from a blend's training row")
     a = p.parse_args(argv)
     if a.threads:
         import torch
 
         torch.set_num_threads(a.threads)
-    cfg = FullYearConfig(archive=a.archive, truth=a.truth, out=a.out, regions=tuple(a.regions.split(",")))
+    ranges = FullYearConfig.lead_ranges if not a.lead_ranges else \
+        tuple(tuple(int(v) for v in r.split("-")) for r in a.lead_ranges.split(","))
+    cfg = FullYearConfig(archive=a.archive, truth=a.truth, out=a.out, regions=tuple(a.regions.split(",")),
+                         members=a.members, max_rows=a.max_rows, lead_ranges=ranges, system_drop=a.system_drop)
     (Path(cfg.out)).mkdir(parents=True, exist_ok=True)
     (Path(cfg.out) / "config.json").write_text(json.dumps(asdict(cfg), indent=1))
     for region in cfg.regions:
@@ -609,15 +708,19 @@ REGION_TITLES = {"caribbean": "Caribbean (tropical islands and coasts)", "mariti
                  "jamaica": "Jamaica at 8 km (with Pluvium's network)"}
 
 
-def _name(m: str, with_network: bool = False) -> str:
+def _name(m: str, with_network: bool = False, stacked: bool = True) -> str:
     if m.endswith("_raw"):
         return f"{LABELS.get(m[:-4], m[:-4])} (raw)"
+    if m == "stack":
+        return "Pluvium Blend (with Pluvium's network)" if with_network else "Pluvium Blend"
     if m == "blend_ops":
+        if stacked:
+            return "One network over the six (a Blend component)"
         return "Blend of the six (no Pluvium network)" if with_network else "Pluvium Blend"
     if m == "neural_pp":
         return "Pluvium network (post-processed)"
     if m == "blend":
-        return "Pluvium Blend (with Pluvium's network)"
+        return "One network over all seven (a Blend component)" if stacked else "Pluvium Blend (with Pluvium's network)"
     return f"{LABELS.get(m, m)} (post-processed)"
 
 
@@ -633,6 +736,93 @@ def leaders(res: dict, group: str, key: str, t: str | None = None, higher: bool 
     return sorted(rows, reverse=higher)
 
 
+#: (title, key, threshold, higher is better) for the scoreboard
+BOARD = (("Brier skill, 1 mm", "bss", "1", True), ("Brier skill, 10 mm", "bss", "10", True),
+         ("Brier skill, 25 mm", "bss", "25", True), ("Brier skill, 50 mm", "bss", "50", True),
+         ("CSI, 1 mm", "csi", "1", True), ("CSI, 10 mm", "csi", "10", True), ("ROC area, 1 mm", "auc", "1", True),
+         ("CRPS", "crps", None, False), ("RMSE", "rmse", None, False), ("ACC", "acc", None, True))
+
+
+def _value(v: dict, key: str, t: str | None) -> float:
+    if not v:
+        return float("nan")
+    x = v[t][key] if t else v[key]
+    return float(x) if x is not None else float("nan")
+
+
+def _top(res: dict) -> str:
+    g = res["groups"]["days 1-3"]
+    return "stack" if g.get("stack") else ("blend" if g.get("blend") else "blend_ops")
+
+
+def _ctx(res: dict) -> tuple[bool, bool]:
+    """(Pluvium's network present, Blend stacked) for naming."""
+    g = res["groups"]["days 1-3"]
+    return bool(g.get("neural_pp") or g.get("blend")), bool(g.get("stack"))
+
+
+def scoreboard(results: dict, group_of=LEAD_GROUPS, season: str | None = None) -> list[str]:
+    """For every score and lead group: in how many places Pluvium's top product beat every other system, raw and
+    post-processed (Pluvium's own variants are not counted as rivals)."""
+    ours = {"stack", "blend", "blend_ops", "neural_pp", "neural_raw"}
+    lines = ["| Score | " + " | ".join(group_of) + " |", "|---|" + "---|" * len(group_of)]
+    for title, key, t, higher in BOARD:
+        cells = []
+        for g in group_of:
+            won = total = 0
+            for res in results.values():
+                rows = res["groups"][g] if season is None else res["seasons"][g][season]
+                mine = _value(rows.get(_top(res)), key, t)
+                theirs = [_value(v, key, t) for m, v in rows.items() if m not in ours and v]
+                theirs = [x for x in theirs if x == x]
+                if mine != mine or not theirs:
+                    continue
+                total += 1
+                won += (mine > max(theirs)) if higher else (mine < min(theirs))
+            cells.append(f"{won} of {total}" if total else "-")
+        lines.append(f"| {title} | " + " | ".join(cells) + " |")
+    for t in ("25", "50"):                                  # the reference every system struggles with at rare amounts
+        cells = []
+        for g in group_of:
+            won = total = 0
+            for res in results.values():
+                rows = res["groups"][g] if season is None else res["seasons"][g][season]
+                v = rows.get(_top(res))
+                if not v:
+                    continue
+                total += 1
+                won += v[t]["bss"] > v[t]["never"]
+            cells.append(f"{won} of {total}" if total else "-")
+        lines.append(f"| Better than never saying rain, {t} mm | " + " | ".join(cells) + " |")
+    return lines
+
+
+def melissa(res: dict, day: str = "2025-10-28") -> list[str]:
+    """Hurricane Melissa's landfall day: every system's chance of 50 mm or more and expected rain, by how far ahead."""
+    rows = [c for c in res.get("cases", []) if c["valid"] == day]
+    if not rows:
+        return []
+    obs = rows[0]
+    leads = sorted({c["lead"] for c in rows})
+    models = []
+    for c in rows:
+        if c["model"] not in models:
+            models.append(c["model"])
+    net, stacked = _ctx(res)
+    lines = [f"Observed on {day} (CMORPH): {obs['observed_mean_mm']:.0f} mm on average over the cells, up to "
+             f"{obs['observed_max_mm']:.0f} mm; {100 * obs['observed_share_50']:.0f}% of cells had 50 mm or more and "
+             f"{100 * obs['observed_share_100']:.0f}% had 100 mm or more.", "",
+             "Each cell: the chance of 50 mm or more, averaged over the cells, then the expected rain (mm).", "",
+             "| System | " + " | ".join(f"{lead} days ahead" for lead in leads) + " |", "|---|" + "---|" * len(leads)]
+    for m in models:
+        cells = []
+        for lead in leads:
+            c = next((c for c in rows if c["model"] == m and c["lead"] == lead), None)
+            cells.append("-" if c is None else f"{100 * c['p50']:.0f}%, {c['forecast_mean_mm']:.0f} mm")
+        lines.append(f"| {_name(m, net, stacked)} | " + " | ".join(cells) + " |")
+    return lines
+
+
 def markdown(results: dict, cfg: dict) -> str:
     """The full-year benchmark as Markdown: one section per region, the leader of every score marked."""
     lines = ["# Pluvium Blend against the operational systems: a full year, 14 days, around the world", "",
@@ -642,7 +832,7 @@ def markdown(results: dict, cfg: dict) -> str:
              "the same post-processing; **bold** marks the best of all.", ""]
     for region, res in results.items():
         lines += [f"## {REGION_TITLES.get(region, region)}", "", f"{res['cells']:,} land cells.", ""]
-        net = "blend" in res["groups"]["days 1-3"]
+        net, stacked = _ctx(res)
         for t in ("1", "10", "25"):
             lines += [f"**Brier skill score, {t} mm or more** (higher is better; 0 is climatology)", "",
                       "| System | " + " | ".join(LEAD_GROUPS) + " |", "|---|" + "---|" * len(LEAD_GROUPS)]
@@ -657,7 +847,7 @@ def markdown(results: dict, cfg: dict) -> str:
                         continue
                     txt = f"{v[t]['bss']:+.3f}"
                     cells.append(f"**{txt}**" if best[g] == m else txt)
-                lines.append(f"| {_name(m, net)} | " + " | ".join(cells) + " |")
+                lines.append(f"| {_name(m, net, stacked)} | " + " | ".join(cells) + " |")
             never = [res["groups"][g][models[0]][t]["never"] if res["groups"][g].get(models[0]) else float("nan")
                      for g in LEAD_GROUPS]
             lines += ["| *never says rain* | " + " | ".join(f"*{v:+.3f}*" for v in never) + " |", ""]
@@ -674,11 +864,11 @@ def markdown(results: dict, cfg: dict) -> str:
             def fmt(key, val, digits=3):
                 s_ = f"{val:.{digits}f}"
                 return f"**{s_}**" if marks[key] and marks[key][0][1] == m else s_
-            lines.append(f"| {_name(m, net)} | {fmt('csi1', v['1']['csi'])} | {fmt('csi10', v['10']['csi'])} | "
+            lines.append(f"| {_name(m, net, stacked)} | {fmt('csi1', v['1']['csi'])} | {fmt('csi10', v['10']['csi'])} | "
                          f"{fmt('crps', v['crps'], 2)} | {fmt('rmse', v['rmse'], 2)} | {fmt('acc', v['acc'])} | "
                          f"{v['sharpness']:.2f} |")
         lines.append("")
-        top = "blend" if net else "blend_ops"
+        top = _top(res)
         singles = [m for m in res["leads"].get("1", {}) if m in ARCHIVE_SYSTEMS]
         lines += ["**Lead by lead, 1 mm or more** (Brier skill score; the best post-processed system named)", "",
                   "| Day | Pluvium Blend | Best other (post-processed) | ECMWF ENS (raw) | Pluvium lead |",
@@ -688,23 +878,23 @@ def markdown(results: dict, cfg: dict) -> str:
             if not row.get(top):
                 continue
             mine = row[top]["1"]["bss"]
-            rivals = [(row[m]["1"]["bss"], m) for m in singles + (["blend_ops"] if net else []) if row.get(m)]
+            rivals = [(row[m]["1"]["bss"], m) for m in singles if row.get(m)]
             best_v, best_m = max(rivals) if rivals else (float("nan"), "-")
             ens = row.get("ens_raw", {}).get("1", {}).get("bss", float("nan"))
-            lines.append(f"| {lead} | {mine:+.3f} | {best_v:+.3f} ({_name(best_m, net)}) | {ens:+.3f} | {mine - best_v:+.3f} |")
+            lines.append(f"| {lead} | {mine:+.3f} | {best_v:+.3f} ({_name(best_m, net, stacked)}) | {ens:+.3f} | {mine - best_v:+.3f} |")
         lines += ["", "**By season, days 1-3, 1 mm or more** (Brier skill score)", "",
                   "| Season | Pluvium Blend | Best other (post-processed) |", "|---|---|---|"]
         for season in SEASONS:
             row = res["seasons"]["days 1-3"][season]
             if not row.get(top):
                 continue
-            rivals = [(row[m]["1"]["bss"], m) for m in singles + (["blend_ops"] if net else []) if row.get(m)]
+            rivals = [(row[m]["1"]["bss"], m) for m in singles if row.get(m)]
             best_v, best_m = max(rivals) if rivals else (float("nan"), "-")
-            lines.append(f"| {season} | {row[top]['1']['bss']:+.3f} | {best_v:+.3f} ({_name(best_m, net)}) |")
+            lines.append(f"| {season} | {row[top]['1']['bss']:+.3f} | {best_v:+.3f} ({_name(best_m, net, stacked)}) |")
         lines.append("")
         vs = res.get("versus", {})
         if vs:
-            top = "Pluvium Blend (with Pluvium's network)" if "blend" in res["groups"]["days 1-3"] else "Pluvium Blend"
+            top = _name(_top(res), net, stacked)
             lines += [f"**{top} against each post-processed system**: Brier score difference at 1 mm (negative: "
                       "Pluvium better), 95% block-bootstrap interval over runs. Bold when Pluvium is better with 95% "
                       "confidence.", "", "| Against | " + " | ".join(LEAD_GROUPS) + " |", "|---|" + "---|" * len(LEAD_GROUPS)]
@@ -718,6 +908,6 @@ def markdown(results: dict, cfg: dict) -> str:
                         continue
                     txt = f"{c['delta_bs']:+.4f} [{c['ci95'][0]:+.4f}, {c['ci95'][1]:+.4f}]"
                     cells.append(f"**{txt}**" if c["ci95"][1] < 0 else txt)
-                lines.append(f"| {_name(r, net)} | " + " | ".join(cells) + " |")
+                lines.append(f"| {_name(r, net, stacked)} | " + " | ".join(cells) + " |")
             lines.append("")
     return "\n".join(lines) + "\n"

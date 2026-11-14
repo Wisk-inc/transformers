@@ -31,14 +31,25 @@ LATENCY = {"ens": 8, "gefs": 6, "ifs": 7, "aifs": 7, "graphcast": 6, "gfs": 5}
 
 
 class BlendModel:
-    def __init__(self, net: B.BlendNet, systems: list, area_json: dict, clim: dict, grid: tuple, meta: dict) -> None:
-        self.net, self.systems, self.area_json, self.clim, self.grid, self.meta = net, systems, area_json, clim, grid, meta
+    """A trained Pluvium Blend: each system post-processed on its own, one network over all of them, and the pool
+    that weighs them (:class:`pluvium.blend.StackPool`). Models saved before the pool existed hold one network."""
+
+    def __init__(self, nets: dict, pool, systems: list, area_json: dict, clim: dict, grid: tuple, meta: dict) -> None:
+        self.nets, self.pool, self.systems = nets, pool, systems
+        self.area_json, self.clim, self.grid, self.meta = area_json, clim, grid, meta
+
+    def components(self) -> dict:
+        """name -> the systems it reads, in the pool's order."""
+        out = {s: [s] for s in self.systems if s in self.nets}
+        if "all" in self.nets:
+            out["all"] = list(self.systems)
+        return out
 
     # ------------------------------------------------------------------------------------- train --
     @classmethod
     def train(cls, area, root, start: str = "2024-04-01T00", end: str = "2025-04-01T00", workers: int = 8,
               max_cells: int = 1500, max_rows: int = 400_000) -> BlendModel:
-        from .benchmarks.fullyear import CellSet, build_table, land_mask, rows_for
+        from .benchmarks.fullyear import CellSet, FullYearConfig, _fit_model, _fit_stack, _usable, build_table, land_mask
         from .sources.cmorph_daily import DailyTruth, stage_daily
 
         root = Path(root).expanduser()
@@ -59,15 +70,26 @@ class BlendModel:
         cells = CellSet(lat[ii], lon[jj], lambda h: truth.days(area.name, [h])[0][ii, jj], area.name)
         cells.climatology(np.arange(a, hour_of(end), 24))
         table = build_table(cells, reader, area.name, runs, set(int(r) for r in long))
-        x, y, _ = rows_for(table, np.arange(len(table["run"])), list(ARCHIVE_SYSTEMS), len(cells), max_rows=max_rows)
-        net = B.fit(x, y, max_rows=max_rows)
+        systems = list(ARCHIVE_SYSTEMS)
+        models = {s: [s] for s in systems}
+        models["all"] = systems
+        cfg = FullYearConfig(archive="", truth="", out="", max_rows=max_rows)
+        every = np.arange(len(table["run"]))
+        nets = {}
+        for name, members in models.items():
+            fitted = _fit_model(table, _usable(table, every, name, members, systems), members, len(cells), cfg)
+            if fitted is not None:
+                nets[name] = fitted[0]
+        models = {k: v for k, v in models.items() if k in nets}
+        pool, _, _ = _fit_stack(table, every, models, systems, len(cells), cfg)
         # the climatology on the whole grid (every cell, not only the scored ones), by month
         full = CellSet(np.repeat(lat, lon.size), np.tile(lon, lat.size),
                        lambda h: truth.days(area.name, [h])[0].ravel(), area.name)
         full.climatology(np.arange(a, hour_of(end), 24))
         clim = {m: {k: v.reshape(lat.size, lon.size) for k, v in full.clim[m].items()} for m in full.clim}
-        model = cls(net, list(ARCHIVE_SYSTEMS), area.to_json(), clim, (lat, lon),
-                    {"trained": [start, end], "runs": int(len(runs)), "rows": int(x.shape[0]), "cells": int(len(cells))})
+        model = cls(nets, pool, systems, area.to_json(), clim, (lat, lon),
+                    {"trained": [start, end], "runs": int(len(runs)), "cells": int(len(cells)),
+                     "components": list(models)})
         model.save(root / "blend")
         return model
 
@@ -75,7 +97,10 @@ class BlendModel:
     def save(self, directory) -> Path:
         d = Path(directory).expanduser()
         d.mkdir(parents=True, exist_ok=True)
-        torch.save({"state": self.net.state_dict(), "n_in": self.net.mu.numel()}, d / "blend.pt")
+        torch.save({"nets": {k: net.state_dict() for k, net in self.nets.items()},
+                    "n_in": {k: int(net.mu.numel()) for k, net in self.nets.items()},
+                    "pool": None if self.pool is None else self.pool.state_dict(),
+                    "components": list(self.components())}, d / "blend.pt")
         np.savez_compressed(d / "climatology.npz", lat=self.grid[0], lon=self.grid[1],
                             **{f"{k}_{m:02d}": v for m, entry in self.clim.items() for k, v in entry.items()})
         (d / "blend.json").write_text(json.dumps({"systems": self.systems, "area": self.area_json, "meta": self.meta,
@@ -87,9 +112,22 @@ class BlendModel:
         d = Path(directory).expanduser()
         meta = json.loads((d / "blend.json").read_text())
         state = torch.load(d / "blend.pt", map_location="cpu", weights_only=False)
-        net = B.BlendNet(int(state["n_in"]))
-        net.load_state_dict(state["state"])
-        net.eval()
+        if "nets" in state:
+            nets = {}
+            for k, sd in state["nets"].items():
+                nets[k] = B.BlendNet(int(state["n_in"][k]))
+                nets[k].load_state_dict(sd)
+                nets[k].eval()
+            pool = None
+            if state.get("pool") is not None:
+                pool = B.StackPool(len(state["components"]))
+                pool.load_state_dict(state["pool"])
+                pool.eval()
+        else:                                                           # saved before the pool: one network
+            net = B.BlendNet(int(state["n_in"]))
+            net.load_state_dict(state["state"])
+            net.eval()
+            nets, pool = {"all": net}, None
         z = np.load(d / "climatology.npz")
         clim = {}
         for key in z.files:
@@ -97,7 +135,7 @@ class BlendModel:
                 continue
             name, m = key.rsplit("_", 1)
             clim.setdefault(int(m), {})[name] = z[key]
-        return cls(net, meta["systems"], meta["area"], clim, (z["lat"], z["lon"]), meta["meta"])
+        return cls(nets, pool, meta["systems"], meta["area"], clim, (z["lat"], z["lon"]), meta["meta"])
 
     # ---------------------------------------------------------------------------------- forecast --
     def _clim_at(self, lat: np.ndarray, lon: np.ndarray, month: int) -> dict:
@@ -105,6 +143,21 @@ class BlendModel:
         i = np.clip(np.round((lat - glat[0]) / (glat[1] - glat[0])).astype(int), 0, glat.size - 1)
         j = np.clip(np.round((lon - glon[0]) / (glon[1] - glon[0])).astype(int), 0, glon.size - 1)
         return {k: v[i, j] for k, v in self.clim[month].items()}
+
+    def chances(self, per: dict, clim: dict, lead: float, n: int) -> np.ndarray:
+        """P(rain >= THRESHOLDS) at ``n`` places from each system's features ``per`` (missing systems absent)."""
+        comps = self.components()
+        if self.pool is None:
+            return B.predict(self.nets["all"], B.assemble(per, self.systems, {"ens", "gefs"}, clim, lead, n))
+        z = np.zeros((n, len(comps), len(B.THRESHOLDS)), np.float32)
+        present = np.zeros((n, len(comps)), np.float32)
+        for k, (name, members) in enumerate(comps.items()):
+            if not any(per.get(s) is not None for s in members):
+                continue
+            x = B.assemble({s: per.get(s) for s in members}, members, {"ens", "gefs"}, clim, lead, n)
+            z[:, k] = B.to_logits(B.predict(self.nets[name], x))
+            present[:, k] = 1.0
+        return B.predict_stack(self.pool, z, present, lead)
 
     def forecast(self, lat, lon, cache, now: int | None = None, days: int = DAYS) -> dict:
         """Daily chances and amounts at points for days 1..``days`` from 00 UTC of the day of ``now`` (UTC hour)."""
@@ -140,8 +193,7 @@ class BlendModel:
                         f.pop("_members", None)
                         per[system] = f
             clim = self._clim_at(lat, lon, int(str(hour_to_datetime64(valid))[5:7]))
-            x = B.assemble(per, self.systems, {"ens", "gefs"}, clim, float(d), lat.size)
-            p = B.predict(self.net, x)
+            p = self.chances(per, clim, float(d), lat.size)
             q = B.quantiles(p)
             out["days"].append({"date": str(hour_to_datetime64(valid))[:10], "systems": sorted(per),
                                 **{f"p_ge_{int(t)}": B.exceed(p, t) for t in B.SCORED},

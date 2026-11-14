@@ -104,9 +104,43 @@ class BlendNet(nn.Module):
         return torch.sigmoid(self.logits(x))
 
 
+class BlendBag(nn.Module):
+    """Several BlendNets trained from different seeds on different subsamples; their chances are averaged (an
+    average of decreasing curves is decreasing, so the chances still never contradict each other)."""
+
+    def __init__(self, nets: list) -> None:
+        super().__init__()
+        self.nets = nn.ModuleList(nets)
+
+    @property
+    def mu(self) -> torch.Tensor:                        # the input size, as for a single net
+        return self.nets[0].mu
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.stack([net(x) for net in self.nets]).mean(0)
+
+
 def fit(x: np.ndarray, y: np.ndarray, seed: int = 0, epochs: int = 6, max_rows: int = 400_000, batch: int = 2048,
-        lr: float = 3e-3, width: int = 48, min_steps: int = 1200) -> BlendNet:
-    """Train on rows ``x`` (N, F) and observed daily rain ``y`` (N,) mm; rows with NaN rain are dropped."""
+        lr: float = 3e-3, width: int = 48, min_steps: int = 1200, members: int = 1, groups: list | None = None,
+        drop: float = 0.0) -> BlendNet | BlendBag:
+    """Train on rows ``x`` (N, F) and observed daily rain ``y`` (N,) mm; rows with NaN rain are dropped. With
+    ``members`` > 1, a bag of that many nets (seeds ``seed``, ``seed + 1`` ...), each on its own subsample.
+
+    ``groups`` (column indices of each system, its ``present`` flag included) and ``drop`` hide each system from each
+    training row with that chance, as if it had not arrived: the blend then cannot lean on one combination of systems
+    and still forecasts well when one is missing."""
+    one = lambda k: _fit_one(x, y, seed + k, epochs, max_rows, batch, lr, width, min_steps, groups, drop)   # noqa: E731
+    return BlendBag([one(k) for k in range(members)]) if members > 1 else one(0)
+
+
+def system_groups(systems: list[str], ensembles: set) -> list[np.ndarray]:
+    """Column indices of each system's features in :func:`assemble`'s rows (for ``fit(groups=...)``)."""
+    names = feature_names(systems, ensembles)
+    return [np.array([i for i, n in enumerate(names) if n.split(":")[0] == s]) for s in systems]
+
+
+def _fit_one(x: np.ndarray, y: np.ndarray, seed: int, epochs: int, max_rows: int, batch: int, lr: float, width: int,
+             min_steps: int, groups: list | None = None, drop: float = 0.0) -> BlendNet:
     rng = np.random.default_rng(seed)
     keep = np.isfinite(y)
     x, y = x[keep], y[keep]
@@ -131,7 +165,14 @@ def fit(x: np.ndarray, y: np.ndarray, seed: int = 0, epochs: int = 6, max_rows: 
             if done >= steps:
                 break
             idx = order[i:i + batch]
-            loss = nn.functional.binary_cross_entropy_with_logits(net.logits(xt[idx]), yt[idx])
+            xb = xt[idx]
+            if groups and drop > 0:                                  # hide whole systems, as if they had not arrived
+                hide = torch.rand(xb.shape[0], len(groups)) < drop
+                keep = torch.ones_like(xb)
+                for g, cols in enumerate(groups):
+                    keep[:, torch.as_tensor(cols)] = (~hide[:, g:g + 1]).float()
+                xb = xb * keep
+            loss = nn.functional.binary_cross_entropy_with_logits(net.logits(xb), yt[idx])
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -141,8 +182,80 @@ def fit(x: np.ndarray, y: np.ndarray, seed: int = 0, epochs: int = 6, max_rows: 
     return net
 
 
+class StackPool(nn.Module):
+    """Pluvium Blend's last step: a weighted logarithmic pool of calibrated forecasts (each system post-processed on its
+    own, and networks over several). Each component has a weight per band of thresholds (light, moderate and heavy
+    rain), changing with lead; the pool averages the present components' log-odds with those weights, sharpens by
+    their total, and adds an offset per threshold that also changes with lead. About 70 parameters, fitted on
+    forecasts the components made for weeks they were not trained on: it cannot overfit, and it can always fall back
+    to its best component."""
+
+    #: the first threshold index of each band (0.2-3 mm, 5-25 mm, 35-150 mm)
+    BANDS = (0, 5, 11)
+
+    def __init__(self, n_comp: int, n_thr: int = len(THRESHOLDS), bands: tuple = BANDS) -> None:
+        super().__init__()
+        band = np.searchsorted(np.asarray(bands), np.arange(n_thr), side="right") - 1
+        self.register_buffer("band", torch.as_tensor(band, dtype=torch.long))
+        start = float(np.log(np.expm1(1.0 / n_comp)))                                     # weights start at 1/C
+        self.a = nn.Parameter(torch.full((len(bands), n_comp), start))
+        self.d = nn.Parameter(torch.zeros(len(bands), n_comp))
+        self.b = nn.Parameter(torch.zeros(n_thr))
+        self.e = nn.Parameter(torch.zeros(n_thr))
+
+    def weights(self, lead: torch.Tensor) -> torch.Tensor:
+        """(N, K, C): each component's weight at each threshold."""
+        return nn.functional.softplus(self.a[self.band][None] + self.d[self.band][None] * lead[:, None, None])
+
+    def logits(self, z: torch.Tensor, present: torch.Tensor, lead: torch.Tensor) -> torch.Tensor:
+        w = self.weights(lead)
+        wp = w * present[:, None, :]
+        zt = z.transpose(1, 2)                                                              # (N, K, C)
+        mean = (wp * zt).sum(-1) / wp.sum(-1).clamp_min(1e-6)
+        return w.sum(-1) * mean + self.b[None] + self.e[None] * lead[:, None]
+
+    def forward(self, z: torch.Tensor, present: torch.Tensor, lead: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(self.logits(z, present, lead))
+
+
+def to_logits(p: np.ndarray) -> np.ndarray:
+    p = np.clip(p, 1e-4, 1 - 1e-4)
+    return np.log(p / (1 - p)).astype(np.float32)
+
+
+def fit_stack(z: np.ndarray, present: np.ndarray, lead: np.ndarray, y: np.ndarray, iters: int = 150) -> StackPool:
+    """``z`` (N, C, K) components' log-odds of each threshold, ``present`` (N, C), ``lead`` (N,) days, ``y`` (N,) mm."""
+    keep = np.isfinite(y)
+    zt = torch.from_numpy(np.ascontiguousarray(z[keep], np.float32))
+    pt = torch.from_numpy(present[keep].astype(np.float32))
+    lt = torch.from_numpy((lead[keep] / 14.0).astype(np.float32))
+    yt = torch.from_numpy((y[keep, None] >= THRESHOLDS[None]).astype(np.float32))
+    pool = StackPool(z.shape[1], z.shape[2])
+    opt = torch.optim.LBFGS(pool.parameters(), lr=0.5, max_iter=iters, line_search_fn="strong_wolfe")
+
+    def closure():
+        opt.zero_grad()
+        loss = nn.functional.binary_cross_entropy_with_logits(pool.logits(zt, pt, lt), yt)
+        loss.backward()
+        return loss
+
+    opt.step(closure)
+    pool.eval()
+    return pool
+
+
 @torch.no_grad()
-def predict(net: BlendNet, x: np.ndarray, chunk: int = 200_000) -> np.ndarray:
+def predict_stack(pool: StackPool, z: np.ndarray, present: np.ndarray, lead) -> np.ndarray:
+    """P(rain >= THRESHOLDS) from the components; never more likely at a higher threshold."""
+    n = z.shape[0]
+    lead = np.broadcast_to(np.asarray(lead, np.float32), (n,)) / 14.0
+    p = pool(torch.from_numpy(np.ascontiguousarray(z, np.float32)), torch.from_numpy(present.astype(np.float32)),
+             torch.from_numpy(np.ascontiguousarray(lead, np.float32))).numpy()
+    return np.minimum.accumulate(p, axis=1)
+
+
+@torch.no_grad()
+def predict(net: BlendNet | BlendBag, x: np.ndarray, chunk: int = 200_000) -> np.ndarray:
     """P(rain >= THRESHOLDS) for rows ``x`` -> (N, len(THRESHOLDS))."""
     out = [net(torch.from_numpy(x[i:i + chunk])).numpy() for i in range(0, x.shape[0], chunk)]
     return np.concatenate(out, 0) if out else np.zeros((0, len(THRESHOLDS)), np.float32)
@@ -177,5 +290,6 @@ def quantiles(p: np.ndarray, levels=LEVELS) -> np.ndarray:
     return out
 
 
-__all__ = ["CLIM_FEATURES", "ENSEMBLE_FEATURES", "LEVELS", "SCORED", "SINGLE_FEATURES", "THRESHOLDS", "BlendNet",
-           "assemble", "exceed", "feature_names", "fit", "predict", "quantiles", "system_features"]
+__all__ = ["CLIM_FEATURES", "ENSEMBLE_FEATURES", "LEVELS", "SCORED", "SINGLE_FEATURES", "THRESHOLDS", "BlendBag",
+           "BlendNet", "StackPool", "assemble", "exceed", "feature_names", "fit", "fit_stack", "predict",
+           "predict_stack", "quantiles", "system_features", "system_groups", "to_logits"]

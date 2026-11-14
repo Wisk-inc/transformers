@@ -139,18 +139,34 @@ Pluvium's network reads one driving model at a time. Pluvium Blend reads all six
 ECMWF ENS, NOAA GEFS, ECMWF HRES, ECMWF AIFS, NOAA GraphCast and NOAA GFS. Where it runs, it also reads Pluvium's
 network. It then writes one calibrated forecast of the day's rain for every place, out to 14 days.
 
-* **Inputs per system and place:** the members' mean and spread, the chances of 1, 10 and 25 mm, and the same over
-  everything within half a degree. A `present` flag marks a system that is missing (GraphCast stops at day 10).
-* **Context:** the climatology of the place and month.
-* **Output:** the chance of at least 0.2, 0.5, 1, 2 ... 150 mm. The chances fall with the threshold by construction, so
-  they never contradict each other. Quantiles give the median and heavy amounts, and the mean the expected amount.
-* **Training:** the sum of the Brier scores at those thresholds. Integrated over thresholds, the Brier score is the
-  CRPS, so one fit serves yes/no questions, amounts and the whole distribution.
-* **A fair rival for every system:** the same network trained on one system's inputs alone is that system's
-  post-processed forecast. Pluvium Blend has to beat each system after equal treatment, not just its raw output.
+It is built in two layers.
+
+1. **Components.** A small network turns forecasts into the chance of at least 0.2, 0.5, 1, 2 ... 150 mm. The chances
+   fall with the threshold by construction, so they never contradict each other. One copy is trained on each system
+   alone, which makes that system's post-processed forecast. Another copy reads every system at once.
+   * **Inputs per system and place:** the members' mean and spread, the chances of 1, 10 and 25 mm, and the same over
+     everything within half a degree. A `present` flag marks a system that is missing (GraphCast stops at day 10).
+   * **Context:** the climatology of the place and month, and the lead.
+   * **Training:** the sum of the Brier scores at the thresholds. Integrated over thresholds, the Brier score is the
+     CRPS, so one fit serves yes/no questions, amounts and the whole distribution.
+2. **The pool** (`StackPool`). It averages the components' log-odds with one weight per component, per band of
+   thresholds (light, moderate, heavy) and changing with lead. It then sharpens by the weights' total and adds an
+   offset per threshold. A missing component simply drops out.
+
+The pool has about 70 parameters. They are fitted on forecasts each component made for weeks it was not trained on:
+two folds of alternate weeks, split by the day forecast, so no component is ever judged on truth it learned from. A
+pool this small cannot overfit, and it can always fall back to its best component.
+
+Why two layers: in validation inside the training year, one network over all six systems at once was no better than
+the best single system, because it learned combinations that did not carry over to a new season. The pool was better
+than that network in about 20 of 24 comparisons. Bagging, hiding whole systems during training, and separate networks
+for short and long leads were tried and gave mixed or worse results. See the full-year benchmark for the record.
+
+**A fair rival for every system:** each system's component is that system's post-processed forecast, scored on its
+own. Pluvium Blend has to beat each system after equal treatment, not just its raw output.
 
 Training a blend for a new country needs a year of archived runs and satellite truth: about two hours of downloads
-and minutes of CPU (`pluvium blend train`).
+and under an hour of CPU (`pluvium blend train`).
 
 ## 3b. Any country
 
