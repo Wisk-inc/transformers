@@ -192,6 +192,10 @@ class NWPReader:
                 got = self._message(url, index, var, level)
             else:
                 got = self._message(url, index, ECMWF_SURFACE[short], "sfc")
+                if got is None and short == "tcwv":         # AIFS publishes total column water, not its vapour
+                    got = self._message(url, index, "tcw", "sfc")
+                    if got is not None:
+                        self.notes.append("column water vapour taken from total column water (tcw)")
             if got is not None:
                 out[short] = got
         # cumulative rain to this lead (mm)
@@ -211,7 +215,8 @@ class NWPReader:
                 out["tp_cum"] = got
             else:
                 got = self._message(url, index, "tp", "sfc")
-                out["tp_cum"] = None if got is None else (got[0] * 1000.0, got[1], got[2])
+                scale = 1.0 if self.model == "aifs" else 1000.0      # IFS publishes metres, AIFS kg m-2 (= mm)
+                out["tp_cum"] = None if got is None else (got[0] * scale, got[1], got[2])
         return out
 
     def _upper_at(self, init: int, lead: int) -> dict:
@@ -259,6 +264,7 @@ class NWPReader:
         steps = np.arange(0, need + step, step)
         steps = steps[steps <= horizon]
         log(f"{self.model}: reading {steps.size} steps of the {str(hour_to_datetime64(init))[:13]}Z run")
+        self.notes = []
         surface = dict(zip(steps.tolist(), parallel_map(lambda L: self._surface_at(init, int(L)), steps,
                                                          workers=self.workers)))
         up_steps = steps[(steps % max(3, step)) == 0]
@@ -335,7 +341,11 @@ class NWPReader:
             uppers[name] = None if any(f is None for f in frames) else frames
         # substitutes for what a model does not publish
         if fields.get("tcwv") is None and all(uppers.get(f"q{p}") is not None for p in (850, 700, 500)):
-            fields["tcwv"] = [(22500.0 * a + 17500.0 * b + 25000.0 * c) / 9.81
+            from ..dataset import regrid
+
+            # humidity lives on the 1.5-degree upper-air grid; the column belongs on the 1-degree surface grid
+            fields["tcwv"] = [regrid((22500.0 * a + 17500.0 * b + 25000.0 * c) / 9.81, self.lat2, self.lon2,
+                                     self.lat1, self.lon1)
                               for a, b, c in zip(uppers["q850"], uppers["q700"], uppers["q500"])]
             notes.append("column water vapour derived from 850/700/500 hPa humidity")
         if fields.get("tcc") is None:
@@ -344,6 +354,11 @@ class NWPReader:
         missing = [k for k, v in list(fields.items()) + list(uppers.items()) if v is None]
         if missing:
             raise RuntimeError(f"{self.model}: fields missing from the run: {', '.join(missing)}")
+        notes += [n for n in dict.fromkeys(self.notes) if n not in notes]
+        g1, g2 = (self.lat1.size, self.lon1.size), (self.lat2.size, self.lon2.size)
+        wrong = [k for k, v in fields.items() if np.shape(v[0]) != g1] + [k for k, v in uppers.items() if np.shape(v[0]) != g2]
+        if wrong:                                       # never cache frames the model cannot read
+            raise RuntimeError(f"{self.model}: fields on the wrong grid: {', '.join(wrong)}")
         out = {"fields": {k: np.stack(v).astype(np.float32) for k, v in fields.items()},
                "upper": {k: np.stack(v).astype(np.float32) for k, v in uppers.items()}, "notes": notes}
         if out["fields"]["tcc"].max() > 1.5:
