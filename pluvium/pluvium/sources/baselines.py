@@ -73,14 +73,18 @@ def _ecmwf_rows(text: str, param: str = "tp") -> list[tuple[int, int, int]]:
     return sorted(rows)
 
 
-def _first(urls, suffix: str, start: int | None = None, end: int | None = None) -> bytes:
-    """The first archive that serves ``url + suffix`` (each tried with retries, then the next)."""
+def _first(urls, suffix: str, start: int | None = None, end: int | None = None, trust_missing: bool = False) -> bytes:
+    """The first archive that serves ``url + suffix`` (each tried with retries, then the next). With
+    ``trust_missing``, a 404 from the first archive is final: AWS answers requests for files that do not exist with
+    HTTP 503 "SlowDown", which would otherwise cost a round of retries every time a path is probed."""
     last = None
     for url in urls:
         try:
             return fetch(url + suffix, start, end, timeout=120.0, attempts=4)
         except Exception as error:
             last = error
+            if trust_missing and "HTTP 404" in str(error):
+                break
     raise RuntimeError(f"no archive serves {urls[0]}{suffix}: {last}")
 
 

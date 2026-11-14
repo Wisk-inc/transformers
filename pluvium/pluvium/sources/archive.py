@@ -137,7 +137,7 @@ class ArchiveReader:
             for path, kind in layouts:
                 urls = [ECMWF.format(base=b, day=day, hour=hour, path=path, step=step, kind=kind) for b in ECMWF_ARCHIVES]
                 try:
-                    rows = _ecmwf_rows(_first(urls, ".index").decode())
+                    rows = _ecmwf_rows(_first(urls, ".index", trust_missing=True).decode())
                 except Exception:
                     rows = []
                 if rows:
