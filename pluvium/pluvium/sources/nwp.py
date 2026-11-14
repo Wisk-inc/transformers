@@ -51,6 +51,12 @@ def ensemble(members: int) -> list[str]:
     return ["gefs-c00"] + [f"gefs-p{k:02d}" for k in range(1, max(1, members))]
 
 
+def index_url(url: str, ncep: bool) -> str:
+    """Where a GRIB file's index is: NOAA appends ``.idx`` to the file name, ECMWF replaces ``.grib2`` with
+    ``.index`` (asking ECMWF for ``.grib2.index`` finds nothing, which once hid every live IFS and AIFS run)."""
+    return url + ".idx" if ncep else url.removesuffix(".grib2") + ".index"
+
+
 def _index_ncep(text: str) -> list:
     lines = [ln for ln in text.splitlines() if ln.strip()]
     offsets = [int(ln.split(":")[1]) for ln in lines]
@@ -154,9 +160,8 @@ class NWPReader:
         last = None
         for url in self._urls(init, lead):
             ncep = family(self.model) in NCEP
-            suffix = ".idx" if ncep else ".index"
             try:
-                text = fetch(url + suffix, timeout=60.0, attempts=3).decode()
+                text = fetch(index_url(url, ncep), timeout=60.0, attempts=3).decode()
                 return url, (_index_ncep(text) if ncep else _index_ecmwf(text))
             except Exception as error:
                 last = error

@@ -129,3 +129,12 @@ def test_calibrators_recover_a_logistic_truth():
     y = (rng.random(amount.size) < 1 - np.exp(-amount / 5)).astype(float)
     fit = calibrator(amount, y, "amount", "logistic")
     assert fit(np.array([0.0]))[0] < fit(np.array([20.0]))[0]
+
+
+def test_index_urls_follow_each_producer():
+    from pluvium.sources.nwp import index_url
+
+    ecmwf = "https://x/20261113/12z/ifs/0p25/oper/20261113120000-90h-oper-fc.grib2"
+    assert index_url(ecmwf, ncep=False) == "https://x/20261113/12z/ifs/0p25/oper/20261113120000-90h-oper-fc.index"
+    gfs = "https://y/gfs.20261113/12/atmos/gfs.t12z.pgrb2.0p25.f090"
+    assert index_url(gfs, ncep=True) == gfs + ".idx"
