@@ -28,6 +28,8 @@ from .util import hour_of, hour_to_datetime64, log
 
 #: hours after its start time that each system's run is complete in the archives (a little margin included)
 LATENCY = {"ens": 8, "gefs": 6, "ifs": 7, "aifs": 7, "graphcast": 6, "gfs": 5}
+#: the daily amount at which the table reports how many raw systems agree
+RAW_ALERT_MM = 50.0
 
 
 class BlendModel:
@@ -184,38 +186,53 @@ class BlendModel:
                "days": []}
         for d in range(1, days + 1):
             valid = day0 + 24 * (d - 1)
-            per = {}
+            per, raw = {}, {}
             for system, (init, z) in runs.items():
                 lead = (valid - init) // 24 + 1
                 if lead <= LIMIT.get(system, DAYS):
                     f = system_at_cells(z, int(lead), cells)
                     if f is not None:
-                        f.pop("_members", None)
+                        raw[system] = f.pop("_members")
                         per[system] = f
             clim = self._clim_at(lat, lon, int(str(hour_to_datetime64(valid))[5:7]))
             p = self.chances(per, clim, float(d), lat.size)
             q = B.quantiles(p)
             out["days"].append({"date": str(hour_to_datetime64(valid))[:10], "systems": sorted(per),
                                 **{f"p_ge_{int(t)}": B.exceed(p, t) for t in B.SCORED},
-                                "median_mm": q[:, 49], "p90_mm": q[:, 89], "mean_mm": q.mean(1)})
+                                "median_mm": q[:, 49], "p90_mm": q[:, 89], "mean_mm": q.mean(1), **raw_signal(raw)})
         return out
 
 
+def raw_signal(raw: dict, threshold: float = RAW_ALERT_MM) -> dict:
+    """What the systems say before any calibration: how many call for at least ``threshold`` mm (half their members or
+    more), and the wettest system's mean. Calibration learned on ordinary years shrinks a record forecast towards
+    normal (Hurricane Melissa: every raw system gave 83-100% of 50 mm two days ahead, Pluvium Blend 66%), so the
+    forecast says when the systems agree on extreme rain."""
+    if not raw:
+        return {"raw_agree": np.zeros(0, np.int64), "raw_systems": 0, "raw_max_mm": np.zeros(0, np.float32)}
+    calls = np.stack([(m >= threshold).mean(0) >= 0.5 for m in raw.values()])          # (systems, places)
+    means = np.stack([m.mean(0) for m in raw.values()])
+    return {"raw_agree": calls.sum(0), "raw_systems": len(raw), "raw_max_mm": means.max(0)}
+
+
 def write_table(result: dict, names, path) -> Path:
-    """One row per place and day: chances of 1/10/25/50 mm, median, 90th percentile and expected rain."""
+    """One row per place and day: chances of 1/10/25/50 mm, median, 90th percentile and expected rain, and how many
+    raw systems call for 50 mm or more (with the wettest one's mean), for the record storms calibration shrinks."""
     import csv
 
     path = Path(path)
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["place", "date", "p_ge_1mm", "p_ge_10mm", "p_ge_25mm", "p_ge_50mm", "median_mm", "p90_mm", "mean_mm",
-                    "systems"])
+                    f"raw_systems_ge_{int(RAW_ALERT_MM)}mm", "raw_wettest_mm", "systems"])
         for d in result["days"]:
             for k, name in enumerate(names):
+                agree = f"{int(d['raw_agree'][k])}/{d['raw_systems']}" if "raw_agree" in d and d["raw_systems"] else ""
+                wettest = f"{d['raw_max_mm'][k]:.0f}" if "raw_max_mm" in d and d["raw_systems"] else ""
                 w.writerow([name, d["date"], *(f"{d[f'p_ge_{int(t)}'][k]:.2f}" for t in B.SCORED),
                             f"{d['median_mm'][k]:.1f}", f"{d['p90_mm'][k]:.1f}", f"{d['mean_mm'][k]:.1f}",
-                            "+".join(d["systems"])])
+                            agree, wettest, "+".join(d["systems"])])
     return path
 
 
-__all__ = ["LATENCY", "BlendModel", "write_table"]
+__all__ = ["LATENCY", "RAW_ALERT_MM", "BlendModel", "raw_signal", "write_table"]

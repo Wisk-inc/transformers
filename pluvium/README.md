@@ -136,7 +136,29 @@ The full explanation is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), every m
 
 ## Benchmarks
 
-**Against the operational systems**: see [docs/OPERATIONAL_BENCHMARK.md](docs/OPERATIONAL_BENCHMARK.md).
+**A full year, 14 days, six regions**: see [docs/FULL_YEAR_BENCHMARK.md](docs/FULL_YEAR_BENCHMARK.md). Pluvium Blend
+against ECMWF ENS, HRES and AIFS and NOAA GEFS, GFS and GraphCast, from real archived runs only. It is scored on April
+2025 to March 2026, every season, in the Caribbean, the Maritime Continent, the Alps, the US Pacific Northwest, the US
+Great Plains and the southern Andes. Each system is scored raw and after the same post-processing.
+
+* **Rain of 1 mm or more:** Pluvium Blend had the highest Brier skill of every system, raw or post-processed, in all
+  six regions on days 1 to 10, and in 5 of 6 on days 11 to 14.
+* **Against each system after equal post-processing:** better with 95% confidence in all 72 comparisons on days 1 to 7
+  at 1 mm, and never worse.
+* **Days 1 to 10, other scores:** best in 18 of 18 region and lead contests for Brier skill at 10 mm, CSI, ROC area
+  and CRPS, 17 for 25 mm, 16 for RMSE and 14 for anomaly correlation.
+* **Where it does not lead:**
+  * 50 mm, where post-processed AIFS often wins at short range;
+  * anomaly correlation beyond a week in the mid-latitudes, where raw ensembles keep more of it;
+  * winter on days 1 to 3 (2 of 6 regions, most within 0.004).
+
+**Jamaica at 8 km**, with Pluvium's network as a seventh component:
+* Pluvium Blend led at 1 mm on days 1 to 7.
+* It lost the amount scores in autumn to Hurricane Melissa. It shrank a record forecast the raw systems had right: two
+  days ahead, a 66% chance of 50 mm against 83 to 100% from every raw system.
+* The daily table now reports when the raw systems agree on 50 mm or more.
+
+**Against the operational systems, July and August 2025**: see [docs/OPERATIONAL_BENCHMARK.md](docs/OPERATIONAL_BENCHMARK.md).
 `pluvium operational` scores Pluvium against ECMWF ENS, ECMWF HRES, ECMWF AIFS, NOAA GEFS, NOAA GraphCast and
 NOAA GFS. It uses real archived runs only, with no reanalysis anywhere, and calibrates every system the same causal
 way.

@@ -19,10 +19,10 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/atmos/waves.py` | 39 | Tropical (easterly) waves: the main source of Caribbean rain from June to November. |
 | `pluvium/bench.py` | 254 | A fair fight between architectures on real, held-out Caribbean data. |
 | `pluvium/benchmarks/__init__.py` | 3 | Benchmarks that need more than :mod:`pluvium.bench`: Pluvium against the operational forecasting systems on real forecasts (:mod:`pluvium.benchmarks.operational`). |
-| `pluvium/benchmarks/fullyear.py` | 913 | A full year, 14 days ahead, around the world: Pluvium Blend against the operational systems. |
+| `pluvium/benchmarks/fullyear.py` | 918 | A full year, 14 days ahead, around the world: Pluvium Blend against the operational systems. |
 | `pluvium/benchmarks/operational.py` | 885 | Pluvium against the operational forecasting systems, on real forecasts only. |
 | `pluvium/blend.py` | 301 | Pluvium Blend: one calibrated forecast from every operational system and Pluvium's own network. |
-| `pluvium/blendlive.py` | 221 | Pluvium Blend for any country, every day. |
+| `pluvium/blendlive.py` | 238 | Pluvium Blend for any country, every day. |
 | `pluvium/calibrate.py` | 147 | Making the stated chances true: isotonic recalibration fitted on held-out forecasts. |
 | `pluvium/card.py` | 146 | The model card written next to a trained Pluvium: what it is, how it was trained, and how well it did. |
 | `pluvium/chain.py` | 256 | The intensity chain (experimental): rain at a place as a hidden Markov chain over *intensity states* -- dry, light, moderate, heavy -- whose hour-by-hour transition matrix the network writes for every place. |
@@ -99,4 +99,4 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/weather.py` | 283 | What the weather *is*, in the words people use: intensity classes, drizzle versus rain versus showers, thunder. |
 | `pluvium/zarrlite.py` | 166 | A minimal reader for consolidated Zarr v2 stores over HTTPS (the public ERA5 stores on Google Cloud). |
 
-94 modules, 14,304 lines.
+94 modules, 14,326 lines.

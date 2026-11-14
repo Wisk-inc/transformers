@@ -227,11 +227,28 @@ Pluvium is driven by that morning's GFS run, after fine-tuning on earlier GFS ru
 same causal way, on the 30 runs before each test day. Results are in [OPERATIONAL_BENCHMARK.md](OPERATIONAL_BENCHMARK.md)
 and the version comparison is in [BENCHMARK.md](BENCHMARK.md).
 
+`python -m pluvium.benchmarks.fullyear` is the widest test: Pluvium Blend against the same six systems for a full year
+(April 2025 to March 2026, every season), days 1 to 14.
+* **Places:** six regions on the systems' own 0.25-degree grid (tropics, mid-latitude mountains, coasts and plains, both
+  hemispheres), and Jamaica at 8 km with Pluvium's network.
+* **Equal treatment:** every system is scored raw and post-processed by the same network trained on it alone.
+* **Training:** quarterly refits on everything verified by then.
+* **Scores:** Brier skill at 1, 10, 25 and 50 mm against the training year's climatology, CSI, ROC area, CRPS, RMSE,
+  anomaly correlation and sharpness.
+* **Uncertainty:** a block bootstrap over runs against each system.
+
+Results are in [FULL_YEAR_BENCHMARK.md](FULL_YEAR_BENCHMARK.md).
+
 ## 7. Honest limits
 
 * Truth is satellite rain at 8 km and point reports at airports; neither sees every shower.
 * Live "rain now" comes from GOES infrared when the rain-rate product is unavailable, which is cruder than the
   CMORPH used in training.
 * Tropical cyclones are rare in any training period.
+* Pluvium Blend does not lead everywhere. At 50 mm a day post-processed ECMWF AIFS is often as good or better at short
+  range. Beyond a week in the mid-latitudes raw ensembles keep a higher anomaly correlation. In winter, on days 1
+  to 3, it is level with the best system rather than ahead.
+* Pluvium forecasts rain only: not temperature, heat waves or cyclone tracks, and not the poles (its truth stops at 60
+  degrees of latitude).
 * The flood rule needs verification against flood reports before anyone relies on it.
 * A research model: not an official forecast.

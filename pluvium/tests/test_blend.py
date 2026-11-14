@@ -105,3 +105,18 @@ def test_a_saved_blend_model_loads_and_pools_its_components(tmp_path):
     torch.save({"state": nets["all"].state_dict(), "n_in": nets["all"].mu.numel()}, legacy / "blend.pt")
     old = BlendModel.load(legacy)
     assert old.pool is None and old.chances(per, c, 2.0, 50).shape == (50, len(THRESHOLDS))
+
+
+def test_the_table_says_when_raw_systems_agree_on_extreme_rain(tmp_path):
+    from pluvium.blendlive import raw_signal, write_table
+
+    raw = {"ens": np.array([[120.0, 2.0], [80.0, 0.0], [10.0, 1.0]]),                # 2 of 3 members at 50 mm+
+           "ifs": np.array([[300.0, 5.0]]), "gfs": np.array([[20.0, 0.0]])}
+    sig = raw_signal(raw)
+    np.testing.assert_array_equal(sig["raw_agree"], [2, 0])
+    assert sig["raw_systems"] == 3 and abs(sig["raw_max_mm"][0] - 300.0) < 1e-6
+    day = {"date": "2025-10-28", "systems": ["ens", "gfs", "ifs"], "median_mm": np.zeros(2), "p90_mm": np.zeros(2),
+           "mean_mm": np.zeros(2), **{f"p_ge_{t}": np.zeros(2) for t in (1, 10, 25, 50)}, **sig}
+    path = write_table({"days": [day]}, ["Kingston", "Mandeville"], tmp_path / "t.csv")
+    rows = path.read_text().splitlines()
+    assert "raw_systems_ge_50mm" in rows[0] and ",2/3,300," in rows[1] and ",0/3," in rows[2]
