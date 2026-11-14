@@ -14,7 +14,6 @@ Run it from Python (:func:`run_bench`) or ``pluvium bench --help``.
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
 import numpy as np
@@ -107,17 +106,21 @@ def run_bench(geo_dir, era5_dir, cmorph_dir, stations_dir, out_dir, contenders=(
     for name in contenders:
         if only and name != only:
             continue
+        done = out / f"{name}.json"
+        if done.exists():                                   # finished in an earlier session
+            results[name] = json.loads(done.read_text())
+            log(f"{name}: already scored ({results[name]['steps']} steps); kept")
+            continue
         torch.manual_seed(seed)
         np.random.seed(seed)
         model = build_model(geo, grids_of(era5), name, station_points(geo, stations))
         loss = PluviumLoss(states=model.config.states)
         cfg = TrainConfig(size=name, batch_size=batch_size, lr=lr, warmup_steps=50, hours=minutes / 60.0,
-                          workers=workers, eval_every_minutes=1e9, save_every_minutes=1e9, eval_forecasts=8,
+                          workers=workers, eval_every_minutes=1e9, save_every_minutes=4.0, eval_forecasts=8,
                           log_every=50, seed=seed)
-        began = time.time()
-        trainer = Trainer(model, loss, builder, train_starts, cal_starts[:8], out / name, cfg)
+        trainer = Trainer(model, loss, builder, train_starts, cal_starts[:8], out / name, cfg)  # resumes a checkpoint
         trained = trainer.run()
-        train_min = (time.time() - began) / 60
+        train_min = trainer.elapsed / 60
         model = trainer.model
         _, cal_data = hindcast(model, builder, cal_starts, batch_size=2, emulate=True, samples=100)
         calibrator = fit_calibration(cal_data)
@@ -135,8 +138,15 @@ def run_bench(geo_dir, era5_dir, cmorph_dir, stations_dir, out_dir, contenders=(
         row["truth_sources"] = loss.sources.describe()
         results[name] = row
         (out / f"{name}.json").write_text(json.dumps(row, indent=1, default=float))
+    if only:                                                 # merge with contenders scored in other runs
+        for other in contenders:
+            path = out / f"{other}.json"
+            if other not in results and path.exists():
+                results[other] = json.loads(path.read_text())
+    results = {k: results[k] for k in contenders if k in results}
     summary = compare(results)
     (out / "bench.json").write_text(json.dumps({"results": results, "summary": summary}, indent=1, default=float))
+    (out / "BENCHMARK.md").write_text(markdown(results), encoding="utf-8")
     return {"results": results, "summary": summary}
 
 
