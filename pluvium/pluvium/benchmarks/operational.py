@@ -741,7 +741,7 @@ def markdown(results: dict) -> str:
         "# Pluvium against the operational systems",
         "",
         f"Test: {len(results['test_runs'])} daily 00 UTC runs, {results['test_runs'][0]} to {results['test_runs'][-1]}, "
-        f"at {results['cells']:,} land cells of 8 km (Jamaica, the Cayman Islands, eastern Cuba and western Haiti). "
+        f"at {results['cells']:,} land cells of 8 km covering Jamaica. "
         "Truth: CMORPH. Every forecast is a real, archived operational run; none uses a reanalysis.",
         "",
         "Brier skill score against the climatology of the same weeks (higher is better; 0 is climatology). "
@@ -759,24 +759,30 @@ def markdown(results: dict) -> str:
                 if "bss_raw" in e:
                     txt += f" ({e['bss_raw']:+.3f})"
                 cells.append(txt)
-            label = sys[n]["label"] + (" **(Pluvium)**" if n == PLUVIUM else "")
+            label = f"**{sys[n]['label']}**" if n == PLUVIUM else sys[n]["label"]
             lines.append(f"| {label} | " + " | ".join(cells) + " |")
+        never = [1 - sys[order[0]]["days"][d][t]["base_rate"] / sys[order[0]]["days"][d][t]["bs_reference"]
+                 for d in ("1", "2", "3")]
+        lines.append("| *A forecast that never says rain* | " + " | ".join(f"*{v:+.3f}*" for v in never) + " |")
         base = sys[order[0]]["days"]["1"][t]["base_rate"]
-        lines += ["", f"Share of cell-days with at least {t} mm on day 1: {base:.1%}.", ""]
+        lines += ["", f"Share of cell-days with at least {t} mm on day 1: {base:.1%}. A system shows skill at this "
+                      "threshold only where it beats the forecast that never says rain.", ""]
     lines += ["## Pluvium against each system", "",
               "Difference in Brier score, Pluvium minus the other system, after calibration (negative: Pluvium "
               "better), with a 95% moving-block bootstrap interval over days.", ""]
-    head = "| Against | " + " | ".join(f"Day {d}, {t} mm" for d in (1, 2, 3) for t in thr[:3]) + " |"
-    lines += [head, "|---|" + "---|" * (3 * len(thr[:3]))]
+    shown = thr[:2]                                  # at 25 mm and above, no system beats "never" (see the tables)
+    head = "| Against | " + " | ".join(f"Day {d}, {t} mm" for d in (1, 2, 3) for t in shown) + " |"
+    lines += [head, "|---|" + "---|" * (3 * len(shown))]
     for other, comp in results["versus"].items():
         cells = []
         for d in (1, 2, 3):
-            for t in thr[:3]:
+            for t in shown:
                 c = comp[f"day{d}_{t}mm"]
                 mark = "**" if c["ci95"][1] < 0 else ""
                 cells.append(f"{mark}{c['delta_bs']:+.4f}{mark} [{c['ci95'][0]:+.4f}, {c['ci95'][1]:+.4f}]")
         lines.append(f"| {LABELS.get(other, other)} | " + " | ".join(cells) + " |")
-    lines += ["", "Bold: Pluvium better with 95% confidence.", "",
+    lines += ["", "Bold: Pluvium better with 95% confidence. Differences at 25 and 50 mm are left out: there no system, "
+              "Pluvium included, beats a forecast that never says rain, so the differences are noise.", "",
               "## CRPS of the 24-hour totals (mm, lower is better; raw forecasts)", "",
               "| System | Day 1 | Day 2 | Day 3 |", "|---|---|---|---|"]
     for n in order:
@@ -810,7 +816,7 @@ def markdown(results: dict) -> str:
               f"{int(str(ft.get('first', '2024'))[:4])}: days within 15 days of the same date, cells within 25 km.",
               "* **Intervals**: moving-block bootstrap over test days (blocks of 5 days, 2,000 resamples).",
               "", "## Limits", "",
-              "* One island and two months (the early rainy season). Skill elsewhere or in other seasons is untested.",
+              "* One island and two months per test. Skill elsewhere or in other seasons is untested.",
               "* Truth is CMORPH, which Pluvium was also trained on. Calibration on the same truth puts every system "
               "on the same footing, but the raw scores favour Pluvium.",
               "* Pluvium's \"rain now\" input comes from the CMORPH record, which is adjusted to gauges after the fact. "

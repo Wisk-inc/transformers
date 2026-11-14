@@ -108,16 +108,33 @@ The full explanation is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), every m
   * `render/`: maps, bulletins, CAP alerts;
   * `ops/`: hourly service and JSON API.
 
-## Benchmark
+## Benchmarks
 
-`pluvium bench` trains architectures from scratch on identical data with identical budgets. It scores them on a
-held-out period against climatology, persistence and the driving model's rain. Results for version 1 against
-version 2 are in [docs/BENCHMARK.md](docs/BENCHMARK.md).
+**Against the operational systems**: see [docs/OPERATIONAL_BENCHMARK.md](docs/OPERATIONAL_BENCHMARK.md).
+`pluvium operational` scores Pluvium against ECMWF ENS, ECMWF HRES, ECMWF AIFS, NOAA GEFS, NOAA GraphCast and
+NOAA GFS. It uses real archived runs only, with no reanalysis anywhere, and calibrates every system the same causal
+way.
+
+Not golden tier yet. Results on Jamaica's 450 land cells, with Pluvium at its small size (0.9M parameters,
+about two hours of CPU training) and driven only by GFS:
+
+* **July and August 2025** (protocol frozen before the data were downloaded): Pluvium had the highest skill for rain
+  of at least 1 mm on days 1 and 2. That is +0.127 and +0.118 against +0.087 and +0.091 for the best operational
+  system. With 95% confidence it beat ECMWF ENS, ECMWF HRES, AIFS and GraphCast; against GEFS and GFS the lead is not
+  yet significant. It tied at 10 mm. Its CRPS on daily totals was 40-50% smaller than ECMWF ENS's and GEFS's.
+* **May and June 2025** (the first test): Pluvium lost after calibration. Its calibration windows held an unusually
+  wet April it had never trained on.
+* At 25 and 50 mm no system, ECMWF's included, did meaningfully better than a forecast that never says rain.
+
+**Between versions**: see [docs/BENCHMARK.md](docs/BENCHMARK.md). `pluvium bench` trains each version from
+scratch on the same data with the same time budget. Version 3 nearly doubles the skill of 24-hour totals over
+version 2 (CRPS skill +44.6% against +23.8%, with emulated forecast errors). It also has the best hourly skill and
+critical success index. Heavy-rain hours and thunder are its weak spots.
 
 ## Data and attribution
 
-ERA5 (Copernicus Climate Change Service), CMORPH CDR and ISD (NOAA NCEI), GFS (NOAA NCEP), ECMWF open data
-(CC-BY-4.0), GOES-East imagery and lightning (NOAA), METAR (NOAA Aviation Weather Center), GeoNames (CC-BY-4.0),
+ERA5 (Copernicus Climate Change Service), CMORPH CDR and ISD (NOAA NCEI), GFS and GEFS (NOAA NCEP), NOAA's
+real-time GraphCast, ECMWF open data: IFS, ENS and AIFS (CC-BY-4.0), GOES-East imagery and lightning (NOAA), METAR (NOAA Aviation Weather Center), GeoNames (CC-BY-4.0),
 geoBoundaries (CC-BY-4.0), Terrarium elevation tiles (Mapzen and its sources).
 
 Code: Apache-2.0, CorX Labs.
