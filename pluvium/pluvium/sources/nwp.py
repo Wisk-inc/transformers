@@ -121,6 +121,18 @@ class NWPReader:
         self.cache = Path(cache).expanduser()
         self.cache.mkdir(parents=True, exist_ok=True)
         self.notes: list[str] = []
+        lat = np.concatenate([self.lat1, self.lat2])
+        lon = np.concatenate([self.lon1, self.lon2])
+        #: every decoded global field is cut to this box at once (a 0.25-degree global field is 4 MB; a run holds
+        #: thousands of them, which is how a live forecast of three models once ran out of memory)
+        self.box = (float(lat.min()) - 2.0, float(lat.max()) + 2.0, float(lon.min()) - 2.0, float(lon.max()) + 2.0)
+
+    def _decode(self, blob: bytes) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        values, lat, lon = decode(blob)
+        s, n, w, e = self.box
+        i = (lat >= s) & (lat <= n)
+        j = (lon >= w) & (lon <= e)
+        return np.ascontiguousarray(values[np.ix_(i, j)]), lat[i], lon[j]
 
     # ------------------------------------------------------------------------------------- reading --
     def _urls(self, init: int, lead: int) -> list[str]:
@@ -160,7 +172,7 @@ class NWPReader:
     def _message(self, url, index, var, level, desc_contains: str | None = None):
         for row in index:
             if row["var"] == var and row["level"] == level and (desc_contains is None or desc_contains in row["desc"]):
-                return decode(fetch(url, row["start"], row["end"]))
+                return self._decode(fetch(url, row["start"], row["end"]))
         return None
 
     def _surface_at(self, init: int, lead: int) -> dict:
@@ -183,7 +195,7 @@ class NWPReader:
                     if row["var"] == "APCP" and row["level"] == "surface" and "acc" in row["desc"]:
                         a, b = (int(x) for x in re.findall(r"(\d+)-(\d+) hour", row["desc"])[0])
                         if b == lead:
-                            values, la, lo = decode(fetch(url, row["start"], row["end"]))
+                            values, la, lo = self._decode(fetch(url, row["start"], row["end"]))
                             out["tp_bucket"] = (a, (values, la, lo))
                             break
             elif self.model in ("gfs", "gfs05"):
