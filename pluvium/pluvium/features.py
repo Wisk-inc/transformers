@@ -35,7 +35,11 @@ LEVELS = (850, 700, 500, 200)
 HOURLY_BASE = ("tp", "tcwv", "u10", "v10", "t2m", "msl", "tcc", "theta_e850", "theta_e_grad", "frontness",
                "shear_line", "front_eta", "rain_eta", "cos_zenith")
 CONVECTIVE = ("k_index", "total_totals", "theta_e_diff", "lifted_index", "rh700", "mfc850", "shear_850_200", "div200")
-HOURLY_CHANNELS = HOURLY_BASE + CONVECTIVE
+#: version 3: the theoretical physics of :mod:`pluvium.atmos` (CAPE/CIN/LCL, column humidity and the Bretherton law,
+#: moisture convergence, Saharan air, tropical waves, parametric cyclone rain)
+ATMOS = ("cape", "cin", "lcl_height", "crh", "bretherton_rate", "vimfc", "saharan", "wave_trough", "wave_eta",
+         "tc_rain", "tc_distance")
+HOURLY_CHANNELS = HOURLY_BASE + CONVECTIVE + ATMOS
 UPPER_CHANNELS = tuple(f"{v}{p}" for v in UPPER_SHORT for p in LEVELS)
 REGIMES = ("cold_front", "tropical_wave", "tropical_cyclone", "afternoon_storms", "trade_wind_showers", "other")
 REGIME_TEXT = {"cold_front": "cold front / shear line", "tropical_wave": "tropical wave",
@@ -165,9 +169,13 @@ def hourly_channels(fields: dict, upper: dict, lat: np.ndarray, lon: np.ndarray,
     base = np.stack(out, axis=1).astype(np.float32)
     from .convection import NEEDS, convective_channels
 
-    if all(k in upper for k in NEEDS):
-        return np.concatenate([base, convective_channels(upper, lat, lon)], axis=1)
-    return np.concatenate([base, np.zeros((base.shape[0], len(CONVECTIVE)) + base.shape[2:], np.float32)], axis=1)
+    zeros = lambda n: np.zeros((base.shape[0], n) + base.shape[2:], np.float32)         # noqa: E731
+    conv = convective_channels(upper, lat, lon) if all(k in upper for k in NEEDS) else zeros(len(CONVECTIVE))
+    from .atmos.assemble import NEEDS as ATMOS_NEEDS
+    from .atmos.assemble import atmos_channels
+
+    physics = atmos_channels(fields, upper, lat, lon, hours) if all(k in upper for k in ATMOS_NEEDS) else zeros(len(ATMOS))
+    return np.concatenate([base, conv, physics], axis=1)
 
 
 def upper_channels(upper: dict) -> np.ndarray:
@@ -290,7 +298,7 @@ def emulate_forecast_error(hourly: np.ndarray, upper: np.ndarray, leads: np.ndar
     return hourly, upper, scale
 
 
-__all__ = ["CONVECTIVE", "HOURLY_BASE", "HOURLY_CHANNELS", "HOURLY_SHORT", "HOURLY_VARS", "LEVELS", "REGIMES", "REGIME_TEXT", "UPPER_CHANNELS",
+__all__ = ["ATMOS", "CONVECTIVE", "HOURLY_BASE", "HOURLY_CHANNELS", "HOURLY_SHORT", "HOURLY_VARS", "LEVELS", "REGIMES", "REGIME_TEXT", "UPPER_CHANNELS",
            "UPPER_SHORT", "UPPER_VARS", "arrival_hours", "cos_zenith", "distance_km", "emulate_forecast_error",
            "frontal_diagnostics", "heating_potential", "hourly_channels", "local_solar_hour", "regime_flags",
            "regime_labels", "theta_e", "time_features", "upper_channels"]

@@ -52,7 +52,8 @@ def thunder_scores(data: dict, stations, clim: np.ndarray) -> dict | None:
             "n": int(m.sum())}
 
 
-def run_bench(geo_dir, era5_dir, cmorph_dir, stations_dir, out_dir, contenders=("pluvium-small-v1", "pluvium-small"),
+def run_bench(geo_dir, era5_dir, cmorph_dir, stations_dir, out_dir,
+              contenders=("pluvium-small-v1", "pluvium-small-v2", "pluvium-small"),
               train_period=("2021-06-01T00", "2021-09-24T00"), test_period=("2021-10-01T00", "2021-11-04T00"),
               minutes: float = 30.0, seed: int = 0, workers: int = 1, threads: int | None = None,
               test_every: int = 6, lr: float = 2e-3, batch_size: int = 2, ocean_targets: int = 100,
@@ -115,9 +116,12 @@ def run_bench(geo_dir, era5_dir, cmorph_dir, stations_dir, out_dir, contenders=(
         np.random.seed(seed)
         model = build_model(geo, grids_of(era5), name, station_points(geo, stations))
         loss = PluviumLoss(states=model.config.states)
+        v3 = model.config.version >= 3                       # version 3 trains with its own recipe
         cfg = TrainConfig(size=name, batch_size=batch_size, lr=lr, warmup_steps=50, hours=minutes / 60.0,
                           workers=workers, eval_every_minutes=1e9, save_every_minutes=4.0, eval_forecasts=8,
-                          log_every=50, seed=seed)
+                          log_every=50, seed=seed, ema_decay=0.995 if v3 else 0.0, curriculum=v3)
+        builder = SampleBuilder(geo, era5, cmorph, stations, clim, st_clim, ocean_targets=ocean_targets,
+                                max_land_targets=max_land_targets, seed=seed, augment=v3)
         trainer = Trainer(model, loss, builder, train_starts, cal_starts[:8], out / name, cfg)  # resumes a checkpoint
         trained = trainer.run()
         train_min = trainer.elapsed / 60
@@ -197,7 +201,7 @@ def format_compare(summary: list[dict]) -> str:
 def markdown(results: dict, setup: str = "") -> str:
     """A Markdown report of a benchmark: one table per test, contenders as columns, references in the text."""
     names = list(results)
-    lines = ["# Benchmark: Pluvium version 2 against version 1", "", setup, ""]
+    lines = ["# Benchmark: Pluvium versions 1, 2 and 3", "", setup, ""]
     for label, title in (("emulated_errors", "Driving fields with emulated forecast errors (closer to live)"),
                          ("reanalysis_driven", "Reanalysis as a perfect forecast (upper bound on live skill)")):
         lines += [f"## {title}", "", "| Score | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
@@ -232,7 +236,7 @@ def main(argv=None) -> None:
     p.add_argument("--cmorph", required=True)
     p.add_argument("--stations", required=True)
     p.add_argument("--out", required=True)
-    p.add_argument("--contenders", default="pluvium-small-v1,pluvium-small")
+    p.add_argument("--contenders", default="pluvium-small-v1,pluvium-small-v2,pluvium-small")
     p.add_argument("--minutes", type=float, default=30.0)
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--threads", type=int, default=None)

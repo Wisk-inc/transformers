@@ -40,9 +40,13 @@ WET_MM = 0.2          # a wet hour: at least 0.2 mm
 #: per-point inputs of every frame: version 1's thirteen, then the advected rain of :mod:`pluvium.advection` (v2)
 TARGET_BASE = ("cos_zenith", "lst_sin", "lst_cos", "doy_sin", "doy_cos", "cold_season", "heat_1h", "heat_3h",
                "driving_rain", "clim_wet", "clim_rate", "memory_rain", "memory_known")
-TARGET_DYNAMIC = TARGET_BASE + ("advected_rain", "advected_known")
-#: upper-air fields regridded to the 1-degree grid for the hourly channels (fronts, regimes, convection)
-UPPER_ON_HOURLY = ("t850", "q850", "u700", "v700", "u850", "v850", "t700", "q700", "t500", "q500", "u200", "v200")
+ADVECTION = ("advected_rain", "advected_known")
+#: version 3: wind meeting terrain, the sea-breeze front and the daily clocks (:mod:`pluvium.atmos.assemble`)
+POINT_PHYSICS = ("upslope_5km", "upslope_20km", "froude", "sea_breeze_pulse", "sea_breeze_since", "insolation",
+                 "land_clock", "sea_clock")
+TARGET_DYNAMIC = TARGET_BASE + ADVECTION + POINT_PHYSICS
+#: upper-air fields regridded to the 1-degree grid for the hourly channels (fronts, regimes, convection, physics)
+UPPER_ON_HOURLY = tuple(f"{v}{p}" for v in ("t", "q", "u", "v") for p in (850, 700, 500, 200))
 MESH_DYNAMIC = ("memory_rain", "memory_known", "cos_zenith", "lst_sin", "lst_cos", "doy_sin", "doy_cos", "cold_season",
                 "heat_1h", "heat_3h")
 
@@ -163,7 +167,7 @@ class SampleBuilder:
     def __init__(self, geo, era5, cmorph, stations=None, climatology: Climatology | None = None,
                  station_climatology: Climatology | None = None, schedule: Schedule = DEFAULT,
                  ocean_targets: int = 1500, max_land_targets: int = 6000, memory_dropout: float = 0.35,
-                 emulate: float = 0.75, seed: int = 0, driver=None) -> None:
+                 emulate: float = 0.75, seed: int = 0, driver=None, augment: bool = False) -> None:
         self.geo, self.era5, self.cmorph, self.stations = geo, era5, cmorph, stations
         #: ``driver(t0) -> (fields, upper)`` replaces ERA5 as the driving fields (stage B: real GFS runs)
         self.driver = driver
@@ -188,6 +192,9 @@ class SampleBuilder:
         self.obs_lon = np.concatenate([t.lon, geo.mesh.lon])
         self.advector = Advector(self.obs_lat, self.obs_lon)
         self.station_dropout = (0.2, 0.3)       # (whole-network, per-station) dropout of reports given as inputs
+        from .training.augment import Augmenter
+
+        self.augmenter = Augmenter() if augment else None
 
     # ----------------------------------------------------------------------------------- choosing --
     def choose_targets(self, train: bool) -> np.ndarray:
@@ -256,7 +263,8 @@ class SampleBuilder:
 
     # ------------------------------------------------------------------------------------ context --
     def point_context(self, lat, lon, land, frames: dict, t0: int, clim: Climatology, memory: np.ndarray | None,
-                      memory_known: bool, observed: np.ndarray | None = None) -> np.ndarray:
+                      memory_known: bool, observed: np.ndarray | None = None, statics: np.ndarray | None = None,
+                      kind: np.ndarray | None = None) -> np.ndarray:
         """``(F, N, len(TARGET_DYNAMIC))`` per-frame context at forecast points. ``observed`` is the last hour's rain
         at :attr:`obs_lat`/:attr:`obs_lon` (target cells, then mesh points), carried along the steering wind."""
         sch = self.schedule
@@ -281,9 +289,14 @@ class SampleBuilder:
             moved, found = self.advector.extrapolate(observed, lat, lon, us, vs, sch.leads[which])
             adv[which] = np.log1p(np.clip(moved, 0, None))
             adv_known[which] = found
+        from .atmos.assemble import point_physics
+
+        if statics is None:
+            statics = self.geo.terrain.descriptors(lat, lon)
+        phys = point_physics(self.geo.terrain, statics, lat, lon, u, v, centres, kind)
         out = np.concatenate([tf, heat, np.log1p(rain)[..., None], cw[..., None], np.log1p(cr)[..., None] * 3.0,
                               np.log1p(np.nan_to_num(mem))[..., None], known[..., None], adv[..., None],
-                              adv_known[..., None]], axis=-1)
+                              adv_known[..., None], phys], axis=-1)
         del land
         return out.astype(np.float32)
 
@@ -314,6 +327,8 @@ class SampleBuilder:
         sch = self.schedule
         rng = self.rng if train else np.random.default_rng(int(t0))
         fields, upper = self.driving(t0)
+        if train and self.augmenter is not None:
+            fields, upper = self.augmenter.moisture(fields, upper, rng)
         if emulate is None:
             emulate = train and self.driver is None and rng.random() < self.emulate
         frames = self.frames_from(fields, upper, t0, rng, emulate=emulate)
@@ -327,10 +342,12 @@ class SampleBuilder:
             everywhere = self.cmorph.targets(np.array([t0 - 1]))[0]
             last_hour = everywhere[idx]
             observed = np.concatenate([everywhere, mesh_memory[-1]])
+            if train and self.augmenter is not None:
+                observed = self.augmenter.satellite_gaps(observed, self.obs_lat, self.obs_lon, rng)
         hours = t0 + np.arange(sch.num_hours)
         land = t.kind[idx] == 0
         target_ctx = self.point_context(t.lat[idx], t.lon[idx], land, frames, t0, _Indexed(self.clim, idx), last_hour,
-                                        keep_memory, observed)
+                                        keep_memory, observed, t.statics[idx], t.kind[idx])
         flags = np.stack([np.stack([bilinear(frames["flags"][k, j].astype(np.float32), self.lat1, self.lon1,
                                              t.lat[idx], t.lon[idx]) > 0.5 for j in range(4)])
                           for k in range(sch.num_frames)])
@@ -346,6 +363,8 @@ class SampleBuilder:
 
             st = self.stations
             reports = st.read(hist_hours).astype(np.int8)                          # (3, S) packed codes
+            if train and self.augmenter is not None:
+                reports = self.augmenter.report_errors(reports, rng)
             if train:                                                               # sometimes no reports, often gaps
                 if rng.random() < self.station_dropout[0]:
                     reports[:] = -1
@@ -354,7 +373,8 @@ class SampleBuilder:
             d = decode(reports[-1])
             last = np.where(d["known"], d["wet"].astype(np.float32), np.nan) if keep_memory else None
             out["station_ctx"] = self.point_context(st.lat, st.lon, np.ones(len(st), bool), frames, t0,
-                                                    self.station_clim, last, keep_memory, observed)
+                                                    self.station_clim, last, keep_memory, observed, self.station_statics,
+                                                    np.zeros(len(st), np.int8))
             out["station_obs"] = obs_features(reports)
             out["station_truth"] = st.read(hours)
         return out
@@ -400,5 +420,5 @@ def collate(examples: list[dict]) -> dict:
     return out
 
 
-__all__ = ["Climatology", "MESH_DYNAMIC", "SampleBuilder", "TARGET_BASE", "TARGET_DYNAMIC", "UPPER_ON_HOURLY", "WET_MM", "bilinear", "collate",
+__all__ = ["ADVECTION", "Climatology", "MESH_DYNAMIC", "POINT_PHYSICS", "SampleBuilder", "TARGET_BASE", "TARGET_DYNAMIC", "UPPER_ON_HOURLY", "WET_MM", "bilinear", "collate",
            "compute_climatology", "regrid"]

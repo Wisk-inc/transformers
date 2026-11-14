@@ -53,6 +53,9 @@ class TrainConfig:
     eval_forecasts: int = 32
     log_every: int = 25
     seed: int = 0
+    ema_decay: float = 0.0               # > 0: keep an exponential moving average of the weights (released)
+    curriculum: bool = False             # draw issue times favouring heavy rain and thunder (pluvium.training)
+    expert_balance: float = 0.01         # weight of the mixture-of-experts load-balancing term
     overrides: dict = field(default_factory=dict)   # PluviumConfig overrides (ablations)
 
 
@@ -62,18 +65,27 @@ class BatchSet(torch.utils.data.Dataset):
     """Item ``i`` is a whole batch: ``batch_size`` issue times drawn for step ``i`` and one shared target subset.
     Deterministic in ``(seed, i)``, so a resumed run sees the batches it would have seen."""
 
-    def __init__(self, builder: SampleBuilder, starts: np.ndarray, batch_size: int, seed: int = 0) -> None:
+    def __init__(self, builder: SampleBuilder, starts: np.ndarray, batch_size: int, seed: int = 0,
+                 sampler=None) -> None:
         self.builder, self.starts, self.batch_size, self.seed = builder, np.asarray(starts), batch_size, seed
+        self.sampler = sampler
 
     def __len__(self) -> int:
         return 1 << 40
 
     def __getitem__(self, i: int) -> dict:
         rng = np.random.default_rng((self.seed, int(i)))
-        t0s = rng.choice(self.starts, self.batch_size, replace=self.starts.size < self.batch_size)
+        if self.sampler is not None:
+            t0s, weights = self.sampler.draw(rng, self.batch_size)
+        else:
+            t0s = rng.choice(self.starts, self.batch_size, replace=self.starts.size < self.batch_size)
+            weights = np.ones(self.batch_size)
         self.builder.rng = np.random.default_rng((self.seed, int(i), 1))
         targets = self.builder.choose_targets(train=True)
-        return collate([self.builder.example(int(t), True, targets) for t in t0s])
+        examples = [self.builder.example(int(t), True, targets) for t in t0s]
+        for e, w in zip(examples, weights):
+            e["weight"] = np.float32(w)
+        return collate(examples)
 
 
 def _workers(requested: int) -> int:
@@ -129,12 +141,13 @@ def grids_of(source) -> dict:
 # ----------------------------------------------------------------------------------------- checkpoints --
 
 def save_checkpoint(directory, model: PluviumModel, loss: PluviumLoss, optimizer=None, state: dict | None = None,
-                    calibrator: Calibrator | None = None, extra: dict | None = None) -> Path:
+                    calibrator: Calibrator | None = None, extra: dict | None = None,
+                    extra_payload: dict | None = None) -> Path:
     """``model.pt`` (weights, truth-source model, optimizer) and ``pluvium.json`` (everything needed to rebuild the
     model around those weights)."""
     d = Path(directory)
     d.mkdir(parents=True, exist_ok=True)
-    payload = {"model": model.state_dict(), "loss": loss.state_dict(), "state": state or {}}
+    payload = {"model": model.state_dict(), "loss": loss.state_dict(), "state": state or {}, **(extra_payload or {})}
     if optimizer is not None:
         payload["optimizer"] = optimizer.state_dict()
     atomic_save(d / CHECKPOINT, lambda p: torch.save(payload, p))
@@ -232,6 +245,11 @@ class Trainer:
                                            betas=(0.9, 0.95), fused=self.device.type == "cuda")
         self.step, self.elapsed, self.best = 0, 0.0, float("inf")
         self.history: list[dict] = []
+        self.ema = None
+        if cfg.ema_decay > 0:
+            from .training import EMA
+
+            self.ema = EMA(self.model, cfg.ema_decay)
         self._resume()
 
     # ------------------------------------------------------------------------------------ resume --
@@ -245,6 +263,8 @@ class Trainer:
         payload = torch.load(path, map_location="cpu", weights_only=False)
         self.model.load_state_dict(payload["model"])
         self.loss_fn.load_state_dict(payload["loss"])
+        if self.ema is not None and "ema" in payload:
+            self.ema.load_state_dict(payload["ema"])
         state = payload.get("state", {})
         if state.get("stage") == self.stage and "optimizer" in payload:
             self.optimizer.load_state_dict(payload["optimizer"])
@@ -263,7 +283,8 @@ class Trainer:
                 "batch_size": self.cfg.batch_size, "history": self.history[-200:], "saved": time.time()}
 
     def save(self, push: bool = True) -> None:
-        save_checkpoint(self.out, self.model, self.loss_fn, self.optimizer, self._state())
+        save_checkpoint(self.out, self.model, self.loss_fn, self.optimizer, self._state(),
+                        extra_payload={"ema": self.ema.state_dict()} if self.ema is not None else None)
         if push and self.mirror is not None:
             self.mirror.push(self.out / CHECKPOINT, f"{self.mirror_prefix}/{CHECKPOINT}", what="checkpoint")
             self.mirror.push(self.out / META, f"{self.mirror_prefix}/{META}", what="checkpoint metadata")
@@ -319,6 +340,12 @@ class Trainer:
             out = self.model(batch)
         rows = batch["targets"][0]
         loss, metrics = self.loss_fn(out, batch, self.elev[rows])
+        if "weight" in batch:                                 # importance weights of the rare-event curriculum
+            loss = loss * batch["weight"].float().mean()
+        experts = getattr(self.model, "experts", None)
+        if experts is not None and torch.is_tensor(experts.balance) and experts.balance.requires_grad:
+            loss = loss + self.cfg.expert_balance * experts.balance
+            metrics["expert_balance"] = float(experts.balance.detach())
         loss.backward()
         return metrics
 
@@ -331,6 +358,8 @@ class Trainer:
         norm = torch.nn.utils.clip_grad_norm_(params, self.cfg.grad_clip)
         if torch.isfinite(norm):
             self.optimizer.step()
+            if self.ema is not None:
+                self.ema.update(self.model)
         else:
             metrics["skipped"] = 1.0
         self.optimizer.zero_grad(set_to_none=True)
@@ -367,10 +396,18 @@ class Trainer:
         budget = cfg.hours * 3600.0
         if self.elapsed >= budget or self.step >= cfg.max_steps:
             log(f"stage {self.stage}: budget already spent ({self.elapsed / 3600:.2f} of {cfg.hours:.2f} h)")
+            if self.ema is not None and self.ema.updates:
+                self.model.load_state_dict({**self.model.state_dict(), **{
+                    k: v.to(self.model.state_dict()[k].dtype) for k, v in self.ema.shadow.items()}})
             return {"step": self.step, "elapsed": self.elapsed, "history": self.history}
         self.pick_batch_size()
         workers = _workers(cfg.workers)
-        data = BatchSet(self.builder, self.train_starts, cfg.batch_size, cfg.seed)
+        sampler = None
+        if cfg.curriculum:
+            from .training import RareEventSampler
+
+            sampler = RareEventSampler.from_truth(self.train_starts, lambda h: self.builder.cmorph.targets(h))
+        data = BatchSet(self.builder, self.train_starts, cfg.batch_size, cfg.seed, sampler)
         loader = torch.utils.data.DataLoader(
             data, batch_size=None, sampler=range(self.step, cfg.max_steps), num_workers=workers,
             pin_memory=self.device.type == "cuda", prefetch_factor=4 if workers else None,
@@ -411,6 +448,9 @@ class Trainer:
                 break
         self._eval_and_keep()
         self.save()
+        if self.ema is not None:                       # the averaged weights are the ones released and scored
+            self.model.load_state_dict({**self.model.state_dict(),
+                                        **{k: v.to(self.model.state_dict()[k].dtype) for k, v in self.ema.shadow.items()}})
         if self.mirror is not None:
             self.mirror.wait()
         return {"step": self.step, "elapsed": self.elapsed, "best": self.best, "history": self.history}
@@ -461,6 +501,7 @@ def hindcast(model: PluviumModel, builder: SampleBuilder, starts, batch_size: in
     clim = borrowed_climatology(builder.clim, targets)
     board = Scoreboard()
     pool = {"p": [], "wet": [], "known": [], "win_p": {h: [] for h in WINDOWS}, "win_y": {h: [] for h in WINDOWS},
+            "p_moderate": [], "y_moderate": [], "p_heavy": [], "y_heavy": [],
             "thunder_p": [], "thunder_obs": [], "thunder_known": [], "station_hours": []}
     starts = np.asarray(starts)
     for k in range(0, starts.size, batch_size):
@@ -483,10 +524,16 @@ def hindcast(model: PluviumModel, builder: SampleBuilder, starts, batch_size: in
             comp = component(out, "", j)
             k_states = comp["states"]
             wet_target = np.arange(k_states) > 0
-            from .chain import marginals_np
+            from .chain import class_probs, marginals_np
 
-            pool["p"].append((1 - marginals_np(comp["a"], comp["pi"])[..., 0]).astype(np.float32))
+            ps = marginals_np(comp["a"], comp["pi"])
+            raw = class_probs(comp, k_states, ps)                                # (P, T, 4)
+            pool["p"].append((1 - ps[..., 0]).astype(np.float32))
             pool["wet"].append((np.nan_to_num(truth) >= 0.2).astype(np.float32))
+            pool["p_moderate"].append((raw[..., 2] + raw[..., 3]).astype(np.float32))
+            pool["y_moderate"].append((np.nan_to_num(truth) >= 2.5).astype(np.float32))
+            pool["p_heavy"].append(raw[..., 3].astype(np.float32))
+            pool["y_heavy"].append((np.nan_to_num(truth) >= 7.6).astype(np.float32))
             pool["known"].append(known)
             for h in WINDOWS:
                 ok = known[:, :h].all(1)
@@ -501,6 +548,7 @@ def hindcast(model: PluviumModel, builder: SampleBuilder, starts, batch_size: in
                 pool["thunder_known"].append(d["known"])
                 pool["station_hours"].append(hours)
     data = {"p": np.concatenate(pool["p"]), "wet": np.concatenate(pool["wet"]), "known": np.concatenate(pool["known"]),
+            **{k: np.concatenate(pool[k]) for k in ("p_moderate", "y_moderate", "p_heavy", "y_heavy")},
             "win_p": {h: np.concatenate(v) for h, v in pool["win_p"].items()},
             "win_y": {h: np.concatenate(v) for h, v in pool["win_y"].items()}}
     if pool["thunder_p"]:
@@ -510,7 +558,9 @@ def hindcast(model: PluviumModel, builder: SampleBuilder, starts, batch_size: in
 
 
 def fit_calibration(data: dict) -> Calibrator:
-    return Calibrator.fit(data["p"], data["wet"], data["known"], data["win_p"], data["win_y"])
+    exceed_p = {"moderate": data["p_moderate"], "heavy": data["p_heavy"]} if "p_heavy" in data else None
+    exceed_y = {"moderate": data["y_moderate"], "heavy": data["y_heavy"]} if "p_heavy" in data else None
+    return Calibrator.fit(data["p"], data["wet"], data["known"], data["win_p"], data["win_y"], exceed_p, exceed_y)
 
 
 __all__ = ["BatchSet", "TrainConfig", "Trainer", "borrowed_climatology", "build_model", "fit_calibration",

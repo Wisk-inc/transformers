@@ -118,14 +118,18 @@ def summarize(out, t0: int, prefix: str = "", batch_index: int = 0, samples: int
     if calibrator is not None:
         new = calibrator.apply_hourly(p_wet)
         scale = new / np.maximum(p_wet, 1e-9)
-        classes = np.concatenate([1 - new[..., None], classes[..., 1:] * scale[..., None]], -1)
+        if getattr(calibrator, "exceed", None):
+            classes = calibrator.apply_classes(classes, new)
+        else:
+            classes = np.concatenate([1 - new[..., None], classes[..., 1:] * scale[..., None]], -1)
         expected = expected * scale
         p_wet = new
         any_rain = {h: calibrator.apply_window(v, h) for h, v in any_rain.items()}
     if corrector is not None and places is not None:
         new = corrector.apply_hourly(p_wet, places, place_lon, t0)
         scale = new / np.maximum(p_wet, 1e-9)
-        classes = np.concatenate([1 - new[..., None], classes[..., 1:] * scale[..., None]], -1)
+        wet_part = np.maximum(classes[..., 1:].sum(-1, keepdims=True), 1e-9)
+        classes = np.concatenate([1 - new[..., None], classes[..., 1:] / wet_part * new[..., None]], -1)
         expected = expected * scale * corrector.amount_factor(places)[:, None]
         p_wet = new
         any_rain = {h: corrector.apply_window(v, places, h) for h, v in any_rain.items()}

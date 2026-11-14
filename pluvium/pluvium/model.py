@@ -59,16 +59,19 @@ import torch.nn.functional as F
 from torch import nn
 
 from .chain import CENTRES, PRIOR_INITIAL, PRIOR_TRANSITIONS
-from .dataset import MESH_DYNAMIC, TARGET_BASE, TARGET_DYNAMIC
+from .dataset import ADVECTION, MESH_DYNAMIC, POINT_PHYSICS, TARGET_BASE
 from .domain import STATIC_FEATURES, PointSet
-from .features import HOURLY_BASE, HOURLY_CHANNELS, REGIMES, UPPER_CHANNELS
+from .features import ATMOS, CONVECTIVE, HOURLY_BASE, REGIMES, UPPER_CHANNELS
 from .physics import OrographicRain
 from .schedule import DEFAULT, Schedule
 from .weather import OBS_FEATURES
 
-#: switches that rebuild version 1 exactly (two states, no thunder/kind heads, no convective inputs, no advection,
-#: no airport assimilation)
-VERSION_1 = dict(states=2, thunder=False, precip_type=False, convective_channels=False, advection=False,
+#: switches that rebuild version 2 exactly (no theoretical physics inputs, no terrain patches, no refiner, temporal
+#: mixer, lead modulation, experts or head dropout)
+VERSION_2 = dict(physics_channels=False, point_physics=False, terrain_patch=False, refine_layers=0, temporal_layers=0,
+                 lead_film=False, lead_shrink=False, experts=0, head_dropout=0.0, version=2)
+#: and version 1 (two states, no thunder/kind heads, no convective inputs, no advection, no airport assimilation)
+VERSION_1 = dict(VERSION_2, states=2, thunder=False, precip_type=False, convective_channels=False, advection=False,
                  station_assimilation=False, version=1)
 #: which output keys carry the point axis where (everything else: axis 2)
 POINT_AXIS = {"init": 1}
@@ -106,7 +109,18 @@ class PluviumConfig:
     station_assimilation: bool = True
     station_radius_km: float = 150.0
     station_neighbours: int = 8
-    version: int = 2
+    # version 3
+    physics_channels: bool = True
+    point_physics: bool = True
+    terrain_patch: bool = True
+    refine_layers: int = 1
+    refine_neighbours: int = 8
+    temporal_layers: int = 1
+    lead_film: bool = True
+    lead_shrink: bool = True
+    experts: int = 4
+    head_dropout: float = 0.1
+    version: int = 3
     name: str = "pluvium-500"
 
     @classmethod
@@ -125,9 +139,11 @@ class PluviumConfig:
         }
         if size.endswith("-v1"):
             size, overrides = size[:-3], {**VERSION_1, **overrides}
+        elif size.endswith("-v2"):
+            size, overrides = size[:-3], {**VERSION_2, **overrides}
         if size not in rows:
-            raise ValueError(f"unknown size {size!r}; choose from {', '.join(rows)} (add -v1 for version 1)")
-        name = size + ("-v1" if overrides.get("version") == 1 else "")
+            raise ValueError(f"unknown size {size!r}; choose from {', '.join(rows)} (add -v1 or -v2 for older versions)")
+        name = size + {1: "-v1", 2: "-v2"}.get(overrides.get("version", 3), "")
         return cls(**{**rows[size], "name": name, **overrides})
 
     def to_dict(self) -> dict:
@@ -139,6 +155,8 @@ class PluviumConfig:
         values = dict(values)
         if "states" not in values:                       # a version 1 checkpoint
             values.update(VERSION_1)
+        elif "physics_channels" not in values:           # a version 2 checkpoint
+            values.update(VERSION_2)
         return cls(**{k: v for k, v in values.items() if k in known})
 
     def ihelix(self):
@@ -222,10 +240,15 @@ class PluviumModel(nn.Module):
         self.register_buffer("hour_sub", torch.tensor(hour_sub), persistent=False)
         self.register_buffer("future", torch.tensor(future), persistent=False)
         self.register_buffer("history", torch.tensor(np.nonzero(schedule.leads < 0)[0]), persistent=False)
-        n_hourly = len(HOURLY_CHANNELS) if c.convective_channels else len(HOURLY_BASE)
-        n_point = len(TARGET_DYNAMIC) if c.advection else len(TARGET_BASE)
-        self.register_buffer("hourly_idx", torch.arange(n_hourly), persistent=False)
-        self.register_buffer("point_idx", torch.arange(n_point), persistent=False)
+        nb, nc = len(HOURLY_BASE), len(CONVECTIVE)
+        hourly_idx = list(range(nb)) + (list(range(nb, nb + nc)) if c.convective_channels else []) + (
+            list(range(nb + nc, nb + nc + len(ATMOS))) if c.physics_channels else [])
+        pb, pa = len(TARGET_BASE), len(ADVECTION)
+        point_idx = list(range(pb)) + (list(range(pb, pb + pa)) if c.advection else []) + (
+            list(range(pb + pa, pb + pa + len(POINT_PHYSICS))) if c.point_physics else [])
+        n_hourly, n_point = len(hourly_idx), len(point_idx)
+        self.register_buffer("hourly_idx", torch.tensor(hourly_idx), persistent=False)
+        self.register_buffer("point_idx", torch.tensor(point_idx), persistent=False)
 
         # inputs
         self.hourly_in = nn.Linear(n_hourly, d)
@@ -253,6 +276,37 @@ class PluviumModel(nn.Module):
         self.decode_norm = IHelixRMSNorm(d)
         self.decode_ffn = nn.Sequential(nn.Linear(d, 2 * d), nn.GELU(), nn.Linear(2 * d, d))
         self.head_norm = IHelixRMSNorm(d)
+        # version 3 engine (pluvium.engine)
+        from .engine import (
+            HeadDropout,
+            LeadFiLM,
+            LeadShrink,
+            PointRefiner,
+            RegimeExperts,
+            TemporalMixer,
+            TerrainPatchEncoder,
+            knn_on_sphere,
+            terrain_patches,
+        )
+
+        self.patch_encoder = TerrainPatchEncoder(d) if c.terrain_patch else None
+        if self.patch_encoder is not None:
+            self.register_buffer("target_patches", torch.from_numpy(terrain_patches(geo.terrain, targets.lat, targets.lon)),
+                                 persistent=False)
+            self.register_buffer("station_patches", torch.from_numpy(
+                terrain_patches(geo.terrain, stations.lat, stations.lon)) if stations is not None
+                else torch.zeros(0, 2, 16, 16, dtype=torch.float16), persistent=False)
+        self.film = LeadFiLM(d) if c.lead_film else None
+        self.temporal = TemporalMixer(d, max(1, c.heads // 2), c.temporal_layers) if c.temporal_layers else None
+        self.refiner = PointRefiner(d, max(1, c.heads // 2), c.refine_neighbours, c.refine_layers) if c.refine_layers else None
+        self.experts = RegimeExperts(d, c.experts) if c.experts else None
+        self.head_dropout = HeadDropout(c.head_dropout) if c.head_dropout > 0 else None
+        self.shrink = (LeadShrink(torch.tensor(PRIOR_TRANSITIONS[c.states]).log()) if c.lead_shrink else None)
+        self._knn = knn_on_sphere
+        if self.refiner is not None and stations is not None:
+            si, sd = knn_on_sphere(stations.lat, stations.lon, c.refine_neighbours)
+            self.register_buffer("station_nbr", torch.from_numpy(si), persistent=False)
+            self.register_buffer("station_nbr_km", torch.from_numpy(sd), persistent=False)
         # heads (per sub-hour of a frame: three)
         m = c.mixture
         self.timing = nn.Linear(d, 3 * k_states * k_states)
@@ -360,7 +414,7 @@ class PluviumModel(nn.Module):
 
     def encode(self, batch: dict, oro_mesh: torch.Tensor | None = None) -> torch.Tensor:
         """The processed mesh, ``(B, F, N_mesh, hidden)``."""
-        hourly = batch["hourly"][:, :, : self.hourly_idx.numel()]           # (B, F, C, H, W)
+        hourly = batch["hourly"].index_select(2, self.hourly_idx)          # (B, F, C, H, W)
         b, f = hourly.shape[:2]
         n = self.latent_grid.num_points
         dtype = self.hourly_in.weight.dtype
@@ -398,9 +452,15 @@ class PluviumModel(nn.Module):
         h = h + self.decode_ffn(h)
         return self.head_norm(h)
 
+    def _refine(self, h: torch.Tensor, nbr: torch.Tensor, nbr_km: torch.Tensor) -> torch.Tensor:
+        return self.refiner(h, nbr, nbr_km)
+
     def decode_points(self, latent: torch.Tensor, batch: dict, static: torch.Tensor, ctx: torch.Tensor, link,
-                      lon: torch.Tensor, oro: torch.Tensor | None) -> dict:
-        """Heads at decoder points: ``static (P, S)``, ``ctx (B, F, P, D)`` per-frame context, ``lon (P,)``."""
+                      lon: torch.Tensor, oro: torch.Tensor | None, patches: torch.Tensor | None = None,
+                      neighbours: tuple | None = None) -> dict:
+        """Heads at decoder points: ``static (P, S)``, ``ctx (B, F, P, D)`` per-frame context, ``lon (P,)``;
+        ``patches (P, 2, 16, 16)`` terrain around the points and ``neighbours`` ``(index (P, k), km (P, k))`` for the
+        version 3 engine."""
         c = self.config
         k_states = c.states
         b = latent.shape[0]
@@ -408,13 +468,26 @@ class PluviumModel(nn.Module):
         lat_f = latent[:, fut]                                                   # (B, Ff, N, d)
         ff, p = lat_f.shape[1], static.shape[0]
         dtype = lat_f.dtype
-        ctx_f = ctx[:, fut][..., : self.point_idx.numel()].to(dtype)
+        ctx_f = ctx[:, fut].index_select(-1, self.point_idx).to(dtype)
         oro_f = oro[:, fut].to(dtype) if oro is not None else ctx_f.new_zeros(b, ff, p)
-        q = (self.point_static_in(static.to(dtype))[None, None] + self.point_dyn_in(torch.cat([ctx_f, oro_f.unsqueeze(-1)], -1))
+        static_q = self.point_static_in(static.to(dtype))
+        if self.patch_encoder is not None and patches is not None:
+            static_q = static_q + self.patch_encoder(patches).to(dtype)
+        q = (static_q[None, None] + self.point_dyn_in(torch.cat([ctx_f, oro_f.unsqueeze(-1)], -1))
              + self.frame_in(self.frame_embed[fut].to(dtype))[None, :, None])
         q = q.reshape(b * ff, p, -1)
         h = self._maybe_checkpoint(self._decode_body, q, lat_f.reshape(b * ff, lat_f.shape[2], -1), link)
         h = h.view(b, ff, p, -1)
+        if self.film is not None:
+            h = self.film(h, self.frame_embed[fut])
+        if self.temporal is not None:
+            h = self._maybe_checkpoint(self.temporal, h)
+        if self.refiner is not None and neighbours is not None and p > 1:
+            h = self._maybe_checkpoint(self._refine, h, neighbours[0], neighbours[1])
+        if self.experts is not None:
+            h = self._maybe_checkpoint(self.experts, h)
+        if self.head_dropout is not None:
+            h = self.head_dropout(h)
         hf, hs = self.hour_frame, self.hour_sub
         trans = self.timing(h).view(b, ff, p, 3, k_states, k_states).permute(0, 1, 3, 2, 4, 5)[:, hf, hs].float()
         wet_cols = torch.zeros_like(trans)
@@ -451,6 +524,8 @@ class PluviumModel(nn.Module):
                 mu = mu + 0.1 * gain * up.unsqueeze(-1)
             out.update(amt_mu=mu, amt_sig=0.15 + F.softplus(raw[..., 1]))
         out["trans"] = trans + wet_cols
+        if self.shrink is not None:
+            out["trans"] = self.shrink(out["trans"])
         out["init"] = self.initial(h[:, 0]).float()
         if self.thunder_head is not None:
             out["thunder"] = self.thunder_head(h).view(b, ff, p, 3).permute(0, 1, 3, 2)[:, hf, hs].float()
@@ -468,11 +543,18 @@ class PluviumModel(nn.Module):
                                                              self._where("station_where") if with_stations else None])
         latent = self.encode(batch, oro_mesh)
         link = SubLink(self.link_targets, rows)
+        patches = self.target_patches[rows] if self.patch_encoder is not None else None
+        nbr = None
+        if self.refiner is not None:
+            r = rows.cpu().numpy()
+            i, km = self._knn(self.geo.targets.lat[r], self.geo.targets.lon[r], self.config.refine_neighbours)
+            nbr = (torch.from_numpy(i).to(rows.device), torch.from_numpy(km).to(rows.device))
         out = self.decode_points(latent, batch, self.target_static[rows], batch["target_ctx"], link,
-                                 self.target_lon[rows], oro_t)
+                                 self.target_lon[rows], oro_t, patches, nbr)
         if with_stations:
             st = self.decode_points(latent, batch, self.station_static, batch["station_ctx"], self.link_stations,
-                                    self.station_lon, oro_s)
+                                    self.station_lon, oro_s, self.station_patches if self.patch_encoder is not None else None,
+                                    (self.station_nbr, self.station_nbr_km) if self.refiner is not None else None)
             out.update({f"station_{k}": v for k, v in st.items()})
         return out
 
@@ -494,8 +576,16 @@ class PluviumModel(nn.Module):
             if self.orography is not None:
                 oro = self._orography_for(batch, [self.orography.locate(sub.lat, sub.lon)])[0]
             sl = slice(start, start + len(sub))
-            parts.append(self.decode_points(latent, batch, static[sl], ctx[:, :, sl], link, lon[sl], oro))
+            patches = nbr = None
+            if self.patch_encoder is not None:
+                from .engine import terrain_patches
+
+                patches = torch.from_numpy(terrain_patches(self.geo.terrain, sub.lat, sub.lon)).to(device)
+            if self.refiner is not None:
+                i, km = self._knn(sub.lat, sub.lon, self.config.refine_neighbours)
+                nbr = (torch.from_numpy(i).to(device), torch.from_numpy(km).to(device))
+            parts.append(self.decode_points(latent, batch, static[sl], ctx[:, :, sl], link, lon[sl], oro, patches, nbr))
         return {k: torch.cat([p[k] for p in parts], dim=POINT_AXIS.get(k, 2)) for k in parts[0]}
 
 
-__all__ = ["POINT_AXIS", "PluviumConfig", "PluviumModel", "SubLink", "VERSION_1"]
+__all__ = ["POINT_AXIS", "PluviumConfig", "PluviumModel", "SubLink", "VERSION_1", "VERSION_2"]
