@@ -376,9 +376,11 @@ class Operational:
         trainer = Trainer(model, loss, self.builder(model, augment=v3), train, val, self.root / "stage_b", tcfg,
                           stage="B")
         result = trainer.run()
-        save_checkpoint(final, trainer.model, trainer.loss_fn,
-                        state={"stage": "B", "step": result["step"], "elapsed": result["elapsed"],
-                               "runs": int(train.size), "first": _day(train[0]), "last": _day(train[-1])})
+        info = {"stage": "B", "steps": int(result["step"]), "minutes": float(result["elapsed"]) / 60,
+                "runs": int(train.size), "first": _day(train[0]), "last": _day(train[-1]),
+                "parameters": int(model.num_parameters()), "model": model.config.name, "version": model.config.version}
+        save_checkpoint(final, trainer.model, trainer.loss_fn, state=info)
+        (self.root / "finetune.json").write_text(json.dumps(info, indent=1))
         return trainer.model
 
     def forecast(self, model, inits=None, out_dir=None) -> None:
@@ -443,11 +445,6 @@ class Operational:
 
         from ..sources.cmorph import CMORPHCache
 
-        path = self.root / "reference.npz"
-        if path.exists():
-            z = np.load(path)
-            if z["inits"].tolist() == [int(i) for i in inits]:
-                return z["p"]
         years = list(self.cfg.reference_years) + [int(_day(self.train_inits[0])[:4])]
         caches = {y: CMORPHCache(self.root / ("cmorph" if y == years[-1] else "cmorph_reference")) for y in years}
         doy0 = int(np.datetime64(_day(self.eval_inits[0]), "D").astype(object).timetuple().tm_yday)
@@ -481,7 +478,7 @@ class Operational:
                     den = np.asarray(W @ ok.sum(0).astype(np.float64))
                     cache[doy] = (num / np.maximum(den, 1)[None]).astype(np.float32)
                 out[i, d] = cache[doy]
-        np.savez_compressed(path, p=out, inits=np.asarray(inits, np.int64))
+        log(f"operational: reference climatology from {len(totals):,} days of {len(years)} years")
         return out
 
     def _neighbourhood(self, lat_axis, lon_axis):
@@ -506,9 +503,12 @@ class Operational:
         ``(runs, 3, cells)``); and the ``members``' daily rain at the cells ``(runs, members, 3, cells)``."""
         path = self.root / "predictors" / f"{system}.npz"
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
+        sources = [self.root / "forecasts" / f"{_day(t)}.npz" if system == PLUVIUM else
+                   self.root / "baselines" / f"{system}_{_day(t).replace('-', '')}00.npz" for t in self.eval_inits]
+        present = np.array([f.exists() for f in sources])
+        if path.exists():                                   # reuse only if built from exactly these runs
             z = np.load(path)
-            if z["inits"].tolist() == self.eval_inits.tolist():
+            if z["inits"].tolist() == self.eval_inits.tolist() and z["present"].tolist() == present.tolist():
                 return {k: z[k] for k in z.files}
         R, K, P = len(self.eval_inits), len(self.thr), self.land.size
         point = np.full((R, DAYS, K, P), np.nan, np.float32)
@@ -550,7 +550,8 @@ class Operational:
                     nbhd[i, :, k] = np.asarray(W @ (g >= t).mean(0).T).T
             if members is None:
                 return None
-        got = {"point": point, "nbhd": nbhd, "amount": amount, "members": members, "inits": self.eval_inits}
+        got = {"point": point, "nbhd": nbhd, "amount": amount, "members": members, "inits": self.eval_inits,
+               "present": present}
         np.savez_compressed(path, **got)
         return got
 
@@ -641,7 +642,9 @@ class Operational:
                         beta = logistic_fit(feats_w, yy)
                         feats_t = np.stack([_logit(calibrated[n][i, d, k]) for n in members], 1)
                         calibrated[blend][i, d, k] = logistic_apply(beta, feats_t)
+        tuned = self.root / "finetune.json"
         results = {"config": asdict(cfg), "thresholds": list(self.thr), "test_runs": [_day(inits[i]) for i in test_idx],
+                   "finetune": json.loads(tuned.read_text()) if tuned.exists() else {},
                    "cells": int(self.land.size), "systems": {}, "chosen_predictor": chosen, "versus": {}}
         y_test = obs[test_idx]                                                              # (T, 3, P)
         ok_test = np.isfinite(y_test)
@@ -752,13 +755,42 @@ def markdown(results: dict) -> str:
     for n in order:
         lines.append(f"| {sys[n]['label']} | " + " | ".join(
             f"{sys[n]['days']['1'][t].get('auc', float('nan')):.3f}" for t in thr) + " |")
+    ft = results.get("finetune", {})
+    lines += ["", "## How it was run", "",
+              f"* **Pluvium**: {ft.get('model', 'pluvium-small')} (version {ft.get('version', 3)}, "
+              f"{ft.get('parameters', 0):,} parameters). Stage A: 32 minutes on ERA5 for June to September 2021 "
+              f"(the version benchmark's run). Stage B: {ft.get('steps', 0):,} steps ({ft.get('minutes', 0):.0f} minutes "
+              f"on a 4-core CPU) on {ft.get('runs', 0)} real 00 UTC GFS runs from {ft.get('first', '?')} to "
+              f"{ft.get('last', '?')}, all ending before the first calibration day. At issue time it reads that "
+              "morning's GFS run (0.5 degrees), the satellite rain of the previous 3 hours, the airports' reports of "
+              "the previous 3 hours, terrain, and a CMORPH climatology of the 12 months before calibration starts.",
+              "* **Baselines**: each system's own 00 UTC run, read from its producer's archive, interpolated "
+              "bilinearly to the cell centres. Ensembles give the share of members at or above each threshold.",
+              f"* **Calibration** (the same for all, Pluvium included): for each test run, an isotonic regression per "
+              f"day and threshold fitted on the {cfg['window_days']} previous runs whose outcomes were known "
+              f"{cfg['lag_days']} days before. Each system uses whichever predictor fits its window best: its point "
+              f"chance, its chance over everything within {cfg['neighbourhood_deg']:g} degrees, or its mean amount.",
+              "* **Blends**: logistic regression on the calibrated chances, fitted on the same window.",
+              "* **Truth**: CMORPH 8 km rain (satellite estimates adjusted to rain gauges) summed over 00-24 UTC.",
+              f"* **Reference**: the CMORPH climatology of {min(cfg['reference_years'])}-"
+              f"{int(str(ft.get('first', '2024'))[:4])}: days within 15 days of the same date, cells within 25 km.",
+              "* **Intervals**: moving-block bootstrap over test days (blocks of 5 days, 2,000 resamples).",
+              "", "## Limits", "",
+              "* One island and two months (the early rainy season). Skill elsewhere or in other seasons is untested.",
+              "* Truth is CMORPH, which Pluvium was also trained on. Calibration on the same truth puts every system "
+              "on the same footing, but the raw scores favour Pluvium.",
+              "* Pluvium's \"rain now\" input comes from the CMORPH record, which is adjusted to gauges after the fact. "
+              "Live, Pluvium reads GOES-East and radar instead, which are cruder.",
+              "* Pluvium ran at its small size, trained for about two hours on a CPU in total. Pluvium-500 is 60 "
+              "times larger and is meant to train for a day on a GPU.",
+              ]
     return "\n".join(lines) + "\n"
 
 
 def main(argv=None) -> None:
     import argparse
 
-    p = argparse.ArgumentParser(description="Pluvium against the operational forecasting systems.")
+    p = argparse.ArgumentParser(prog="pluvium operational", description="Pluvium against the operational forecasting systems.")
     p.add_argument("step", choices=["truth", "reference", "gfs", "baselines", "finetune", "forecast", "evaluate", "all"])
     p.add_argument("--root", required=True)
     p.add_argument("--geography", required=True)

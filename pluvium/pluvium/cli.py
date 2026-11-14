@@ -127,11 +127,19 @@ def main(argv=None) -> None:
     p.add_argument("--model", default=None)
     p.add_argument("--state", default="~/.cache/pluvium/live")
     p.set_defaults(func=cmd_learn)
-    p = sub.add_parser("program", help="train, calibrate, score and publish on one GPU (see pluvium.program)")
+    p = sub.add_parser("program", add_help=False, help="train, calibrate, score and publish on one GPU (see pluvium.program)")
     p.set_defaults(func=None)
-    p = sub.add_parser("bench", help="train and score architectures on held-out data (see pluvium.bench)")
+    p = sub.add_parser("bench", add_help=False, help="train and score architectures on held-out data (see pluvium.bench)")
+    p.set_defaults(func=None)
+    p = sub.add_parser("operational", add_help=False, help="score Pluvium against ECMWF, NOAA and AI forecasts on real runs "
+                                           "(see pluvium.benchmarks.operational)")
     p.set_defaults(func=None)
     args, rest = parser.parse_known_args(argv)
+    if args.command == "operational":
+        from .benchmarks.operational import main as operational_main
+
+        operational_main(rest)
+        return
     if args.command == "program":
         from .program import main as program_main
 
