@@ -19,6 +19,8 @@ Pluvium. For each it gives how the failure is detected and what the system does,
 | An airport report from the wrong hour | Report time minus 5 minutes defines the hour | Reports at 14:00 describe hour 13 | `sources/metar.py`, `sources/stations.py` |
 | No airport reports at all | Empty METAR response | The model was trained with random whole-network dropout of reports | `dataset.py` |
 | Clock or feed time errors | Observation times in the future or too old | Not used as current; noted | `guard/freshness.py` |
+| Memory exhausted by global fields (three models at 0.25 degrees hold thousands of 4 MB fields) | Found in a live test, killed at 9.4 GB | Every field is cut to the domain as soon as it is decoded; a run now peaks at about 0.3 GB | `sources/nwp.py` |
+| An archive throttles bursts (ECMWF's AWS bucket answers with HTTP 503) | Retries exhausted | ECMWF runs are read from Google Cloud's copy first, AWS second | `sources/baselines.py` |
 
 ## The model
 

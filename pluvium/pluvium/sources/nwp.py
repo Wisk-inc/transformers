@@ -25,6 +25,8 @@ from ..util import fetch, hour_to_datetime64, log, parallel_map
 GFS = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.{day}/{hour:02d}/atmos/gfs.t{hour:02d}z.pgrb2.0p25.f{lead:03d}"
 ECMWF = "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/{day}/{hour:02d}z/{model}/0p25/oper/{day}{hour:02d}0000-{lead}h-oper-fc.grib2"
 ECMWF_SITE = "https://data.ecmwf.int/forecasts/{day}/{hour:02d}z/{model}/0p25/oper/{day}{hour:02d}0000-{lead}h-oper-fc.grib2"
+#: Google Cloud's copy of ECMWF open data takes bursts that the AWS bucket throttles (HTTP 503), so it is tried first
+ECMWF_GCS = "https://storage.googleapis.com/ecmwf-open-data/{day}/{hour:02d}z/{model}/0p25/oper/{day}{hour:02d}0000-{lead}h-oper-fc.grib2"
 
 NCEP_SURFACE = {"tcwv": ("PWAT", "entire atmosphere (considered as a single layer)"), "u10": ("UGRD", "10 m above ground"),
                 "v10": ("VGRD", "10 m above ground"), "t2m": ("TMP", "2 m above ground"), "msl": ("PRMSL", "mean sea level"),
@@ -146,7 +148,7 @@ class NWPReader:
             member = "gec00" if self.model.endswith("c00") else "gep" + self.model[-2:]
             return [GEFS.format(day=day, hour=hour, lead=lead, member=member)]
         name = "ifs" if self.model == "ifs" else "aifs-single"
-        return [u.format(day=day, hour=hour, lead=lead, model=name) for u in (ECMWF, ECMWF_SITE)]
+        return [u.format(day=day, hour=hour, lead=lead, model=name) for u in (ECMWF_GCS, ECMWF, ECMWF_SITE)]
 
     def _index(self, init: int, lead: int):
         last = None
