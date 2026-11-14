@@ -113,3 +113,19 @@ def test_evaluate_end_to_end_on_synthetic_systems(tmp_path):
     assert res["versus"]["gfs"]["day1_1mm"]["delta_bs"] < 0
     text = markdown(res)
     assert "Pluvium" in text and "ECMWF ENS" in text
+
+
+def test_calibrators_recover_a_logistic_truth():
+    from pluvium.benchmarks.operational import calibrator
+
+    rng = np.random.default_rng(5)
+    p = rng.beta(0.6, 2.0, 30_000)                                   # a forecaster's chances
+    truth = 1 / (1 + np.exp(-(0.4 + 0.8 * np.log(np.clip(p, 0.01, 0.99) / (1 - np.clip(p, 0.01, 0.99))))))
+    y = (rng.random(p.size) < truth).astype(float)
+    for method in ("logistic", "isotonic"):
+        fit = calibrator(p, y, "point", method)
+        assert np.abs(fit(p) - truth).mean() < 0.03, method
+    amount = rng.gamma(0.5, 6.0, 30_000)
+    y = (rng.random(amount.size) < 1 - np.exp(-amount / 5)).astype(float)
+    fit = calibrator(amount, y, "amount", "logistic")
+    assert fit(np.array([0.0]))[0] < fit(np.array([20.0]))[0]

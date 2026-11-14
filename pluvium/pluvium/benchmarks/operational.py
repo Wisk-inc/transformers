@@ -68,6 +68,7 @@ class OperationalConfig:
     test_period: tuple = ("2025-05-01T00", "2025-07-01T00")
     window_days: int = 30
     lag_days: int = 3
+    calibration: str = "logistic"                    # "logistic" (frozen after May-June 2025) or "isotonic"
     reference_years: tuple = tuple(range(2017, 2024))  # plus the training year, for the climatology of skill
     thresholds: tuple = THRESHOLDS
     systems: tuple = tuple(SYSTEMS)
@@ -143,6 +144,26 @@ def logistic_fit(features: np.ndarray, y: np.ndarray, l2: float = 1e-3, iteratio
         if np.abs(step).max() < 1e-7:
             break
     return beta
+
+
+def _transform(x: np.ndarray, kind: str) -> np.ndarray:
+    """A calibration predictor on a scale where a logistic regression is natural: log(1 + mm) for amounts, the logit
+    for chances."""
+    x = np.asarray(x, np.float64)
+    return np.log1p(np.maximum(x, 0.0)) if kind == "amount" else _logit(x)
+
+
+def calibrator(x: np.ndarray, y: np.ndarray, kind: str, method: str = "logistic"):
+    """Fit ``P(y | x)`` and return it as a function. ``logistic``: two parameters on :func:`_transform` (robust on a
+    30-day window). ``isotonic``: a monotone step function (flexible, and found to overfit a 30-day window in which
+    one wet day dominates the highest chances)."""
+    if method == "isotonic":
+        kx, ky = isotonic(x, y)
+        return lambda v: np.interp(np.asarray(v, np.float64), kx, ky)
+    if method != "logistic":
+        raise ValueError(f"unknown calibration {method!r}")
+    beta = logistic_fit(_transform(x, kind)[:, None], y)
+    return lambda v: logistic_apply(beta, _transform(v, kind)[..., None])
 
 
 def logistic_apply(beta: np.ndarray, features: np.ndarray) -> np.ndarray:
@@ -250,8 +271,11 @@ class Operational:
         """CMORPH for the same weeks of the reference years (the climatology that skill is measured against)."""
         from ..sources.cmorph import stage_cmorph
 
+        a = np.datetime64(self.cfg.test_period[0][:10], "D") - np.timedelta64(20, "D")
+        b = np.datetime64(self.cfg.test_period[1][:10], "D") + np.timedelta64(23, "D")
         for year in self.cfg.reference_years:
-            p = (hour_of(f"{year}-04-25T00"), hour_of(f"{year}-07-06T00"))
+            later = year + int(str(b)[:4]) - int(str(a)[:4])            # a period may cross into the next year
+            p = (hour_of(f"{year}{str(a)[4:]}T00"), hour_of(f"{later}{str(b)[4:]}T00"))
             stage_cmorph(self.root / "cmorph_reference", self.geo.targets, self.geo.mesh, period=p, workers=workers)
 
     def reader(self):
@@ -447,8 +471,9 @@ class Operational:
 
         years = list(self.cfg.reference_years) + [int(_day(self.train_inits[0])[:4])]
         caches = {y: CMORPHCache(self.root / ("cmorph" if y == years[-1] else "cmorph_reference")) for y in years}
-        doy0 = int(np.datetime64(_day(self.eval_inits[0]), "D").astype(object).timetuple().tm_yday)
-        first, last = doy0 - 20, doy0 + 120
+        doys = [int(np.datetime64(_day(int(t) + 24 * d), "D").astype(object).timetuple().tm_yday)
+                for t in inits for d in range(DAYS)]
+        first, last = min(doys) - 17, max(doys) + 17
         totals = {}                                          # (year, day of year) -> daily rain at the cells
         for y in years:
             for d in range(first, last):
@@ -621,24 +646,24 @@ class Operational:
                 ok = np.isfinite(y_win)
                 for k, t in enumerate(self.thr):
                     yy = (y_win[ok] >= t).astype(np.float64)
-                    best_logits = {}
+                    fitted = {}
                     for n in available:
                         best = None
                         for kind in kinds:
                             x = self._x(preds[n], kind, win, d, k)[ok]
-                            kx, ky = isotonic(x, yy)
-                            bs = float(np.mean((np.interp(x, kx, ky) - yy) ** 2))
+                            fit = calibrator(x, yy, kind, cfg.calibration)
+                            bs = float(np.mean((fit(x) - yy) ** 2))
                             if best is None or bs < best[0]:
-                                best = (bs, kind, kx, ky)
-                        _, kind, kx, ky = best
+                                best = (bs, kind, fit)
+                        _, kind, fit = best
                         chosen[n][kind] += 1
-                        calibrated[n][i, d, k] = np.interp(self._x(preds[n], kind, i, d, k), kx, ky)
-                        best_logits[n] = (kind, kx, ky)
+                        calibrated[n][i, d, k] = fit(self._x(preds[n], kind, i, d, k))
+                        fitted[n] = (kind, fit)
                     for blend, members in ((BLEND_OPS, ops), (BLEND_ALL, available)):
                         if len(members) < 2:
                             continue
-                        feats_w = np.stack([_logit(np.interp(self._x(preds[n], best_logits[n][0], win, d, k)[ok],
-                                                             best_logits[n][1], best_logits[n][2])) for n in members], 1)
+                        feats_w = np.stack([_logit(fitted[n][1](self._x(preds[n], fitted[n][0], win, d, k)[ok]))
+                                            for n in members], 1)
                         beta = logistic_fit(feats_w, yy)
                         feats_t = np.stack([_logit(calibrated[n][i, d, k]) for n in members], 1)
                         calibrated[blend][i, d, k] = logistic_apply(beta, feats_t)
@@ -692,11 +717,19 @@ class Operational:
                     mean, lo, hi, p_better = block_bootstrap(per_day, resamples, seed=cfg.seed + 17 * d + k)
                     comp[f"day{d + 1}_{t:g}mm"] = {"delta_bs": mean, "ci95": [lo, hi], "share_pluvium_better": p_better}
             results["versus"][other] = comp
-        (self.root / "results.json").write_text(json.dumps(results, indent=1, default=float))
+        (self.root / f"results_{self.tag}.json").write_text(json.dumps(results, indent=1, default=float))
         return results
+
+    @property
+    def tag(self) -> str:
+        """``2025-05_logistic``: the first test month and the calibration method."""
+        return f"{self.cfg.test_period[0][:7]}_{self.cfg.calibration}"
 
 
 # ----------------------------------------------------------------------------------------- report --
+
+METHODS = {"isotonic": "isotonic regression", "logistic": "logistic regression"}
+
 
 def markdown(results: dict) -> str:
     """The benchmark as a Markdown report."""
@@ -712,8 +745,8 @@ def markdown(results: dict) -> str:
         "Truth: CMORPH. Every forecast is a real, archived operational run; none uses a reanalysis.",
         "",
         "Brier skill score against the climatology of the same weeks (higher is better; 0 is climatology). "
-        "Each system is calibrated the same causal way (isotonic regression on the 30 previous runs). "
-        "The raw score is in brackets.",
+        f"Each system is calibrated the same causal way ({METHODS[cfg.get('calibration', 'isotonic')]} on the "
+        f"{cfg['window_days']} previous runs). The raw score is in brackets.",
         "",
     ]
     for t in thr:
@@ -766,8 +799,9 @@ def markdown(results: dict) -> str:
               "the previous 3 hours, terrain, and a CMORPH climatology of the 12 months before calibration starts.",
               "* **Baselines**: each system's own 00 UTC run, read from its producer's archive, interpolated "
               "bilinearly to the cell centres. Ensembles give the share of members at or above each threshold.",
-              f"* **Calibration** (the same for all, Pluvium included): for each test run, an isotonic regression per "
-              f"day and threshold fitted on the {cfg['window_days']} previous runs whose outcomes were known "
+              f"* **Calibration** (the same for all, Pluvium included): for each test run, a "
+              f"{METHODS[cfg.get('calibration', 'isotonic')]} per day and threshold fitted on the "
+              f"{cfg['window_days']} previous runs whose outcomes were known "
               f"{cfg['lag_days']} days before. Each system uses whichever predictor fits its window best: its point "
               f"chance, its chance over everything within {cfg['neighbourhood_deg']:g} degrees, or its mean amount.",
               "* **Blends**: logistic regression on the calibrated chances, fitted on the same window.",
@@ -800,13 +834,16 @@ def main(argv=None) -> None:
     p.add_argument("--threads", type=int, default=None)
     p.add_argument("--report", default=None, help="also write the Markdown report here")
     p.add_argument("--which", default="all", help="gfs: train, eval or all")
+    p.add_argument("--test-period", default="2025-05-01T00,2025-07-01T00", help="first and end issue time, UTC")
+    p.add_argument("--calibration", default="logistic", choices=["logistic", "isotonic"])
     a = p.parse_args(argv)
     if a.threads:
         import torch
 
         torch.set_num_threads(a.threads)
     op = Operational(OperationalConfig(root=a.root, geography=a.geography, checkpoint=a.checkpoint,
-                                       stations=a.stations, finetune_steps=a.steps))
+                                       stations=a.stations, finetune_steps=a.steps,
+                                       test_period=tuple(a.test_period.split(",")), calibration=a.calibration))
     steps = (["truth", "gfs", "baselines", "reference", "finetune", "forecast", "evaluate"] if a.step == "all"
              else [a.step])
     model = None
@@ -826,7 +863,7 @@ def main(argv=None) -> None:
         elif s == "evaluate":
             results = op.evaluate()
             text = markdown(results)
-            (op.root / "OPERATIONAL_BENCHMARK.md").write_text(text)
+            (op.root / f"OPERATIONAL_BENCHMARK_{op.tag}.md").write_text(text)
             if a.report:
                 Path(a.report).write_text(text)
             print(text)
