@@ -69,6 +69,7 @@ class OperationalConfig:
     window_days: int = 30
     lag_days: int = 3
     calibration: str = "logistic"                    # "logistic" (frozen after May-June 2025) or "isotonic"
+    climatology_span: tuple | None = None            # the model's climatology input; None: the 12 months before calibration
     reference_years: tuple = tuple(range(2017, 2024))  # plus the training year, for the climatology of skill
     thresholds: tuple = THRESHOLDS
     systems: tuple = tuple(SYSTEMS)
@@ -326,8 +327,11 @@ class Operational:
 
         path = self.root / "climatology.npz"
         if not path.exists():
-            b = hour_of(self.cfg.calibration_start)
-            hours = np.arange(b - 365 * 24, b)
+            if self.cfg.climatology_span:
+                hours = np.arange(hour_of(self.cfg.climatology_span[0]), hour_of(self.cfg.climatology_span[1]))
+            else:
+                b = hour_of(self.cfg.calibration_start)
+                hours = np.arange(b - 365 * 24, b)
             cm = CMORPHCache(self.root / "cmorph")
             clim = compute_climatology(lambda h: cm.targets(h), self.geo.targets.lon, hours)
             clim.save(path)
