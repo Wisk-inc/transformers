@@ -31,11 +31,13 @@ NCEP_SURFACE = {"tcwv": ("PWAT", "entire atmosphere (considered as a single laye
                 "tcc": ("TCDC", "entire atmosphere")}
 NCEP_UPPER = {"u": "UGRD", "v": "VGRD", "q": "SPFH", "t": "TMP"}
 ECMWF_SURFACE = {"tcwv": "tcwv", "u10": "10u", "v10": "10v", "t2m": "2t", "msl": "msl", "tcc": "tcc"}
+GFS05 = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.{day}/{hour:02d}/atmos/gfs.t{hour:02d}z.pgrb2.0p50.f{lead:03d}"
 GEFS = ("https://noaa-gefs-pds.s3.amazonaws.com/gefs.{day}/{hour:02d}/atmos/pgrb2ap5/"
         "{member}.t{hour:02d}z.pgrb2a.0p50.f{lead:03d}")
 #: Output steps of each model (hours) and how far it runs. GFS ensemble members are named ``gefs-c00`` (control)
 #: and ``gefs-p01`` ... ``gefs-p30``.
-STEPS = {"gfs": (1, 120), "ifs": (3, 144), "aifs": (6, 240), "gefs": (3, 384)}
+STEPS = {"gfs": (1, 120), "gfs05": (3, 384), "ifs": (3, 144), "aifs": (6, 240), "gefs": (3, 384)}
+NCEP = ("gfs", "gfs05", "gefs")
 
 
 def family(model: str) -> str:
@@ -126,6 +128,8 @@ class NWPReader:
         day, hour = s[:10].replace("-", ""), int(s[11:13])
         if self.model == "gfs":
             return [GFS.format(day=day, hour=hour, lead=lead)]
+        if self.model == "gfs05":
+            return [GFS05.format(day=day, hour=hour, lead=lead)]
         if family(self.model) == "gefs":
             member = "gec00" if self.model.endswith("c00") else "gep" + self.model[-2:]
             return [GEFS.format(day=day, hour=hour, lead=lead, member=member)]
@@ -135,7 +139,7 @@ class NWPReader:
     def _index(self, init: int, lead: int):
         last = None
         for url in self._urls(init, lead):
-            ncep = family(self.model) in ("gfs", "gefs")
+            ncep = family(self.model) in NCEP
             suffix = ".idx" if ncep else ".index"
             try:
                 text = fetch(url + suffix, timeout=60.0, attempts=3).decode()
@@ -162,7 +166,7 @@ class NWPReader:
     def _surface_at(self, init: int, lead: int) -> dict:
         url, index = self._index(init, lead)
         out = {}
-        ncep = family(self.model) in ("gfs", "gefs")
+        ncep = family(self.model) in NCEP
         for short in ("tcwv", "u10", "v10", "t2m", "msl", "tcc"):
             if ncep:
                 var, level = NCEP_SURFACE[short]
@@ -182,7 +186,7 @@ class NWPReader:
                             values, la, lo = decode(fetch(url, row["start"], row["end"]))
                             out["tp_bucket"] = (a, (values, la, lo))
                             break
-            elif self.model == "gfs":
+            elif self.model in ("gfs", "gfs05"):
                 want = f"0-{lead // 24} day acc fcst" if lead % 24 == 0 else f"0-{lead} hour acc fcst"
                 got = self._message(url, index, "APCP", "surface", want)
                 out["tp_cum"] = got
@@ -197,7 +201,7 @@ class NWPReader:
         gefs = family(self.model) == "gefs"
         for short in UPPER_SHORT:
             for p in LEVELS:
-                if self.model == "gfs":
+                if self.model in ("gfs", "gfs05"):
                     got = self._message(url, index, NCEP_UPPER[short], f"{p} mb")
                 elif gefs:
                     var = "RH" if short == "q" else NCEP_UPPER[short]
@@ -332,7 +336,7 @@ class NWPReader:
 
 def latest_cycle(model: str, now_hour: int, reader: NWPReader, look_back: int = 30) -> int | None:
     """The newest cycle of ``model`` that has published far enough to cover a forecast issued at ``now_hour``."""
-    step = 6 if family(model) in ("gfs", "gefs") else 12 if model == "ifs" else 6
+    step = 6 if family(model) in NCEP else 12 if model == "ifs" else 6
     start = now_hour - now_hour % step
     for back in range(0, look_back + 1, step):
         init = start - back
@@ -341,4 +345,4 @@ def latest_cycle(model: str, now_hour: int, reader: NWPReader, look_back: int = 
     return None
 
 
-__all__ = ["ECMWF", "GEFS", "GFS", "NWPReader", "STEPS", "box_average", "decode", "ensemble", "family", "latest_cycle"]
+__all__ = ["ECMWF", "GEFS", "GFS", "GFS05", "NCEP", "NWPReader", "STEPS", "box_average", "decode", "ensemble", "family", "latest_cycle"]
