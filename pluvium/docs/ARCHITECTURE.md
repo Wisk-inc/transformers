@@ -81,13 +81,66 @@ against brute-force enumeration in the tests.
 * **Advection** (version 2): for the first 12 hours, the rain falling now is carried along the steering wind, the
   core idea of radar nowcasting, done here with satellite rain because the region has little open radar.
 
-## 3. Live data
+## 3. Version 3: deeper physics, a deeper engine, and training for rare events
+
+Version 3 (the default; `-v2` and `-v1` rebuild the earlier versions for comparison) adds four layers of
+depth, each aimed at a specific weakness.
+
+**Theoretical physics as inputs** (`pluvium/atmos/`):
+
+* exact moist thermodynamics (Bolton 1980) and the CAPE, CIN and LCL of an 850 hPa parcel;
+* column relative humidity and the exponential law of tropical rain (Bretherton et al. 2004), with
+  vertically integrated moisture-flux convergence;
+* the Saharan air layer index (dry, warm mid-levels with an easterly jet);
+* tropical-wave trough axes at 700 hPa and their arrival times;
+* cyclone detection with an R-CLIPER-shaped rain prior and shear asymmetry;
+* the sea-breeze front's passage from gravity-current theory;
+* the land and sea diurnal clocks;
+* forced ascent at two terrain scales, and the Froude number for blocking.
+
+**A deeper decoder** (`pluvium/engine/`):
+
+* a terrain-patch encoder reads 35 km of elevation and coastline around every point;
+* lead-time FiLM, and learned shrinkage of the transitions towards climatology as lead grows;
+* attention along each point's 40 future frames;
+* attention among neighbouring decoded points;
+* a regime mixture of experts;
+* head dropout sampled at forecast time for epistemic uncertainty.
+
+**Training for what matters** (`pluvium/training/`):
+
+* a rare-event curriculum that draws heavy-rain and thunder windows several times as often, with tempered
+  importance weights;
+* averaged (EMA) weights;
+* physical augmentation: satellite gaps, airport report errors, driving-model moisture bias;
+* distillation into small models.
+
+**Probability and hydrology** (`pluvium/prob/`, `pluvium/hydro/`):
+
+* a spatial copula for coherent area and catchment samples;
+* conformal intervals for totals;
+* generalised Pareto tails and return periods;
+* Brier decomposition, ROC, ETS, SEDI and the fractions skill score;
+* antecedent wetness, curve-number runoff and unit-hydrograph flood timing.
+
+**Operations** (`pluvium/guard/`, `pluvium/ops/`, `pluvium/render/`):
+
+* input repair, freshness checks, drift detection and output repair;
+* a statistical fallback;
+* an hourly operational cycle with atomic publishing and a JSON API;
+* maps, bulletins in English and Jamaican Patois, and CAP 1.2 alerts.
+
+Every module and its purpose is listed in [MODULES.md](MODULES.md). What can go wrong in operation, and what the
+system does about it, is in [FAILURE_MODES.md](FAILURE_MODES.md).
+
+## 3b. Live data
 
 | Feed | Used for |
 |---|---|
 | GFS (NOAA), ECMWF IFS and AIFS open data | The driving fields; one forecast per model, mixed (disagreement widens the windows) |
 | GFS ensemble (GEFS, 31 members at 0.5 degrees, optional: `--ensemble 31`) | More members in the mixture: the spread of the start window and the totals then reflects the atmosphere's own uncertainty; the members together weigh as much as two deterministic models |
 | GOES-East rain rate (or infrared when that product is unavailable) | Rain falling now, and the field that is advected |
+| MRMS Caribbean radar (NOAA, 1 km every 2 minutes, Puerto Rico and the Virgin Islands) | Rain now where radar reaches, replacing the satellite estimate |
 | METAR from ~80 Caribbean airports (aviationweather.gov) | The last three hours of weather read into the mesh; the truth that online learning checks forecasts against |
 | GOES-East Geostationary Lightning Mapper | Lightning within 10 km of each town in the last 15 minutes |
 

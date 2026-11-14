@@ -72,7 +72,9 @@ GPU_HOURS=24 HF_TOKEN=... HF_REPO=you/Pluvium-500 pluvium program
 
 ## How it works
 
-The full explanation is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In short:
+The full explanation is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), every module's purpose is in
+[docs/MODULES.md](docs/MODULES.md), and what can go wrong in operation (and what Pluvium does about it) is in
+[docs/FAILURE_MODES.md](docs/FAILURE_MODES.md). In short:
 
 * **Inputs**:
   * the global models' fields: GFS, ECMWF IFS and AIFS live, ERA5 in training;
@@ -94,6 +96,17 @@ The full explanation is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In shor
   matrix (a differentiable hidden Markov model), so neither instrument's errors are taught as truth.
 * **Live**: one run per driving model, mixed. Calibrated on held-out data. Corrected online from what the
   airports report afterwards.
+* **Version 3 depth**, in its own subpackages:
+  * `atmos/`: CAPE/CIN, column humidity, Saharan air, tropical waves, cyclone rain, sea breezes, diurnal clocks,
+    terrain lift;
+  * `engine/`: terrain patches, lead modulation, temporal and neighbour attention, experts, uncertainty heads;
+  * `training/`: rare-event curriculum, averaged weights, augmentation, distillation;
+  * `prob/`: copulas, conformal intervals, extreme-value tails, scores;
+  * `guard/`: input repair, freshness, drift, output repair, fallback;
+  * `hydro/`: soil wetness, runoff, flood peak timing;
+  * `insight/`: attribution, error analysis, case replays;
+  * `render/`: maps, bulletins, CAP alerts;
+  * `ops/`: hourly service and JSON API.
 
 ## Benchmark
 

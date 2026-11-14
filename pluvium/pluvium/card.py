@@ -92,6 +92,14 @@ compares the full version 2 engine with version 1 on held-out data.
    **forecast-error emulation** during reanalysis training.
 9. **A mixture of chains** live, one per driving model, so disagreement widens the windows.
 10. **Online corrections.** Forecasts are checked against later airport reports and recalibrated per parish.
+11. **Theoretical physics inputs** (version 3): parcel CAPE/CIN/LCL with exact moist thermodynamics, column
+    relative humidity and the Bretherton law, moisture-flux convergence, the Saharan air layer, tropical-wave
+    arrival, a parametric cyclone rain prior, sea-breeze front timing, diurnal clocks, forced ascent and blocking.
+12. **A deeper decoder** (version 3): terrain patches, lead-time modulation and shrinkage towards climatology,
+    attention along each point's future and among neighbouring points, a regime mixture of experts, and head
+    dropout sampled at forecast time.
+13. **Rare-event training** (version 3): a curriculum that oversamples heavy rain and thunder with tempered
+    importance weights, averaged weights, and physical augmentation.
 
 ## Training
 
