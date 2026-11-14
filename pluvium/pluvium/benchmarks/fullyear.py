@@ -96,11 +96,14 @@ def land_mask(reader: ArchiveReader, region: str, lat: np.ndarray, lon: np.ndarr
 
 
 class CellSet:
-    """The cells scored in a region: their coordinates, how to read truth there, and the climatology."""
+    """The cells scored in a region: their coordinates, how to read truth there, and the climatology. ``grid_fn``
+    (optional) reads the whole grid and ``index`` picks the cells from it, so the climatology can be pooled over
+    neighbouring cells (one year of daily rain per cell is noisy)."""
 
-    def __init__(self, lat, lon, truth_fn, name: str) -> None:
+    def __init__(self, lat, lon, truth_fn, name: str, grid_fn=None, index=None) -> None:
         self.lat, self.lon = np.asarray(lat, np.float64), np.asarray(lon, np.float64)
         self.truth_fn, self.name = truth_fn, name
+        self.grid_fn, self.index = grid_fn, index
         self.clim = None
 
     def __len__(self) -> int:
@@ -109,17 +112,26 @@ class CellSet:
     def climatology(self, day_hours: np.ndarray, thresholds=(1.0, 10.0, 25.0, 50.0)) -> None:
         """By calendar month, from ``day_hours`` (the training year): chance of each threshold and mean, pooled over
         the month before and after."""
-        rain = np.stack([self.truth_fn(int(h)) for h in day_hours])                # (D, N)
+        from scipy.ndimage import uniform_filter
+
+        pooled = self.grid_fn is not None
+        rain = np.stack([(self.grid_fn if pooled else self.truth_fn)(int(h)) for h in day_hours])   # (D, ...)
         months = np.array([_month(h) for h in day_hours])
         clim = {}
         for m in range(1, 13):
             near = np.isin(months, [(m - 2) % 12 + 1, m, m % 12 + 1])
             r = rain[near]
             ok = np.isfinite(r)
-            n = np.maximum(ok.sum(0), 1)
-            entry = {f"clim_p{int(t)}": ((r >= t) & ok).sum(0) / n for t in thresholds}
-            entry["clim_mean"] = np.log1p(np.where(ok, r, 0).sum(0) / n)
-            entry["mean_mm"] = np.where(ok, r, 0).sum(0) / n
+            sums = {f"clim_p{int(t)}": ((r >= t) & ok).sum(0).astype(np.float64) for t in thresholds}
+            sums["mean_mm"] = np.where(ok, r, 0).sum(0).astype(np.float64)
+            count = ok.sum(0).astype(np.float64)
+            if pooled:                                                  # pool each cell with its 8 neighbours
+                sums = {k: uniform_filter(v, size=3, mode="nearest") for k, v in sums.items()}
+                count = uniform_filter(count, size=3, mode="nearest")
+            entry = {k: v / np.maximum(count, 1e-9) for k, v in sums.items()}
+            entry["clim_mean"] = np.log1p(entry["mean_mm"])
+            if pooled:
+                entry = {k: v[self.index] for k, v in entry.items()}
             clim[m] = {k: v.astype(np.float32) for k, v in entry.items()}
         self.clim = clim
 
@@ -483,7 +495,10 @@ def region_cells(cfg: FullYearConfig, region: str, reader: ArchiveReader) -> Cel
     def truth_fn(day_hour: int) -> np.ndarray:
         return truth.days(region, [day_hour])[0][ii, jj]
 
-    return CellSet(lat[ii], lon[jj], truth_fn, region)
+    def grid_fn(day_hour: int) -> np.ndarray:
+        return truth.days(region, [day_hour])[0]
+
+    return CellSet(lat[ii], lon[jj], truth_fn, region, grid_fn=grid_fn, index=(ii, jj))
 
 
 def run_region(cfg: FullYearConfig, region: str) -> dict:
@@ -662,6 +677,30 @@ def markdown(results: dict, cfg: dict) -> str:
             lines.append(f"| {_name(m, net)} | {fmt('csi1', v['1']['csi'])} | {fmt('csi10', v['10']['csi'])} | "
                          f"{fmt('crps', v['crps'], 2)} | {fmt('rmse', v['rmse'], 2)} | {fmt('acc', v['acc'])} | "
                          f"{v['sharpness']:.2f} |")
+        lines.append("")
+        top = "blend" if net else "blend_ops"
+        singles = [m for m in res["leads"].get("1", {}) if m in ARCHIVE_SYSTEMS]
+        lines += ["**Lead by lead, 1 mm or more** (Brier skill score; the best post-processed system named)", "",
+                  "| Day | Pluvium Blend | Best other (post-processed) | ECMWF ENS (raw) | Pluvium lead |",
+                  "|---|---|---|---|---|"]
+        for lead in range(1, 15):
+            row = res["leads"].get(str(lead), {})
+            if not row.get(top):
+                continue
+            mine = row[top]["1"]["bss"]
+            rivals = [(row[m]["1"]["bss"], m) for m in singles + (["blend_ops"] if net else []) if row.get(m)]
+            best_v, best_m = max(rivals) if rivals else (float("nan"), "-")
+            ens = row.get("ens_raw", {}).get("1", {}).get("bss", float("nan"))
+            lines.append(f"| {lead} | {mine:+.3f} | {best_v:+.3f} ({_name(best_m, net)}) | {ens:+.3f} | {mine - best_v:+.3f} |")
+        lines += ["", "**By season, days 1-3, 1 mm or more** (Brier skill score)", "",
+                  "| Season | Pluvium Blend | Best other (post-processed) |", "|---|---|---|"]
+        for season in SEASONS:
+            row = res["seasons"]["days 1-3"][season]
+            if not row.get(top):
+                continue
+            rivals = [(row[m]["1"]["bss"], m) for m in singles + (["blend_ops"] if net else []) if row.get(m)]
+            best_v, best_m = max(rivals) if rivals else (float("nan"), "-")
+            lines.append(f"| {season} | {row[top]['1']['bss']:+.3f} | {best_v:+.3f} ({_name(best_m, net)}) |")
         lines.append("")
         vs = res.get("versus", {})
         if vs:
