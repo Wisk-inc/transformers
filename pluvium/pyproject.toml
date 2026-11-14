@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pluvium"
+version = "0.1.0"
+description = "Hour-by-hour rain forecasts for every Caribbean town: when rain starts, how long it lasts, how much falls and why, on the NatureV1 / iHELIX engine"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Nathan" }]
+keywords = ["weather", "rain", "precipitation", "forecasting", "caribbean", "nowcasting", "probabilistic-forecasting",
+            "hidden-markov-model", "orographic-precipitation", "geometric-deep-learning", "pytorch"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.5",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "ihelix>=0.6.0",
+    "naturev1>=0.19.0",
+    "numcodecs>=0.12",
+    "h5py>=3.8",
+    "eccodes>=2.37",
+    "huggingface_hub>=0.20",
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.4"]
+
+[project.scripts]
+pluvium = "pluvium.cli:main"
+
+[project.urls]
+Source = "https://github.com/Wisk-inc/transformers/tree/main/pluvium"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pluvium"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["pluvium", "tests", "docs", "notebooks", "pyproject.toml", "pytest.ini", "README.md", "LICENSE"]
+
+[tool.ruff]
+line-length = 125
+target-version = "py310"
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E731", "B023", "B008", "B905", "B007", "E501"]
