@@ -53,6 +53,8 @@ class FullYearConfig:
     max_rows: int = 250_000
     thresholds: tuple = B.SCORED
     seed: int = 0
+    #: days whose forecasts are kept in full for case studies (Hurricane Melissa struck Jamaica on 28 October 2025)
+    case_days: tuple = ("2025-10-27", "2025-10-28", "2025-10-29")
     extra: dict = field(default_factory=dict)
 
 
@@ -292,11 +294,23 @@ def block_bootstrap(diff_by_run: np.ndarray, resamples: int = 1000, block: int =
 
 
 class Scores:
-    """Per model: per lead the pieces of every score (pooled over runs and cells)."""
+    """Per model: per lead the pieces of every score (pooled over runs and cells), and the forecasts of case days."""
 
-    def __init__(self, thresholds) -> None:
+    def __init__(self, thresholds, case_days=()) -> None:
         self.thr = tuple(thresholds)
         self.data = {}
+        self.case_days = set(case_days)
+        self.cases = []
+
+    def case(self, model: str, run: int, lead: int, y: np.ndarray, mean: np.ndarray, p50: np.ndarray, p100) -> None:
+        valid = _day(run + 24 * (lead - 1))
+        if valid in self.case_days:
+            ok = np.isfinite(y)
+            self.cases.append({"model": model, "run": _day(run), "lead": lead, "valid": valid,
+                               "forecast_mean_mm": float(mean[ok].mean()), "forecast_max_mm": float(mean[ok].max()),
+                               "p50": float(np.mean(p50[ok])), "p100": None if p100 is None else float(np.mean(p100[ok])),
+                               "observed_mean_mm": float(y[ok].mean()), "observed_max_mm": float(y[ok].max()),
+                               "observed_share_50": float(np.mean(y[ok] >= 50)), "observed_share_100": float(np.mean(y[ok] >= 100))})
 
     def add(self, model: str, lead: int, season: str, run_ids: np.ndarray, y: np.ndarray, p: dict, mean: np.ndarray,
             crps: np.ndarray, clim_p: dict, clim_mean: np.ndarray, cuts: dict | None) -> None:
@@ -412,6 +426,8 @@ def _score(scores: Scores, name: str, i: int, table: dict, p: np.ndarray, q: np.
     clim_p = {f"{t:g}": clim[f"clim_p{int(t)}"] for t in scores.thr}
     scores.add(name, lead, _season(valid), np.full(y.size, int(table["run"][i])), y, probs, q.mean(1),
                crps_quantiles(q, np.nan_to_num(y)), clim_p, clim["clim_mean"], cuts)
+    scores.case(name, int(table["run"][i]), lead, y, q.mean(1), probs["50"] if "50" in probs else B.exceed(p, 50.0),
+                B.exceed(p, 100.0))
 
 
 def _score_raw(scores: Scores, s: str, run: int, lead: int, y: np.ndarray, clim: dict, members: np.ndarray) -> None:
@@ -426,10 +442,11 @@ def _score_raw(scores: Scores, s: str, run: int, lead: int, y: np.ndarray, clim:
     cuts = {f"{t:g}": 0.5 for t in scores.thr}
     scores.add(f"{s}_raw", lead, _season(valid), np.full(y.size, run), y, probs, m.mean(0),
                crps_samples(m.astype(np.float64), np.nan_to_num(y).astype(np.float64)), clim_p, clim["clim_mean"], cuts)
+    scores.case(f"{s}_raw", run, lead, y, m.mean(0), (m >= 50).mean(0), (m >= 100).mean(0))
 
 
 def _report(scores: Scores, cells: CellSet, models: dict, systems, with_neural: bool, cfg: FullYearConfig) -> dict:
-    out = {"cells": len(cells), "leads": {}, "groups": {}, "seasons": {}, "versus": {}}
+    out = {"cells": len(cells), "leads": {}, "groups": {}, "seasons": {}, "versus": {}, "cases": scores.cases}
     names = [f"{s}_raw" for s in systems] + list(models) + (["neural_raw"] if with_neural else [])
     for lead in range(1, 15):
         out["leads"][str(lead)] = {m: scores.summary(m, [lead]) for m in names if scores.data.get(m, {}).get(lead)}
@@ -481,7 +498,7 @@ def run_region(cfg: FullYearConfig, region: str) -> dict:
     cells.climatology(train_days)
     runs, long = run_set(cfg.train_start, cfg.test_end, every=2, long_every=4)
     log(f"{region}: {len(cells)} land cells, {len(runs)} runs ({len(long)} to 14 days)")
-    scores = Scores(cfg.thresholds)
+    scores = Scores(cfg.thresholds, cfg.case_days)
     table = build_table(cells, reader, region, runs, set(int(r) for r in long), scores=scores,
                         test_window=(hour_of(cfg.test_start), hour_of(cfg.test_end)))
     res = evaluate_cells(cells, table, cfg, list(ARCHIVE_SYSTEMS), scores=scores)
@@ -534,7 +551,7 @@ def run_country(cfg: FullYearConfig, name: str, geography: str, cmorph_root: str
     reader = ArchiveReader(cfg.archive)
     runs, long = run_set(cfg.train_start, cfg.test_end, every=2, long_every=4)
     log(f"{name}: {len(cells)} land cells at 8 km, {len(runs)} runs; climatology {clim_span[0][:10]} to {clim_span[1][:10]}")
-    scores = Scores(cfg.thresholds)
+    scores = Scores(cfg.thresholds, cfg.case_days)
     table = build_table(cells, reader, region, runs, set(int(r) for r in long), neural=neural_reader(forecasts),
                         scores=scores, test_window=(hour_of(cfg.test_start), hour_of(cfg.test_end)))
     res = evaluate_cells(cells, table, cfg, list(ARCHIVE_SYSTEMS), with_neural=True, scores=scores)

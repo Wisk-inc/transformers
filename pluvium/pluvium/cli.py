@@ -7,6 +7,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
+
 DEFAULT_REPO = "CorxLabs/Pluvium-500"
 
 
@@ -118,6 +120,43 @@ def cmd_setup(args) -> None:
     print(f"next: pluvium program --root {root} --country {','.join(codes)}")
 
 
+def cmd_blend(args) -> None:
+    """Pluvium Blend for any country: train it on a year of archived runs, or forecast 14 days for every town."""
+    from .area import Area
+    from .blendlive import BlendModel, write_table
+    from .domain import Gazetteer, PointSet
+
+    root = Path(args.root).expanduser()
+    if args.action == "train":
+        codes = [c.strip() for c in (args.country or "").split(",") if c.strip()]
+        area = Area.load(root / "area.json") if (root / "area.json").exists() and not codes else \
+            Area.for_countries(codes, cache=root / "cache" / "areas")
+        root.mkdir(parents=True, exist_ok=True)
+        area.save(root / "area.json")
+        model = BlendModel.train(area, root, start=args.start, end=args.end)
+        print(f"blend for {area.name} trained on {model.meta['rows']:,} rows from {model.meta['runs']} runs; saved in {root / 'blend'}")
+        return
+    model = BlendModel.load(root / "blend")
+    towns_path = root / "towns.npz"
+    if towns_path.exists():
+        towns = Gazetteer(PointSet.load(towns_path))
+        lat, lon, names = towns.points.lat, towns.points.lon, [str(x) for x in towns.names]
+    else:                                                     # no town list: the area's grid
+        lat_g, lon_g = model.grid
+        la, lo = np.meshgrid(lat_g, lon_g, indexing="ij")
+        lat, lon = la.ravel(), lo.ravel()
+        names = [f"{a:.2f},{b:.2f}" for a, b in zip(lat, lon)]
+    now = None
+    if args.time:
+        from .util import hour_of
+
+        now = hour_of(args.time)
+    result = model.forecast(lat, lon, root / "live_archive", now=now)
+    out = write_table(result, names, root / f"blend_{result['day0']}.csv")
+    print(f"14-day blended forecast from {result['day0']} for {len(names):,} places -> {out}")
+    print("runs used: " + ", ".join(f"{k} {v}Z" for k, v in result["runs"].items()))
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(prog="pluvium", description="Hour-by-hour rain forecasts for Caribbean towns.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -151,6 +190,14 @@ def main(argv=None) -> None:
     p.add_argument("--model", default=None)
     p.add_argument("--state", default="~/.cache/pluvium/live")
     p.set_defaults(func=cmd_learn)
+    p = sub.add_parser("blend", help="Pluvium Blend for any country: train on a year of archived runs, then forecast 14 days")
+    p.add_argument("action", choices=["train", "forecast"])
+    p.add_argument("--country", default=None, help="ISO codes (train; default: the area saved in --root)")
+    p.add_argument("--root", default="pluvium-area")
+    p.add_argument("--start", default="2024-04-01T00", help="training runs from (train)")
+    p.add_argument("--end", default="2025-04-01T00", help="training runs until (train)")
+    p.add_argument("--time", default=None, help="forecast as of this UTC hour, e.g. 2026-11-14T12 (default: now)")
+    p.set_defaults(func=cmd_blend)
     p = sub.add_parser("setup", help="prepare Pluvium for any country: area, terrain, provinces, towns")
     p.add_argument("--country", required=True, help="ISO codes, e.g. TT or DO,HT")
     p.add_argument("--box", default=None, help="south,north,west,east instead of the countries' own extent")
