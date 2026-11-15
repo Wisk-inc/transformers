@@ -3,12 +3,12 @@
 # Paste into one notebook cell (Colab, Kaggle, Jupyter, a rented GPU box) or run as `python pluvium_everything.py`.
 #
 # With nothing changed it needs no account and no GPU: it sets the country up, gets a trained blend (downloads one
-# if the repository has it, otherwise trains one in about two hours) and prints the forecast.
+# if the repository has it, otherwise trains one in about an hour and a half) and prints the forecast.
 # With a token pasted in, it also builds the repository. On a GPU of 24 GB or more it also trains the network.
 # Every step can be run again: what is already downloaded, uploaded or trained is not done twice.
 
 COUNTRY = "JM"                              # ISO codes: "JM", "TT", "DO,HT", "PH", "KE" ...
-ROOT = "~/pluvium-JM"                       # the country's working folder; about 5 GB if a blend is trained here
+ROOT = "~/pluvium-JM"                       # the country's working folder; 41 MB for Jamaica, a few GB for a large country
 HANDOVER = "auto"                           # record storms: "auto" follows the storms staged in training; "always"; "never"
 LEARN = False                               # True: first learn from the rain NOAA has published since (see step 5)
 HURRICANES = True                           # a bulletin for every tropical cyclone alive now
@@ -59,6 +59,11 @@ def run(args: list, env: dict | None = None) -> None:
         raise RuntimeError(f"`{' '.join(str(a) for a in args[:5])} ...` ended with exit code {proc.returncode}")
 
 
+def took(started: float) -> str:
+    seconds = time.time() - started
+    return f"{seconds:.0f} s" if seconds < 100 else f"{seconds / 60:.0f} min"
+
+
 def step(what: str, action, skip: str = "") -> bool:
     """Do one step. A step that fails is reported and the cell goes on: the steps do not depend on each other."""
     print(f"\n=== {what} " + "=" * max(4, 96 - len(what)), flush=True)
@@ -70,19 +75,19 @@ def step(what: str, action, skip: str = "") -> bool:
     try:
         action()
     except BaseException as error:          # also a stopped cell: say so, then let the stop go through
-        steps.append((what, f"FAILED after {(time.time() - started) / 60:.0f} min: {type(error).__name__}: {error}"))
+        steps.append((what, f"FAILED after {took(started)}: {type(error).__name__}: {error}"))
         print(f"FAILED: {type(error).__name__}: {error}", flush=True)
         if isinstance(error, KeyboardInterrupt):
             raise
         return False
-    steps.append((what, f"done in {(time.time() - started) / 60:.0f} min"))
+    steps.append((what, f"done in {took(started)}"))
     return True
 
 
 # 1. the package: from PyPI, or from the source tree when PyPI cannot be reached
 def install() -> None:
     try:
-        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.4.1"])
+        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.4.2"])
     except RuntimeError:
         run([sys.executable, "-m", "pip", "install", "-q", "git+https://github.com/Wisk-inc/transformers.git"
              "@claude/linear-context-architecture-a35c6h#subdirectory=pluvium"])

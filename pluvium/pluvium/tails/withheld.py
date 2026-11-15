@@ -179,9 +179,10 @@ def verdict_line(v: dict) -> str:
     """The verdict in a sentence, for a log or a training report."""
     if not v.get("evidence"):
         return "staged storms: none to judge by; the hand-over is kept"
+    # the percentage is the change in the score, as in the yearly audit's line: negative is better
     return (f"staged storms ({', '.join(v['storms'])}): calibrated {v['calibrated_mm']:.0f} mm where {v['observed_mean_mm']:.0f} "
             f"mm fell; Brier at {v['amount']:g} mm {v['calibrated']:.4f} -> {v['handed']:.4f} with the hand-over "
-            f"({100 * v['gain']:+.1f}%); " + ("kept" if v["keep"] else "switched off"))
+            f"({-100 * v['gain']:+.1f}%); " + ("kept" if v["keep"] else "switched off"))
 
 
 __all__ = ["HEAVY_INDEX", "brier", "control_days", "score_blocks", "split_blocks", "storm_days", "valid_days", "verdict",

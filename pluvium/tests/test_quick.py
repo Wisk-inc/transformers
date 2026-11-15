@@ -267,10 +267,17 @@ def test_blend_card_says_what_the_staged_storms_decided(model):
     text = quick.blend_card(model)
     assert "pluvium now --country TL" in text and "kept here" in text
     saved = json.loads(json.dumps(model.meta))
-    model.meta["handover"] = {"keep": False, "mode": "auto", "staged": {"storms": 4, "gain": 0.015}}
     try:
+        # as training records it: the days themselves, and the score without and with the hand-over
+        model.meta["handover"] = {"keep": True, "mode": "auto", "staged": {
+            "storms": ["2025-10-28", "2025-10-18"], "gain": 0.4936, "calibrated": 0.2593, "handed": 0.1313, "amount": 50.0}}
+        kept = quick.blend_card(model)
+        model.meta["handover"] = {"keep": False, "mode": "auto", "staged": {"storms": 4, "gain": -0.015}}
         off = quick.blend_card(model)
     finally:
         model.meta.clear()
         model.meta.update(saved)
-    assert "switched off here" in off and "+1.5%" in off and "4 storms" in off
+    assert "kept here" in kept and "the 2 wettest days (2025-10-28, 2025-10-18)" in kept
+    assert "49.4% lower, 0.131 against 0.259. Lower is better." in kept and "[" not in kept
+    assert "switched off here" in off and "the 4 wettest days were withheld" in off and "1.5% higher." in off
+    assert "°N" in kept and (" E." not in kept)                                 # a letter for the hemisphere, no signed "E"

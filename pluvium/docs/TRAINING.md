@@ -4,7 +4,7 @@ Pluvium has three things that are trained or learned. Each has one command.
 
 | What | Needs | Time | Command |
 |---|---|---|---|
-| Pluvium Blend for a country: 14 days of daily rain chances from six operational systems | A CPU, internet, about 5 GB of disk | About 2 hours, mostly downloads | `pluvium now`, or `pluvium blend train` |
+| Pluvium Blend for a country: 14 days of daily rain chances from six operational systems | A CPU, internet, 41 MB of disk for Jamaica and a few GB for a large country | About an hour and a half, mostly downloads (86 minutes for Jamaica on four cores) | `pluvium now`, or `pluvium blend train` |
 | Pluvium-500, the hour-by-hour network | One GPU with 24 GB or more, about 150 GB of disk | 24 hours by default | `pluvium program` |
 | Pluvium Cyclone, hurricane tracks | A CPU, internet | Minutes per run. Nothing to train: it starts from weights learned on 2024 and 2025 and keeps learning | `pluvium cyclone` |
 
@@ -57,7 +57,7 @@ The step-by-step commands as one cell for a notebook, with hurricanes included:
 
 ```python
 COUNTRY = "JM"                              # ISO codes: "JM", "TT", "DO,HT", "PH", "KE" ...
-ROOT = "~/pluvium-JM"                       # working folder; needs about 5 GB
+ROOT = "~/pluvium-JM"                       # working folder; 41 MB for Jamaica, a few GB for a large country
 
 import os, subprocess, sys
 
@@ -65,13 +65,13 @@ def sh(cmd, check=True):
     print(f"$ {cmd}", flush=True)
     return subprocess.run(cmd, shell=True, check=check).returncode
 
-sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.4.1'")
+sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.4.2'")
 root = os.path.expanduser(ROOT)
 pluvium = f"{sys.executable} -m pluvium.cli"
 if not os.path.exists(f"{root}/area.json"):
     sh(f"{pluvium} setup --country {COUNTRY} --root {root}")
 if not os.path.exists(f"{root}/blend/blend.json"):
-    sh(f"{pluvium} blend train --root {root}")              # about two hours the first time, mostly downloads
+    sh(f"{pluvium} blend train --root {root}")              # about 90 minutes the first time, mostly downloads
 sh(f"{pluvium} blend learn --root {root}", check=False)     # learns only when NOAA has published more rain
 sh(f"{pluvium} blend forecast --root {root}")
 sh(f"{pluvium} cyclone --root {root}", check=False)         # every tropical cyclone alive now

@@ -7,7 +7,7 @@ From nothing to a forecast in one call.
 1. sets the country up: borders, terrain, every town (seconds);
 2. gets a trained Pluvium Blend for it. If one is published in the Hub repository (``blends/<area>/``) it is
    downloaded, a few hundred kilobytes. If not, one is trained on the most recent year of archived runs, which takes
-   about two hours, nearly all of it downloads;
+   about an hour and a half, nearly all of it downloads;
 3. reads the newest run of each of the six systems for the country (a few megabytes) and writes the 14-day table.
 
 The second call finds everything in place and takes about a minute. Nobody has to fetch or convert the six systems'
@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .util import hour_of, hour_to_datetime64, log
+from .util import hour_of, hour_to_datetime64, hub_quiet, hub_refusal, log
 
 DEFAULT_REPO = "CorxLabs/Pluvium-500"
 HUB = "https://huggingface.co"
@@ -200,24 +200,39 @@ def fetch_blend(repo: str, area_json: dict, root, token: str | None = None, say=
         shutil.rmtree(stage, ignore_errors=True)
 
 
+def _degrees(value: float, letters: str) -> str:
+    """``17.40°N`` or ``78.67°W``: a latitude (``"NS"``) or a longitude (``"EW"``), with a letter in place of a sign."""
+    return f"{abs(value):.2f}°{letters[0] if value >= 0 else letters[1]}"
+
+
 def blend_card(model) -> str:
     """A short note uploaded beside a published blend: what it is for and how it was trained."""
     meta, area = model.meta, model.area_json
     s, n, w, e = area["target_box"]
     trained = meta.get("trained", ["?", "?"])
     lines = [f"# Pluvium Blend for {', '.join(area.get('countries', {}).values()) or area['name']}", "",
-             f"A trained Pluvium Blend for the box {s:.2f} to {n:.2f} N, {w:.2f} to {e:.2f} E. "
+             f"A trained Pluvium Blend for the box from {_degrees(s, 'NS')} to {_degrees(n, 'NS')} and from "
+             f"{_degrees(w, 'EW')} to {_degrees(e, 'EW')}. "
              f"`pluvium now --country {','.join(area.get('iso2', []))}` downloads it and forecasts with it.", "",
              f"It was trained on {meta.get('runs', '?')} runs of each system from {trained[0][:10]} to {trained[1][:10]}, "
-             f"at {meta.get('cells', '?')} places, with {len(meta.get('components', []))} components pooled."]
+             f"on {meta.get('cells', '?')} grid cells, with {len(meta.get('components', []))} components pooled."]
     verdict = meta.get("handover")
     if verdict:
         staged = verdict.get("staged", {})
         how = "kept" if verdict.get("keep", True) else "switched off"
-        gain = staged.get("gain")
-        why = (f" (on the {staged.get('storms', '?')} storms staged in the training period the Brier score at 50 mm "
-               f"changed by {100 * gain:+.1f}% with it)") if isinstance(gain, (int, float)) and np.isfinite(gain) else ""
-        lines += ["", f"The hand-over of record storms to the raw systems is {how} here{why}."]
+        storms, gain = staged.get("storms"), staged.get("gain")
+        dated = isinstance(storms, (list, tuple))                # the days themselves, or only how many there were
+        count = len(storms) if dated else storms
+        why = ""
+        if count and isinstance(gain, (int, float)) and np.isfinite(gain):
+            days = f" ({', '.join(str(d) for d in storms)})" if dated else ""
+            before, after = staged.get("calibrated"), staged.get("handed")
+            scores = (f", {after:.3f} against {before:.3f}"
+                      if all(isinstance(v, (int, float)) and np.isfinite(v) for v in (before, after)) else "")
+            why = (f" At training, the {count} wettest days{days} were withheld and then forecast unseen. With the "
+                   f"hand-over their Brier score at {staged.get('amount', 50):g} mm was {100 * abs(gain):.1f}% "
+                   f"{'lower' if gain >= 0 else 'higher'}{scores}. Lower is better.")
+        lines += ["", f"The hand-over of record storms to the raw systems is {how} here.{why}"]
     lines += ["", "The file `blend.pt` holds tensors and plain values only. Pluvium opens it without running any code "
               "in it.", ""]
     return "\n".join(lines)
@@ -249,13 +264,13 @@ def publish_blend(repo: str, root, token: str | None = None, private: bool = Fal
             import warnings
 
             api.create_repo(repo, repo_type="model", exist_ok=True, private=private)
-            with warnings.catch_warnings():                     # the note beside the blend is not a model card, and the
-                warnings.simplefilter("ignore", UserWarning)    # Hub library warns that it has no card metadata
+            # two things the Hub library says here that are not faults: the note beside the blend is not a model
+            # card (it warns that it has no card metadata), and a blend published twice changes nothing
+            with warnings.catch_warnings(), hub_quiet():
+                warnings.simplefilter("ignore", UserWarning)
                 api.upload_folder(folder_path=str(stage), path_in_repo=f"{FOLDER}/{name}", repo_id=repo,
                                   repo_type="model", commit_message=f"Pluvium Blend for {name}")
         except Exception as error:
-            from .util import hub_refusal
-
             refusal = hub_refusal(error, repo)
             if refusal is None:
                 raise
@@ -293,7 +308,7 @@ def ready(country, root=None, repo: str | None = DEFAULT_REPO, train: bool = Tru
     if not (start and end):
         start, end = recent_year()
     say(f"no trained blend is published for {area.name}: training one on {start[:10]} to {end[:10]} "
-        "(about two hours the first time, nearly all of it downloads) ...")
+        "(about an hour and a half the first time, nearly all of it downloads) ...")
     model = FrontierBlend.train(area, root, start=start, end=end, handover=handover)
     return root, model, "trained"
 

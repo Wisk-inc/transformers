@@ -3,7 +3,7 @@
 Pluvium Blend for any country, every day.
 
 ``train`` learns the blend for an area (:class:`pluvium.area.Area`) from a year of the six operational systems'
-archived runs and CMORPH: about two hours of downloads, minutes of CPU, no GPU. ``forecast`` then reads the newest run
+archived runs and CMORPH: about an hour and a half of downloads, minutes of CPU, no GPU. ``forecast`` then reads the newest run
 of every system and writes, for every town, the chance of at least 1, 10, 25 and 50 mm and the likely and heavy
 amounts on each of the next 14 days.
 

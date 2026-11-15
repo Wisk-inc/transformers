@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 import urllib.error
@@ -78,6 +79,23 @@ def hub_refusal(error: Exception, repo: str) -> PluviumError | None:
                             f"Settings, Access Tokens, edit the token and add {owner} with write access to its "
                             "repositories and collections, or make a token of type Write.")
     return None
+
+
+@contextlib.contextmanager
+def hub_quiet():
+    """Silence the Hugging Face Hub library's warnings for a moment. It logs one when an upload changes nothing,
+    which is the normal case when a command is run a second time, and reads like a fault."""
+    try:
+        from huggingface_hub.utils import logging as hub_logging
+    except ImportError:
+        yield
+        return
+    before = hub_logging.get_verbosity()
+    hub_logging.set_verbosity_error()
+    try:
+        yield
+    finally:
+        hub_logging.set_verbosity(before)
 
 
 def fetch(url: str, start: int | None = None, end: int | None = None, timeout: float = 120.0, attempts: int = 5,
@@ -161,4 +179,4 @@ def great_circle_km(lat1, lon1, lat2, lon2) -> np.ndarray:
 
 
 __all__ = ["EPOCH", "FetchError", "PluviumError", "atomic_save", "calendar", "fetch", "great_circle_km", "hour_of",
-           "hour_to_datetime64", "hour_to_iso", "hub_refusal", "log", "parallel_map", "year_hours"]
+           "hour_to_datetime64", "hour_to_iso", "hub_quiet", "hub_refusal", "log", "parallel_map", "year_hours"]

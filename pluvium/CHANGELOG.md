@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.2 (November 2026)
+
+Found by training a full year for Jamaica from an empty folder and publishing the result.
+
+- The note uploaded beside a published blend listed the staged storms as a Python list and said the Brier score
+  "changed by +49.3%" when it had fallen by that much. It now names the days, gives both scores and says which way
+  is better. The training log's line uses the same sign as the yearly audit's: the change in the score, so a
+  negative number is an improvement.
+- `pluvium upstream mirror` with some models named rewrote `upstream/README.md` listing only those. The index now
+  lists every model in the repository.
+- Running `pluvium upstream mirror` or `pluvium blend publish` a second time no longer prints the Hub library's
+  line about an empty commit.
+- First-time training was described as two hours and 5 GB. Measured for Jamaica on a four-core machine it took
+  86 minutes and left 41 MB on disk, and the documents now say so.
+- The one cell reports a step that took under 100 seconds in seconds.
+
 ## 0.4.1 (November 2026)
 
 Found by running the Hub steps against a real account.

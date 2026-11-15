@@ -79,6 +79,7 @@ def test_handover_restores_withheld_storms_and_leaves_ordinary_days_alone():
     assert v["handed"] == storm[label]["brier"]["50"] and v["calibrated"] == storm["calibrated"]["brier"]["50"]
     assert v["ordinary_rows_handed_over"] < 0.01 < v["storm_rows_handed_over"]
     assert verdict_line(v).endswith("kept") and "mm fell" in verdict_line(v)
+    assert "with the hand-over (-" in verdict_line(v)                    # the change in the score: lower is better
     worse = {**res, "storm": {**storm, label: {**storm[label], "brier": {**storm[label]["brier"], "50": 1.0}}}}
     assert not verdict(worse)["keep"] and verdict(worse)["gain"] < 0 and verdict_line(verdict(worse)).endswith("switched off")
     none = verdict({})                                                    # no storms to judge by: kept, and said so

@@ -1,6 +1,7 @@
 # Copyright 2026 Nathan. Apache-2.0.
 """The upstream weights: the registry, the checked copy, and the mirror into a Hub repository."""
 
+import dataclasses
 import hashlib
 import sys
 from types import SimpleNamespace
@@ -139,3 +140,18 @@ def test_mirror_copies_once_skips_what_is_there_and_survives_a_failure(tmp_path,
         upstream.mirror("org/repo", cache=tmp_path / "cache", api=api)
     assert "pasted whole" in str(hub_refusal(SimpleNamespace(response=SimpleNamespace(status_code=401)), "org/repo"))
     assert hub_refusal(ValueError("something else"), "org/repo") is None
+
+
+def test_mirroring_one_model_keeps_the_others_in_the_index(tmp_path, monkeypatch):
+    first = bucket(tmp_path, FILES)
+    second = dataclasses.replace(first, name="other", title="Other weights")
+    everything = [first, second]
+    monkeypatch.setattr(sys.modules["pluvium.upstream.mirror"], "select",
+                        lambda names=None: [m for m in everything if not names or m.name in names])
+    api = FakeApi()
+    both = upstream.mirror("org/repo", cache=tmp_path / "cache", api=api, say=lambda *said: None)
+    assert both == {"toy": "copied", "other": "copied"}
+    assert "(toy/SOURCE.md)" in api.index and "(other/SOURCE.md)" in api.index
+    one = upstream.mirror("org/repo", names=["other"], cache=tmp_path / "cache", api=api, say=lambda *said: None)
+    assert one == {"other": "already there"}
+    assert "(toy/SOURCE.md)" in api.index and "(other/SOURCE.md)" in api.index      # the one not asked for is still listed

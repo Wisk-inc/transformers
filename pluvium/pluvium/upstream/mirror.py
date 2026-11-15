@@ -17,7 +17,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..util import hub_refusal, log
+from ..util import hub_quiet, hub_refusal, log
 from .fetch import DEFAULT_CACHE, fetch_model, plan
 from .registry import Upstream, select
 
@@ -103,9 +103,14 @@ def mirror(repo: str, token: str | None = None, names=None, cache=DEFAULT_CACHE,
             results[model.name] = f"failed: {type(error).__name__}: {str(error)[:200]}"
             say(f"upstream: {model.title}: not mirrored ({results[model.name][8:]})")
     if any(not r.startswith("failed") for r in results.values()):
-        api.upload_file(path_or_fileobj=index_text(models, results).encode("utf-8"),
-                        path_in_repo=f"{FOLDER}/README.md", repo_id=repo, repo_type="model",
-                        commit_message="Upstream weights: what is kept here and under which licences")
+        # the index lists every model in the repository, not only the ones this call was asked to copy: a model
+        # copied on an earlier call, or one whose publisher could not be reached today, is still there
+        kept = [m for m in select() if results.get(m.name) in ("copied", "already there")
+                or f"{FOLDER}/{m.name}/SOURCE.md" in have]
+        with hub_quiet():                                       # an index that has not changed is not a fault
+            api.upload_file(path_or_fileobj=index_text(kept, {}).encode("utf-8"),
+                            path_in_repo=f"{FOLDER}/README.md", repo_id=repo, repo_type="model",
+                            commit_message="Upstream weights: what is kept here and under which licences")
     return results
 
 

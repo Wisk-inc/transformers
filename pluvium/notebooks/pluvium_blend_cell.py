@@ -4,7 +4,7 @@
 # The shorter way is one command, `pluvium now --country JM`; notebooks/pluvium_everything.py does that and the rest.
 
 COUNTRY = "JM"                              # ISO codes: "JM", "TT", "DO,HT", "PH", "KE" ...
-ROOT = "~/pluvium-JM"                       # working folder; needs about 5 GB
+ROOT = "~/pluvium-JM"                       # working folder; 41 MB for Jamaica, a few GB for a large country
 TRAIN_START = ""                            # empty: the most recent year NOAA's satellite rain record covers
 TRAIN_END = ""                              # or both set, e.g. "2024-04-01T00" and "2025-04-01T00"
 HURRICANES = True                           # also write a bulletin for every tropical cyclone alive now
@@ -22,7 +22,7 @@ def sh(cmd: str, check: bool = True) -> int:
 
 
 # 1. the package: from PyPI, or from the source tree when PyPI is not reachable
-if sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.4.1'", check=False) != 0:
+if sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.4.2'", check=False) != 0:
     sh(f"{sys.executable} -m pip install -q 'git+https://github.com/Wisk-inc/transformers.git"
        f"@claude/linear-context-architecture-a35c6h#subdirectory=pluvium'")
 
@@ -33,7 +33,7 @@ pluvium = f"{sys.executable} -m pluvium.cli"
 if not (root / "area.json").exists():
     sh(f"{pluvium} setup --country {COUNTRY} --root {root}")
 
-# 3. the blend: about two hours the first time, nearly all of it downloads. It stages record storms in the training
+# 3. the blend: about an hour and a half the first time, nearly all of it downloads. It stages record storms in the training
 #    period and prints whether forecasts beyond the record are handed to the raw systems here. Add
 #    "--handover always" to hand them over whatever that test says. The model is saved in ROOT/blend.
 if not (root / "blend" / "blend.json").exists():
