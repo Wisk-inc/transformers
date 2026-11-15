@@ -98,6 +98,32 @@ def test_evaluate_scores_designs_and_the_pool_beats_its_components(tmp_path):
     assert res["region"] == "place" and res["leads"]["2"]["stack"]["n"] > 0
 
 
+def test_frontier_bench_writes_results_and_resumes(tmp_path):
+    from pluvium.benchmarks import frontier_bench as FB
+
+    store = make_store(tmp_path / "store" / "place")
+    designs = [PoolDesign(name="stack", online=True, eta=1.0, record=True, rows=4000, iters=30, **FB.POOL)]
+    out = tmp_path / "results"
+    res = FB.evaluate_place(store.folder, out, designs=designs)
+    assert sorted(p.name for p in out.iterdir()) == ["place.json", "place_keep.npz", "place_tail.json"]
+    assert res["groups"]["days 1-3"]["stack"]["1"]["bss"] > 0.2
+    tail = json.loads((out / "place_tail.json").read_text())
+    assert tail["groups"]["days 1-3"]["rows"] > 0 and "alerts" in tail["groups"]["days 1-3"]
+    stamp = (out / "place.json").stat().st_mtime_ns
+    again = FB.evaluate_place(store.folder, out, designs=designs)              # everything is there: nothing is redone
+    assert (out / "place.json").stat().st_mtime_ns == stamp and again["cells"] == res["cells"]
+    top = FB.DESIGNS[0]
+    assert top.name == "stack" and top.online and top.record and top.bands == (0, 5, 11) and top.eta == 1.0
+    assert [d.name for d in FB.DESIGNS[1:]] == ["pool", "pool_online", "pool_record"]
+
+
+def test_a_half_written_quarter_is_not_taken_for_a_quarter(tmp_path):
+    folder = tmp_path / "place"
+    make_store(folder)
+    (folder / "q1.part.npz").write_bytes(b"half a quarter")                    # what a killed build leaves behind
+    assert Store(folder).quarters() == [0]
+
+
 def test_amount_head_is_a_blend_and_falls_back_to_the_pool():
     rng = np.random.default_rng(1)
     n = 4000
