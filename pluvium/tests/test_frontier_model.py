@@ -79,9 +79,12 @@ def test_record_storm_is_handed_to_the_raw_systems(trained):
     raw = {"ens": np.full((10, n), 900.0, np.float32), "gfs": np.full((1, n), 850.0, np.float32)}
     calm = model.chances({"ens": feats, "gfs": feats}, clim, 1.0, n)
     k100 = int(np.searchsorted(THRESHOLDS, 100.0))
-    verdict = model.meta["handover"]                                       # the audit ran at training, on training rows
-    assert {"keep", "without", "handed", "rows", "days", "edge_mm"} <= set(verdict)
-    assert verdict["edge_mm"] == model.support.edge_mm and model.hands_over == verdict["keep"]
+    verdict = model.meta["handover"]                                       # decided at training, from training rows
+    assert set(verdict) == {"keep", "mode", "staged", "yearly"}
+    staged, yearly = verdict["staged"], verdict["yearly"]
+    assert staged["evidence"] and len(staged["storms"]) == 4 and verdict["keep"] == staged["keep"]   # storms were staged
+    assert {"without", "handed", "rows", "days", "edge_mm"} <= set(yearly)                           # the yearly check
+    assert yearly["edge_mm"] == model.support.edge_mm and model.hands_over == verdict["keep"]
     try:
         model.meta["handover"] = {**verdict, "keep": True}                 # a place where the raw systems earned it
         handed = model.chances({"ens": feats, "gfs": feats}, clim, 1.0, n, raw=raw)
@@ -92,8 +95,24 @@ def test_record_storm_is_handed_to_the_raw_systems(trained):
                                    model.chances({"ens": small, "gfs": small}, clim, 1.0, n), atol=1e-7)
         model.meta["handover"] = {**verdict, "keep": False}                # a place where they overcall: left alone
         np.testing.assert_allclose(model.chances({"ens": feats, "gfs": feats}, clim, 1.0, n, raw=raw), calm, atol=1e-7)
+        model.set_handover("always")                                       # the owner's choice overrules the verdict
+        assert model.hands_over and model.meta["handover"]["keep"] is False
+        np.testing.assert_allclose(model.chances({"ens": feats, "gfs": feats}, clim, 1.0, n, raw=raw), handed, atol=1e-7)
+        model.meta["handover"] = {**verdict, "keep": True}
+        model.set_handover("never")
+        assert not model.hands_over
+        np.testing.assert_allclose(model.chances({"ens": feats, "gfs": feats}, clim, 1.0, n, raw=raw), calm, atol=1e-7)
+        with pytest.raises(ValueError):
+            model.set_handover("sometimes")
     finally:
         model.meta["handover"] = verdict
+    assert verdict["mode"] == "auto"
+
+    from pluvium.cli import handover_line
+
+    line = handover_line(model)
+    assert line.startswith("record storms:") and "storms staged in the training period" in line
+    assert ("handed, in part, to the raw systems" in line) == model.hands_over
 
 
 def test_forecast_extras_give_alert_record_flag_and_rarity(trained, tmp_path):
@@ -139,7 +158,7 @@ def test_save_load_round_trip_and_learning_moves_the_weights(trained, tmp_path):
     assert isinstance(back, FrontierBlend) and back.weights() == model.weights()
     assert back.hands_over == model.hands_over and back.meta["handover"] == model.meta["handover"]
     old = dict(back.meta)
-    old.pop("handover")                                                    # a model saved before the audit existed
+    old.pop("handover")                                                    # a model saved before the verdict existed
     assert FrontierBlend(back.nets, back.pool, back.systems, back.area_json, back.clim, back.grid, old, back.models,
                          back.online, back.support, back.cells).hands_over
     np.testing.assert_allclose(back.cells[0], model.cells[0])

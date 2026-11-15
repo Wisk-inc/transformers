@@ -4,7 +4,15 @@
 import numpy as np
 
 from pluvium.blend import THRESHOLDS
-from pluvium.tails.withheld import control_days, split_blocks, storm_days, valid_days, withheld_experiment
+from pluvium.tails.withheld import (
+    control_days,
+    split_blocks,
+    storm_days,
+    valid_days,
+    verdict,
+    verdict_line,
+    withheld_experiment,
+)
 from pluvium.util import hour_of
 
 STORMS = (40, 90, 130)                                                    # the days with a storm
@@ -65,3 +73,13 @@ def test_handover_restores_withheld_storms_and_leaves_ordinary_days_alone():
     for t in ("25", "50"):
         assert abs(control[label]["brier"][t] - control["calibrated"]["brier"][t]) < 5e-4
     assert res["edges_mm"][label] >= 20.0
+    # the verdict a place draws from its staged storms: here the raw systems were right, so the hand-over is kept
+    v = verdict(res)
+    assert v["keep"] and v["evidence"] and v["setting"] == label and 0 < v["gain"] < 1
+    assert v["handed"] == storm[label]["brier"]["50"] and v["calibrated"] == storm["calibrated"]["brier"]["50"]
+    assert v["ordinary_rows_handed_over"] < 0.01 < v["storm_rows_handed_over"]
+    assert verdict_line(v).endswith("kept") and "mm fell" in verdict_line(v)
+    worse = {**res, "storm": {**storm, label: {**storm[label], "brier": {**storm[label]["brier"], "50": 1.0}}}}
+    assert not verdict(worse)["keep"] and verdict(worse)["gain"] < 0 and verdict_line(verdict(worse)).endswith("switched off")
+    none = verdict({})                                                    # no storms to judge by: kept, and said so
+    assert none["keep"] and not none["evidence"] and "none to judge by" in verdict_line(none)

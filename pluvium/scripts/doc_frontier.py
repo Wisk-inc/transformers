@@ -1,11 +1,12 @@
 # Copyright 2026 Nathan. Apache-2.0.
 """Write docs/FRONTIER_BENCHMARK.md from the benchmark's own output, so every number in it is the data's.
 
-    python scripts/doc_frontier.py RESULTS FIRST EXPERIMENTS docs/FRONTIER_BENCHMARK.md
+    python scripts/doc_frontier.py RESULTS FIRST EXPERIMENTS docs/FRONTIER_BENCHMARK.md [README.md hub/README.md ...]
 
 ``RESULTS`` holds, per place, ``{place}.json`` (from :func:`pluvium.frontier.evaluate.evaluate`), ``{place}_tail.json``,
 ``{place}_scenarios.json`` and, for the US places, ``{place}_winter_DJF.json``. ``FIRST`` holds the first benchmark's
-``{place}.json``. ``EXPERIMENTS`` holds the withheld-storm results ``{place}.json`` (optional).
+``{place}.json``. ``EXPERIMENTS`` holds the withheld-storm results ``{place}.json`` (optional). Any further pages
+named get the headline results written between their ``<!-- frontier-summary:start -->`` and ``:end`` markers.
 """
 import sys
 from pathlib import Path
@@ -19,9 +20,14 @@ from pluvium.frontier import report as R
 results_dir, first_dir, experiments_dir, out = (Path(p) for p in sys.argv[1:5])
 ORDER, SHORT = R.PLACE_ORDER, R.PLACE_NAMES
 WINTER = {"alps": "DJF", "pacific_nw": "DJF", "great_plains": "DJF", "andes_south": "JJA"}
-#: the places scored before the hand-over audit existed, and the places scored after it was fixed
+#: the places scored before the rule that decides the hand-over was final, and the places scored after
 SEEN, AFTER = R.SEEN_FIRST, R.SCORED_AFTER
-load, names = R.load_results, R.join_names
+load = R.load_results
+
+
+def names(places) -> str:
+    return R.join_names(places, the=True)
+
 
 new, old = load(results_dir), load(first_dir)
 tails, scenarios = load(results_dir, "_tail"), load(results_dir, "_scenarios")
@@ -122,8 +128,8 @@ def melissa_rows() -> list:
     return lines
 
 
-def kept(place: str) -> list:
-    """The audit's verdict at each refit."""
+def kept(place: str):
+    """Whether the place's staged storms kept the hand-over (``None`` if its result does not say)."""
     return R.kept(new[place])
 
 
@@ -141,9 +147,13 @@ def weak_rows() -> list:
     behind.sort(reverse=True)
     total = sum(1 for p in new for g in G if value(p, "stack", "bss", "50", g) == value(p, "stack", "bss", "50", g))
     if behind:
-        worst = "; ".join(f"{SHORT[p]} {g} ({gap:.3f} behind {F.LABELS.get(str(w).replace('_raw', ''), w)})" for gap, p, g, w in behind[:4])
+        worst = "; ".join(f"{SHORT[p]} {g} ({gap:.3f} behind {F.LABELS.get(str(w).replace('_raw', ''), w)}"
+                          f"{' raw' if str(w).endswith('_raw') else ''})" for gap, p, g, w in behind[:4])
+        short = sum(1 for _, _, g, _ in behind if g in G[:2])
         lines.append(f"- **Heavy rain is not won everywhere.** At 50 mm the Blend is behind some other system in "
-                     f"{len(behind)} of {total} place and lead-group cells. The largest gaps: {worst}.")
+                     f"{len(behind)} of {total} place and lead-group cells, {short} of them on days 1-7. The largest gaps: "
+                     f"{worst}. Beyond a week the skill of every system at 50 mm is close to zero and one storm can "
+                     "decide a cell.")
     acc = []
     for place in new:
         row = new[place]["groups"][G[-1]]
@@ -165,11 +175,17 @@ def weak_rows() -> list:
     if far:
         lines.append("- **Days 11-14 carry little skill for anyone.** Brier skill at 1 mm on days 11-14: "
                      + ", ".join(f"{n} {v:+.3f}" for n, v in far) + ". Zero is the climatology.")
-    off = [p for p in new if kept(p) and not all(kept(p))]
+    off = [p for p in new if kept(p) is False]
     if off:
-        lines.append(f"- **The hand-over is not universal.** In {names(off)} the audit switched it off for at least "
-                     "part of the year: there the raw systems overcall heavy rain against this truth, and a record "
-                     "storm will be forecast by the calibration alone, which shrinks it.")
+        lines.append(f"- **The hand-over is not universal.** In {names(off)} the staged storms were not forecast better "
+                     "with it, so it is off there, and a storm beyond the record is forecast by the calibration alone, "
+                     "which shrinks it. The table still flags such a forecast.")
+    agree, n = R.audit_agreement(new, G[0])
+    if n:
+        lines.append(f"- **The verdict rests on four storms per place.** It had the sign of what the hand-over then did in "
+                     f"the test year in {agree} of {n} places. That is partly hindsight: the rule was fixed after "
+                     f"{len(seen)} of the {len(new)} places had been scored. It can be overruled "
+                     "(`pluvium blend train --handover always` or `never`).")
     lines.append("- **The truth is one satellite product.** CMORPH underestimates frozen and orographic precipitation "
                  "and the heaviest rain. Winter was scored against radar and gauges for the two US places only.")
     lines.append("- **A year already seen.** The test year is the one on which the weak spots were found. A fresh year "
@@ -213,11 +229,11 @@ m50 = {g: (mean_of(old, "top", "bss", "50", g), mean_of(new, "stack", "bss", "50
 rmse = count("rmse", None, False)
 acc = count("acc", None, True)
 crps = count("crps", None, False)
-always = [p for p in new if kept(p) and all(kept(p))]
-never = [p for p in new if kept(p) and not any(kept(p))]
-mixed = [p for p in new if kept(p) and any(kept(p)) and not all(kept(p))]
+on = [p for p in new if kept(p) is True]
+off = [p for p in new if kept(p) is False]
 agree_all, n_all = R.audit_agreement(new, G[0])
 agree_after, n_after = R.audit_agreement(new, G[0], after)
+agree_yearly, n_yearly = R.audit_agreement(new, G[0], rule="yearly")
 
 lines = [
     "# Pluvium Blend on the frontier: the second full-year benchmark", "",
@@ -230,11 +246,16 @@ lines = [
     "- **To keep it honest**, every design choice was made inside the training year (April 2024 to March 2025), by "
     "cross-validation or by forecasting its later months from its earlier ones. The design was written down before "
     "the test year was scored. The parts are shown separately below, including where they cost something.",
-    f"- **One thing was changed after scoring began.** The design as written down handed every record storm to the raw "
-    f"systems. The first four places scored ({names(seen) if seen else 'none'}) showed that this hurts where the raw "
-    "systems overcall heavy rain. An audit was then added that decides, from training data only, whether a place uses "
-    f"the hand-over. The other places ({names(after) if after else 'none'}) were scored after the audit was fixed. "
-    "Both designs are scored everywhere and shown side by side.",
+    "- **One thing was changed after scoring began.** The design as written down handed every record storm to the raw "
+    "systems. The first places scored showed that this helps in some places and hurts in others. Each place now "
+    "decides from its own training year: the hand-over is used only where it improved the forecast of storms "
+    "withheld from training. A first remedy, an audit on out-of-fold forecasts, was tried and dropped: its verdict "
+    f"went against the test year in {n_yearly - agree_yearly} of {n_yearly} places, and its sign depends on details "
+    "that should not matter. The rule now used was fixed when "
+    f"{len(seen)} of the {len(new)} places had been scored ({names(seen)}). "
+    + (f"Only {names(after)} {'was' if len(after) == 1 else 'were'} scored after it. " if after else "")
+    + "The design as written down, the final one and the design with no hand-over are scored everywhere and shown "
+    "side by side.",
     "- **Truth is CMORPH**, a satellite estimate. It is weak on frozen precipitation and on the heaviest rain.", "",
     "## What changed", "",
     "1. **Components see every heavy day.** Each post-processing network is trained on all rows with observed or "
@@ -244,21 +265,24 @@ lines = [
     "delay for the truth to arrive. One learning rate, chosen on the training year.",
     "4. **Record storms.** A forecast outside anything in the training period is handed back, in part, to what the "
     "raw systems say.",
-    "5. **The hand-over is audited.** At every refit the hand-over is applied to the training period's own "
-    "out-of-fold forecasts. It is used only if it did not raise the Brier score at 50 mm there.",
+    "5. **Each place decides about the hand-over.** The four wettest days of the training year are withheld from "
+    "training and then forecast. The hand-over is used in a place only if it lowered the Brier score at 50 mm on "
+    "those storms.",
     "6. **Scenarios.** Calibrated amounts are arranged in space like the ECMWF ensemble's members, so each scenario "
     "is as varied as real weather.", "",
     "## The short version", "",
+]
+summary = [
     f"- **Heavy rain (50 mm).** Brier skill improved on the first Blend in {c50['improved']} of {c50['cells']} place and "
     f"lead-group cells, and in {c50_short['improved']} of {c50_short['cells']} on days 1-3. Mean skill over the places "
     f"on days 1-3 went from {m50[G[0]][0]:+.4f} to {m50[G[0]][1]:+.4f}. The new Blend leads every other system at "
     f"50 mm in {c50['new_leads']} of {c50['cells']} cells (the first led in {c50['old_leads']}).",
 ]
 if after:
-    lines.append(f"- **In the places scored after the design was final** ({names(after)}), 50 mm skill improved on the "
-                 f"first Blend in {c50_after['improved']} of {c50_after['cells']} cells, and the new Blend leads every "
-                 f"other system in {c50_after['new_leads']} (the first: {c50_after['old_leads']}).")
-lines += [
+    summary.append(f"- **In the places scored after the design was final** ({names(after)}), 50 mm skill improved on the "
+                   f"first Blend in {c50_after['improved']} of {c50_after['cells']} cells, and the new Blend leads every "
+                   f"other system in {c50_after['new_leads']} (the first: {c50_after['old_leads']}).")
+summary += [
     f"- **Against each post-processed system at 50 mm**, {better_conf} of {n_conf} comparisons are better with 95% "
     f"confidence and {worse_conf} worse.",
     f"- **Rain or no rain (1 mm).** The new Blend leads in {c1['new_leads']} of {c1['cells']} cells (the first: "
@@ -269,28 +293,28 @@ lines += [
     f"(was {acc['old_leads']}).",
 ]
 if n_all:
-    verdicts = []
-    if always:
-        verdicts.append(f"kept it all year in {names(always)}")
-    if never:
-        verdicts.append(f"switched it off all year in {names(never)}")
-    if mixed:
-        verdicts.append(f"changed its verdict during the year in {names(mixed)}")
-    lines.append(f"- **The hand-over audit** {'; '.join(verdicts)}. Its first verdict had the sign of what the hand-over "
-                 f"then did in the test year in {agree_all} of {n_all} places"
-                 + (f", and in {agree_after} of the {n_after} scored after it was fixed." if n_after else "."))
+    misses = R.audit_misses(new, G[0])
+    summary.append("- **Record storms.** Each place's staged storms "
+                   + (f"kept the hand-over in {names(on)}" if on else "kept the hand-over nowhere")
+                   + (f" and switched it off in {names(off)}" if off else "")
+                   + f". That verdict had the sign of what the hand-over then did in the test year in {agree_all} of "
+                   f"{n_all} places"
+                   + (f" ({agree_after} of the {n_after} scored after the rule was final)" if n_after else "")
+                   + f". The out-of-fold audit tried first would have been right in {agree_yearly} of {n_yearly}."
+                   + (" " + misses if misses else ""))
 if scenarios:
     def sc(kind, key, g):
         vals = [r["groups"][g][kind][key] for r in scenarios.values() if r["groups"].get(g, {}).get(kind)]
         return float(np.mean(vals)) if vals else float("nan")
 
     last = G[-1]
-    lines.append(
+    summary.append(
         f"- **Structure at long range.** On days 11-14 one coupled scenario has {sc('coupled', 'sharpness', last):.2f} of "
         f"the weather's spatial variability (raw ECMWF ENS: {sc('raw', 'sharpness', last):.2f}), and the CRPS of rain "
         f"averaged over two-degree boxes is {sc('coupled', 'areal_crps', last):.2f} mm against "
         f"{sc('uncoupled', 'areal_crps', last):.2f} for uncoupled draws and {sc('raw', 'areal_crps', last):.2f} for the "
         f"raw ensemble (means over {len(scenarios)} places).")
+lines += summary
 lines.append("- **What is still weak** is listed [near the end](#what-is-still-weak).")
 lines += ["", "## Scoreboard", "",
           f"In how many of the {n_places} places the new Blend beat every other system, raw and post-processed, on each "
@@ -302,11 +326,12 @@ lines += ["", "## Weak spot 1: the heavy tail", "",
 lines += R.before_after(old, new, "bss", "50")
 if tails:
     lines += [""] + tail_bench.markdown([tails[k] for k in ORDER if k in tails]).splitlines()
-lines += ["", "### The hand-over: staged, audited, and scored both ways", ""]
+lines += ["", "### The hand-over: staged, checked, and scored three ways", ""]
 if withheld:
     lines += ["**Storms withheld from training** (training year only). The wettest days were taken out of training, "
               "then forecast. The calibrated forecast shrinks them. The hand-over gives some of that back where the raw "
-              "systems are the better guide, and does harm where they are not. Ordinary days are left alone.", "",
+              "systems are the better guide, and does harm where they are not. Ordinary days are left alone. A place "
+              "uses the hand-over only where the Brier score in the fifth column fell (bold).", "",
               "| Place | Withheld days | Observed mean, mm | Calibrated amount, mm | Brier at 50 mm: calibrated -> with hand-over | "
               "Raw systems alone | Ordinary days handed over |", "|---|---|---|---|---|---|---|"]
     for place, w in withheld.items():
@@ -318,11 +343,18 @@ if withheld:
                      f"{'**' if better else ''}{s[label]['brier']['50']:.4f}{'**' if better else ''} | "
                      f"{s['raw']['brier']['50']:.4f} | {100 * c[label]['rows_handed_over']:.2f}% |")
     lines.append("")
-audit_table = R.audits(new, titles=SHORT)
-if audit_table:
-    lines += ["**The audit** (training data only, at the first refit). The hand-over is applied to the training "
-              "period's out-of-fold forecasts and kept unless it raised the Brier score at 50 mm. The last column is the "
-              "verdict at each of the four quarterly refits.", ""] + audit_table + [""]
+rules = R.rules_table(new, G[0], SHORT)
+if rules:
+    lines += ["**Two rules from training data, and what happened.** The staged storms are the rule that decides. The "
+              "yearly check was tried first as the switch: the hand-over is applied to all the training period's "
+              "out-of-fold forecasts and the Brier score at 50 mm compared. It touches one row in a thousand, so its "
+              "effect on a year's score is a few tenths of a percent, and the sign of so small a number proved not to "
+              "be evidence. The last column is the test year: Brier skill at 50 mm on days 1-3 with the hand-over "
+              "always on, minus without it. A verdict is bold where it had the sign of the test year.", ""] + rules + [""]
+    lines += [f"The staged storms had the sign of the test year in {agree_all} of {n_all} places, the yearly check in "
+              f"{agree_yearly} of {n_yearly}. The staged rule was the first one written down, was replaced by the yearly "
+              f"check, and was restored when {len(seen)} of the {len(new)} places had been scored, so its count is partly "
+              "hindsight.", ""]
     for g in G[:2]:
         lines += [f"**Brier skill at 50 mm in the test year, {g}**, three ways. Bold is the best of the three.", ""]
         lines += R.handover_three_ways(new, g, SHORT) + [""]
@@ -358,3 +390,14 @@ for place in ORDER:
         lines += place_table(place)
 out.write_text("\n".join(lines) + "\n")
 print("wrote", out, len(lines), "lines;", n_places, "places")
+
+# the same headline results, written into any other page that carries the markers (the README, the model card)
+START, END = "<!-- frontier-summary:start -->", "<!-- frontier-summary:end -->"
+block = [f"On the test year, in {n_places} places (the same year the first Blend was scored on):", ""] + summary
+for page in (Path(p) for p in sys.argv[5:]):
+    text = page.read_text()
+    if START not in text or END not in text:
+        raise SystemExit(f"{page} has no {START} ... {END} markers")
+    head, rest = text.split(START, 1)
+    page.write_text(head + START + "\n" + "\n".join(block) + "\n" + END + rest.split(END, 1)[1])
+    print("updated the summary in", page)

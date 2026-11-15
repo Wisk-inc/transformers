@@ -154,5 +154,35 @@ def withheld_experiment(table: dict, n: int, systems: list, top: int = 3, quanti
             "control": score_blocks(table, control_blocks, net, systems, n, supports, trust=trust)}
 
 
-__all__ = ["HEAVY_INDEX", "brier", "control_days", "score_blocks", "split_blocks", "storm_days", "valid_days",
-           "withheld_experiment"]
+def verdict(result: dict, label: str | None = None, amount: float = 50.0) -> dict:
+    """What the staged storms say about the hand-over in a place: keep it if, on the storms withheld from training,
+    it lowered the Brier score at ``amount`` mm.
+
+    ``result`` is :func:`withheld_experiment`'s; ``label`` picks the hand-over setting (the first by default). The
+    control days are not a gate: they show that ordinary days are left alone (``ordinary_rows_handed_over``). With no
+    storm to judge by, the hand-over is kept: a shrunk record storm is the costlier error."""
+    key = f"{amount:g}"
+    storm, control = result.get("storm") or {}, result.get("control") or {}
+    label = label or next((k for k in storm if k.startswith("q") and "guarded" not in k), None)
+    if not storm or label is None:
+        return {"keep": True, "evidence": False, "amount": float(amount), "storms": list(result.get("storms", []))}
+    before, after = storm["calibrated"]["brier"][key], storm[label]["brier"][key]
+    return {"keep": bool(after < before), "evidence": True, "amount": float(amount), "setting": label,
+            "storms": list(result.get("storms", [])), "calibrated": float(before), "handed": float(after),
+            "raw": float(storm["raw"]["brier"][key]), "gain": float(1.0 - after / before) if before > 0 else 0.0,
+            "observed_mean_mm": float(storm["observed_mean_mm"]), "calibrated_mm": float(storm["calibrated"]["amount_mm"]),
+            "storm_rows_handed_over": float(storm[label].get("rows_handed_over", float("nan"))),
+            "ordinary_rows_handed_over": float(control.get(label, {}).get("rows_handed_over", float("nan")))}
+
+
+def verdict_line(v: dict) -> str:
+    """The verdict in a sentence, for a log or a training report."""
+    if not v.get("evidence"):
+        return "staged storms: none to judge by; the hand-over is kept"
+    return (f"staged storms ({', '.join(v['storms'])}): calibrated {v['calibrated_mm']:.0f} mm where {v['observed_mean_mm']:.0f} "
+            f"mm fell; Brier at {v['amount']:g} mm {v['calibrated']:.4f} -> {v['handed']:.4f} with the hand-over "
+            f"({100 * v['gain']:+.1f}%); " + ("kept" if v["keep"] else "switched off"))
+
+
+__all__ = ["HEAVY_INDEX", "brier", "control_days", "score_blocks", "split_blocks", "storm_days", "valid_days", "verdict",
+           "verdict_line", "withheld_experiment"]

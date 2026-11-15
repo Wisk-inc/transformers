@@ -21,6 +21,7 @@ import numpy as np
 
 from .. import blend as B
 from ..sources.mrms_daily import MRMSDaily
+from .fullyear import place_name
 
 LEAD_GROUPS = {"days 1-3": (1, 3), "days 4-7": (4, 7), "days 8-10": (8, 10), "days 11-14": (11, 14)}
 SEASONS = {"DJF": (12, 1, 2), "MAM": (3, 4, 5), "JJA": (6, 7, 8), "SON": (9, 10, 11)}
@@ -94,7 +95,7 @@ def markdown(result: dict, labels: dict | None = None) -> str:
     """Blend against the components, by lead group: skill against CMORPH / against MRMS."""
     labels = {"stack": "Pluvium Blend", "blend_ops": "One network over the six", **(labels or {})}
     groups = [g for g in LEAD_GROUPS if g in result["groups"]]
-    lines = [f"{result['region'].replace('_', ' ').title()}, {result['season']}: {result['days']} days. Each cell: Brier "
+    lines = [f"{place_name(result['region'])}, {result['season']}: {result['days']} days. Each cell: Brier "
              "skill against CMORPH / against MRMS, each against its own base rate. Bold is the best in the column for "
              "that truth.", ""]
     for t in next(iter(result["groups"].values()))["wet_share"]["cmorph"]:

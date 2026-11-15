@@ -15,8 +15,15 @@ from pluvium.benchmarks import scenario_bench, tail_bench, winter_bench
 from pluvium.frontier import report as R
 
 results_dir, first_dir, experiments_dir, out_dir = (Path(p) for p in sys.argv[1:5])
-ORDER, SHORT, names = R.PLACE_ORDER, R.PLACE_NAMES, R.join_names
+ORDER, SHORT = R.PLACE_ORDER, R.PLACE_NAMES
 new, old = R.load_results(results_dir), R.load_results(first_dir)
+
+
+def names(places) -> str:
+    return R.join_names(places, the=True)
+
+
+
 tails, scenarios = R.load_results(results_dir, "_tail"), R.load_results(results_dir, "_scenarios")
 winters = R.load_results(results_dir, "_winter_DJF")
 withheld = R.load_results(experiments_dir) if experiments_dir.exists() else {}
@@ -93,9 +100,9 @@ m50_old, m50_new = mean_over("top", "bss", "50", G[0], old), mean_over("stack", 
 m1_old, m1_new = mean_over("top", "bss", "1", G[0], old), mean_over("stack", "bss", "1", G[0])
 agree_all, n_all = R.audit_agreement(new, G[0])
 agree_after, n_after = R.audit_agreement(new, G[0], after)
-always = [p for p in new if R.kept(new[p]) and all(R.kept(new[p]))]
-never = [p for p in new if R.kept(new[p]) and not any(R.kept(new[p]))]
-mixed = [p for p in new if R.kept(new[p]) and any(R.kept(new[p])) and not all(R.kept(new[p]))]
+agree_yearly, n_yearly = R.audit_agreement(new, G[0], rule="yearly")
+on = [p for p in new if R.kept(new[p]) is True]
+off = [p for p in new if R.kept(new[p]) is False]
 three = {m: mean_over(m, "bss", "50", G[0]) for m in ("pool_online", "declared", "stack")}
 
 # ============================================================================================ paper 1 ==
@@ -139,7 +146,7 @@ p1 = [
     "offset (Ranjan and Gneiting, 2010):", "",
     "    logit p_k = W * ( sum_c w_c * present_c * z_ck ) / ( sum_c w_c * present_c ) + b_k + e_k * lead",
     "    w_c = softplus(a_c + d_c * lead),    W = sum_c w_c", "",
-    "The weights `w` are shared within three bands of thresholds (below 5 mm, 5 to 20 mm, 25 mm and above) and "
+    "The weights `w` are shared within three bands of thresholds (below 5 mm, 5 to 25 mm, 35 mm and above) and "
     "change with lead. A missing component drops out of the average and the rest carry on. It is fitted by "
     "cross-entropy on out-of-fold rows, so no component is judged on days it was trained on, with the row weights of "
     "section 2.1.", "",
@@ -159,8 +166,8 @@ p1 = [
     "And the weights do not start cold: they are run through the training period's out-of-fold forecasts in time "
     "order first.", "",
     "### 2.4 Record storms", "",
-    "A forecast beyond anything in the training period is handed back, in part, to what the raw systems say, where "
-    "an audit on training data finds that this does no harm. That is the subject of "
+    "A forecast beyond anything in the training period is handed back, in part, to what the raw systems say, in "
+    "the places where that improved the forecast of storms withheld from training. That is the subject of "
     "[paper 2](02_record_storms.md).", "",
     "### 2.5 How the design was chosen", "",
     "Every choice was made inside the training year, by cross-validation or by forecasting its later months from "
@@ -251,7 +258,7 @@ helped = [p for p, w in withheld.items() if w["storm"][LABEL]["brier"]["50"] < w
 hurt = [p for p in withheld if p not in helped]
 shrink = [(w["storm"]["calibrated"]["amount_mm"], w["storm"]["observed_mean_mm"]) for w in withheld.values()]
 p2 = [
-    "# Forecasting beyond the training record: a hand-over to the raw systems, and an audit of it", "",
+    "# Forecasting beyond the training record: a hand-over to the raw systems, decided by staged storms", "",
     f"**Pluvium technical paper 2.** {BYLINE}", "",
     "## Summary", "",
     "A calibrated forecast is a map learned from the forecasts of its training period. On a storm larger than "
@@ -273,24 +280,29 @@ if withheld:
     ]
 p2 += [
     "",
-    "That split is the main finding. Where the raw systems overcall heavy rain against the truth, as they do over "
-    "mountains against a satellite estimate, the calibration is right to discount them and the hand-over does harm. "
-    "So the hand-over is audited: at every refit it is applied to the training period's own out-of-fold forecasts "
-    "and used only if it did not raise the Brier score at 50 mm there.",
+    "That split is the main finding. The hand-over is not good or bad in general. It helps where the raw systems "
+    "are the better guide to a storm the calibration has never seen, and hurts where they overcall heavy rain "
+    "against the truth. So each place decides from its own staged storms: the hand-over is used only where it "
+    "lowered the Brier score at 50 mm on them.",
+    "",
 ]
 if n_all:
-    verdicts = ([f"kept the hand-over all year in {names(always)}"] if always else []) \
-        + ([f"switched it off all year in {names(never)}"] if never else []) \
-        + ([f"changed its verdict during the year in {names(mixed)}"] if mixed else [])
-    p2 += [f"In the test year the audit {'; '.join(verdicts)}. Mean Brier skill at 50 mm on days 1-3 over the "
-           f"{n_places} places is {three['pool_online']:+.4f} with no hand-over, {three['declared']:+.4f} with it always "
-           f"on and {three['stack']:+.4f} audited. The audit's first verdict had the sign of what the hand-over then did "
-           f"in the test year in {agree_all} of {n_all} places"
-           + (f", and in {agree_after} of the {n_after} places scored after the audit was fixed." if n_after else ".")]
+    p2 += [f"In the test year the hand-over was on in {names(on)}" + (f" and off in {names(off)}" if off else "")
+           + f". Mean Brier skill at 50 mm on days 1-3 over the {n_places} places is {three['pool_online']:+.4f} with no "
+           f"hand-over, {three['declared']:+.4f} with it always on and {three['stack']:+.4f} as the places decided. Each "
+           f"place's verdict had the sign of what the hand-over then did in the test year in {agree_all} of {n_all} places"
+           + (f", and in {agree_after} of the {n_after} scored after the rule was final." if n_after else ".")]
+    if R.audit_misses(new, G[0]):
+        p2 += ["", R.audit_misses(new, G[0])]
 p2 += [
     "",
-    f"The audit was added after the first four places ({names(seen)}) had been scored with the hand-over always on. "
-    f"It is not a blind result for them. {CAUTION}", "",
+    "This paper also reports a rule that failed. Before settling on the staged storms we switched the hand-over by "
+    "an audit of the training period's out-of-fold forecasts, a far larger sample. It would have had the right sign "
+    f"in {agree_yearly} of {n_yearly} places. The hand-over touches one forecast in a thousand, so its effect on a "
+    "year's score is a few tenths of a percent, and the sign of that number is not evidence.", "",
+    f"The staged-storm rule was the first one written down, was replaced by the audit, and was restored when "
+    f"{len(seen)} of the {n_places} places ({names(seen)}) had been scored. It is not a blind result for them. "
+    f"{CAUTION}", "",
     "## 1. The problem", "",
     "Calibration shrinks forecasts towards what usually happens, and it should: a raw 80 mm forecast usually "
     "verifies well below 80 mm. A record storm is exactly the case where that lesson is wrong, and it is the case "
@@ -319,15 +331,21 @@ p2 += [
     "inside the training year. The four wettest days, at least five days apart, are removed from training along with "
     "the two days either side. Twelve ordinary days are removed as a control. A calibrated forecast is trained on "
     "the rest, and the withheld days are forecast with and without the hand-over.", "",
-    "### 2.5 The audit", "",
-    "The staged storms are four days. A larger sample is already at hand: every training row has an out-of-fold "
-    "forecast, made by networks that never saw that row's days. The audit applies the hand-over to all of them and "
-    "compares", "",
+    "**The verdict.** A place uses the hand-over if it lowered the Brier score at 50 mm on its withheld storms. The "
+    "control days are not part of the verdict. They show that ordinary days are left alone. With no storm to judge "
+    "by, the hand-over is kept, because a shrunk record storm is the costlier error. `pluvium blend train` stages "
+    "the storms, prints the verdict and saves it with the model. The owner can overrule it "
+    "(`--handover always` or `never`).", "",
+    "### 2.5 The yearly check, and why it does not decide", "",
+    "The staged storms are four days. A larger sample is at hand: every training row has an out-of-fold forecast, "
+    "made by networks that never saw that row's days. The check applies the hand-over to all of them and compares", "",
     "    Brier(with hand-over) against Brier(without),   at 50 mm, over all training rows", "",
-    "with the rows' sampling weights undone. The hand-over is kept unless it raised the score. With no rows beyond "
-    "the edge there is no evidence either way and it is kept, because a shrunk record storm is the costlier error. "
-    "The audit costs nothing, because the out-of-fold forecasts are the ones the pool is fitted on, and it is "
-    "repeated at every refit. A model trained with `pluvium blend train` runs it and prints the verdict.", "",
+    "with the rows' sampling weights undone. It costs nothing, and we first used it as the switch. It does not work "
+    "as one. The hand-over touches about one row in a thousand, most of them heavy days of a kind the networks have "
+    "seen. Over a year its effect on the score is a few tenths of a percent in either direction, and in three of "
+    "seven places the sign changes when the check is run on the one-network component's forecast in place of the "
+    "pool's ([WHAT_DID_NOT_WORK.md](../WHAT_DID_NOT_WORK.md)). It is still run at every training and saved with the "
+    "model, as the price of the hand-over in an ordinary year.", "",
     "### 2.6 What the user is told", "",
     "The forecast table carries three more columns. An alert tier for 50 mm (watch at a 10% chance, warning at 30%, "
     "extreme at 60%). A flag when the raw systems call for more than anything in the training period, in which case "
@@ -349,14 +367,29 @@ if withheld:
                   f"{'**' if better else ''}{s[LABEL]['brier']['50']:.4f}{'**' if better else ''} | "
                   f"{s['raw']['brier']['50']:.4f} | {100 * c[LABEL]['rows_handed_over']:.2f}% |")
     raw_better = [p for p, w in withheld.items() if w["storm"]["raw"]["brier"]["50"] < w["storm"]["calibrated"]["brier"]["50"]]
-    p2 += ["", "The calibrated forecast shrinks every staged storm. Whether handing over helps follows one thing: "
-           "whether the raw systems alone were better than the calibration on those days. They were in "
-           f"{names(raw_better)} and not elsewhere. In Jamaica the withheld days include Hurricane Beryl "
-           "(3 July 2024)." if "jamaica" in withheld else "", ""]
-audit_table = R.audits(new, titles=SHORT)
-if audit_table:
-    p2 += ["### 3.2 The audit (training data, first refit)", ""] + audit_table + [
-        "", "The last column is the verdict at each of the four quarterly refits.", "",
+    little = [p for p in helped if p not in raw_better]
+    text = "The calibrated forecast shrinks every staged storm."
+    if raw_better:
+        text += (f" The hand-over helped most where the raw systems alone beat the calibration on those days "
+                 f"({names(raw_better)}).")
+    if little:
+        text += (f" Where they did not, it still helped a little in {names(little)}, because it acts only on the rows "
+                 "that lie beyond the training range and on which the systems agree.")
+    if hurt:
+        text += f" It did not help in {names(hurt)}, where the raw systems were well behind the calibration."
+    if "jamaica" in withheld:
+        text += " In Jamaica the withheld days include Hurricane Beryl (3 July 2024)."
+    p2 += ["", text, ""]
+rules = R.rules_table(new, G[0], SHORT)
+if rules:
+    p2 += ["### 3.2 Two rules from training data, and what happened", "",
+           "The staged storms decide. The yearly check is shown beside them. The last column is the test year: Brier "
+           "skill at 50 mm on days 1-3 with the hand-over always on, minus without it. A verdict is bold where it had the "
+           "sign of the test year.", ""] + rules + [
+        "", f"The staged storms had the sign of the test year in {agree_all} of {n_all} places and the yearly check in "
+        f"{agree_yearly} of {n_yearly}. The first count is partly hindsight (see the summary). The effects in the test "
+        "year are several times larger than anything the yearly check measures, in both directions: a year's verdict on "
+        "the hand-over is made by a few storms.", "",
         "### 3.3 The test year, three ways", ""]
     for g in G[:2]:
         p2 += [f"Brier skill at 50 mm, {g}. Bold is the best of the three.", ""] + R.handover_three_ways(new, g, SHORT) + [""]
@@ -387,25 +420,34 @@ if "jamaica" in tails:
 p2 += ["## 4. What did not work", "",
        "**Handing over everywhere.** That was the design as first written down. It was tested by staging storms in "
        "two regions, and both happened to be regions where it helps. Section 3.3 shows what it cost in the others.", "",
+       "**An audit of an ordinary year as the switch.** Section 2.5. A larger sample, and the wrong one: nearly all "
+       "of it is heavy days the networks have seen, and the question is about the storm they have not.", "",
        "**Discounting the raw systems first.** Scaling the raw chances by how often they verified at the top of the "
        "training forecasts, and never letting the hand-over lower a chance, still did harm on the Alps' staged storms "
-       "and gave away most of the gain where the plain hand-over helps. A switch decided by an audit is simpler and "
-       "did better.", "",
+       "and gave away most of the gain where the plain hand-over helps. A switch per place is simpler and did "
+       "better.", "",
+       "**Starting the hand-over further out**, at the 99.99th percentile of the training forecasts or at their "
+       "maximum, so that no training row could speak against it. On the staged storms that gave nearly all of the "
+       "gain away: the gain comes from forecasts just beyond what the training period held. The numbers are in "
+       "[WHAT_DID_NOT_WORK.md](../WHAT_DID_NOT_WORK.md).", "",
        "## 5. Limits", "",
        "- " + CAUTION,
-       "- Where the audit switches the hand-over off, a record storm is forecast by the calibration alone, which "
-       "shrinks it. The beyond-record flag and the count of raw systems calling for 50 mm are still shown.",
-       "- The audit judges by one amount, 50 mm, and by the past. A place can pass it and still be hurt in a given "
-       "year.",
+       "- Where the staged storms switch the hand-over off, a record storm is forecast by the calibration alone, "
+       "which shrinks it. The beyond-record flag and the count of raw systems calling for 50 mm are still shown.",
+       "- The verdict rests on four storms of one training year, one amount (50 mm) and one truth. A place can pass "
+       "and still be hurt in a given year, or fail and then meet the storm that would have justified the hand-over.",
+       "- The rule was settled after most places had been scored. A fresh year in fresh places is the test it still "
+       "needs.",
        "- The hand-over raises the RMSE of the expected amount slightly where it is used.",
        "- Whether the raw systems overcall depends on the truth. Against gauges in mountains the verdict could differ.",
        "- Return periods come from one to a few years of satellite estimates and are rough.", "",
        "## 6. Reproducing", "",
-       "```bash", "pip install pluvium", "pluvium blend train --root ~/pluvium-JM        # prints the audit's verdict",
+       "```bash", "pip install pluvium",
+       "pluvium blend train --root ~/pluvium-JM        # stages the storms and prints the verdict",
        "```", "",
-       "The staged-storm experiment is `pluvium.tails.withheld.withheld_experiment`, the audit "
-       "`pluvium.tails.audit.audit_handover`, and the test-year tables come from "
-       "`python -m pluvium.benchmarks.frontier_bench`.", "",
+       "The staged-storm experiment is `pluvium.tails.withheld.withheld_experiment` and its verdict "
+       "`pluvium.tails.withheld.verdict`. The yearly check is `pluvium.tails.audit.audit_handover`. The test-year "
+       "tables come from `python -m pluvium.benchmarks.frontier_bench`.", "",
        "## References", "",
        "- Dalrymple, T. (1960). Flood-frequency analyses. *US Geological Survey Water-Supply Paper* 1543-A.",
        "- Gneiting, T., and Ranjan, R. (2011). Comparing density forecasts using threshold- and quantile-weighted "

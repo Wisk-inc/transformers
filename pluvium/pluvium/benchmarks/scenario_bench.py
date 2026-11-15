@@ -36,6 +36,7 @@ import numpy as np
 from ..scenarios.ecc import ecc, independent
 from ..scenarios.scores import areal_crps, box_groups, crps_ensemble, energy_score, nearby_pairs, variogram_score
 from ..util import log
+from .fullyear import place_name
 
 LEAD_GROUPS = {"days 1-3": (1, 3), "days 4-7": (4, 7), "days 8-10": (8, 10), "days 11-14": (11, 14)}
 KINDS = ("raw", "coupled", "uncoupled")
@@ -147,7 +148,7 @@ def markdown(results: list) -> str:
                 fmt = "{:.2f}" if key != "variogram" else "{:.3f}"
                 best = int(np.argmin(vals)) if key != "sharpness" else int(np.argmin(np.abs(np.array(vals) - 1.0)))
                 cells.append(" / ".join(f"**{fmt.format(v)}**" if j == best else fmt.format(v) for j, v in enumerate(vals)))
-            lines.append(f"| {r['region'].replace('_', ' ').title()} | " + " | ".join(cells) + " |")
+            lines.append(f"| {place_name(r['region'])} | " + " | ".join(cells) + " |")
         lines.append("")
     return "\n".join(lines)
 

@@ -191,12 +191,15 @@ Each part was chosen inside the training year and is scored on its own in
    a record forecast towards normal. The model keeps the edge of what it was trained on: the 99.9th percentile of the
    raw systems' consensus amount. Inside that edge nothing changes. Beyond it, trust moves from the calibrated chances
    to the raw systems' own, in proportion to how far outside the forecast is and how many systems agree.
-5. **The hand-over is audited** (`pluvium.tails.audit`). Handing over helps where calibration shrinks a storm the raw
-   systems had right. It hurts where the raw systems call for heavy rain far more often than it falls, as they do
-   over mountains against a satellite truth. Which case holds is measured at every training: the hand-over is applied
-   to the training period's own out-of-fold forecasts, and it is used only if it did not raise the Brier score at
-   50 mm there. The verdict is printed and saved with the model. This step was added after the first four places of
-   the benchmark showed the harm, and the benchmark says so.
+5. **Each place decides about the hand-over** (`pluvium.tails.withheld`). Handing over helps where calibration
+   shrinks a storm the raw systems had right. It hurts where the raw systems call for heavy rain far more often than
+   it falls. Which case holds is tested at every training by staging record storms: the four wettest days of the
+   training period are withheld, a forecast is trained without them, and they are then forecast with and without the
+   hand-over. The hand-over is used only if it lowered the Brier score at 50 mm on those storms. The verdict is
+   printed and saved with the model, and the owner can overrule it (`pluvium blend train --handover always` or
+   `never`). This step was added after the first places of the benchmark showed that handing over everywhere hurts
+   in some of them. A first remedy, an audit of the training period's ordinary days, proved unreliable and was
+   dropped as the switch (`pluvium.tails.audit`, still reported). The benchmark tells both stories.
 6. **Scenarios** (`pluvium.scenarios`). A calibrated chance per place is smooth at long range, as it should be. For
    maps and area totals, the calibrated amounts at each place are arranged across the scenarios in the same order as
    the ECMWF ensemble's members (ensemble copula coupling). Each scenario then has the right amounts place by place
@@ -329,10 +332,17 @@ chosen on three seasons and tested once on a fourth. Results are in [CYCLONE_BEN
 * Live "rain now" comes from GOES infrared when the rain-rate product is unavailable, which is cruder than the
   CMORPH used in training.
 * Tropical cyclones are rare in any training period.
-* Pluvium Blend does not lead everywhere. At 50 mm a day post-processed ECMWF AIFS is often as good or better at short
-  range. Beyond a week in the mid-latitudes raw ensembles keep a higher anomaly correlation. In winter, on days 1
-  to 3, it is level with the best system rather than ahead.
-* Pluvium forecasts rain only: not temperature, heat waves or cyclone tracks, and not the poles (its truth stops at 60
-  degrees of latitude).
+* Pluvium Blend does not lead everywhere. Version 0.3 narrowed the gap at 50 mm a day but did not close it in every
+  place. Beyond a week in the mid-latitudes raw models keep a higher anomaly correlation of the expected amount. The
+  current list, from the data, is in [FRONTIER_BENCHMARK.md](FRONTIER_BENCHMARK.md#what-is-still-weak).
+* The year version 0.3 was tested on is the year its weak spots were found on. Its design was chosen inside the
+  training year, and one step (each place deciding about the hand-over) was settled after five of the seven places
+  had been scored.
+* Where a place's staged storms switch the record-storm hand-over off, a storm beyond the training record is
+  forecast by the calibration alone, which shrinks it. The verdict rests on four storms and can be wrong.
+* Pluvium Cyclone forecasts the track only: no intensity, size, wind, surge or rain, and no formation. On its clean
+  test season it was behind the National Hurricane Center's official forecast at every lead.
+* Pluvium forecasts rain and cyclone tracks: not temperature, wind or heat waves, and not the poles (its truth stops
+  at 60 degrees of latitude).
 * The flood rule needs verification against flood reports before anyone relies on it.
 * A research model: not an official forecast.

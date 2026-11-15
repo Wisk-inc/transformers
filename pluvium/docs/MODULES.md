@@ -4,7 +4,7 @@ Every module of the package, what it is for, and its size. Generated from the mo
 
 | Module | Lines | Purpose |
 |---|---|---|
-| `pluvium/__init__.py` | 17 | Pluvium: rain forecasts for every town, in any country, on the NatureV1 / iHELIX engine. |
+| `pluvium/__init__.py` | 18 | Pluvium: rain forecasts for every town, in any country, on the NatureV1 / iHELIX engine. |
 | `pluvium/advection.py` | 70 | Rain already falling, carried forward (experimental as an input to a neural forecaster of this kind). |
 | `pluvium/area.py` | 195 | Where Pluvium forecasts: one country, several, or any box between 60 S and 60 N. |
 | `pluvium/atmos/__init__.py` | 33 | Theoretical atmospheric physics computed from the driving fields and given to the network as inputs. |
@@ -21,18 +21,18 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/benchmarks/__init__.py` | 3 | Benchmarks that need more than :mod:`pluvium.bench`: Pluvium against the operational forecasting systems on real forecasts (:mod:`pluvium.benchmarks.operational`). |
 | `pluvium/benchmarks/cyclone_bench.py` | 336 | Pluvium Cyclone against the National Hurricane Center's decks, season by season. |
 | `pluvium/benchmarks/cyclone_products.py` | 170 | Are the uncertainty products honest? |
-| `pluvium/benchmarks/frontier_bench.py` | 102 | The frontier benchmark from start to finish, one place at a time. |
+| `pluvium/benchmarks/frontier_bench.py` | 107 | The frontier benchmark from start to finish, one place at a time. |
 | `pluvium/benchmarks/fullyear.py` | 934 | A full year, 14 days ahead, around the world: Pluvium Blend against the operational systems. |
 | `pluvium/benchmarks/operational.py` | 885 | Pluvium against the operational forecasting systems, on real forecasts only. |
 | `pluvium/benchmarks/scenario_bench.py` | 174 | Do the scenarios keep the weather's shape? |
 | `pluvium/benchmarks/tail_bench.py` | 156 | The heavy end of the forecast, scored on its own. |
 | `pluvium/benchmarks/winter_bench.py` | 141 | Winter, scored twice: against the satellite and against radar and gauges. |
 | `pluvium/blend.py` | 323 | Pluvium Blend: one calibrated forecast from every operational system and Pluvium's own network. |
-| `pluvium/blendlive.py` | 256 | Pluvium Blend for any country, every day. |
+| `pluvium/blendlive.py` | 297 | Pluvium Blend for any country, every day. |
 | `pluvium/calibrate.py` | 147 | Making the stated chances true: isotonic recalibration fitted on held-out forecasts. |
 | `pluvium/card.py` | 146 | The model card written next to a trained Pluvium: what it is, how it was trained, and how well it did. |
 | `pluvium/chain.py` | 256 | The intensity chain (experimental): rain at a place as a hidden Markov chain over *intensity states* -- dry, light, moderate, heavy -- whose hour-by-hour transition matrix the network writes for every place. |
-| `pluvium/cli.py` | 284 | ``pluvium forecast / place / program / info``. |
+| `pluvium/cli.py` | 287 | ``pluvium forecast / place / program / info``. |
 | `pluvium/convection.py` | 90 | The convective environment: how ready the air is to make thunderstorms, from the driving model's temperature, humidity and wind at 850, 700, 500 and 200 hPa (the forecaster's classic instability and moisture indices). |
 | `pluvium/cyclone/__init__.py` | 27 | Pluvium Cyclone: where a tropical cyclone will go, from every operational system at once. |
 | `pluvium/cyclone/approach.py` | 86 | How close will it come? |
@@ -73,10 +73,10 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/flood.py` | 180 | Flood risk: rain is only half of it. |
 | `pluvium/forecast.py` | 544 | The live forecast: for every town and village in the Caribbean, hour by hour for three days -- the chance of rain, whether it will be drizzle, showers, steady or heavy rain or thunderstorms, when it is most likely to start (in local time) and when it will be heaviest, how much may fall, the flash-flood risk, and why. |
 | `pluvium/frontier/__init__.py` | 22 | Pluvium Frontier: the second generation of Pluvium Blend. |
-| `pluvium/frontier/evaluate.py` | 206 | Scoring pool designs on a place's stored components. |
-| `pluvium/frontier/model.py` | 260 | Pluvium Blend as benchmarked on the frontier, for any country, every day. |
+| `pluvium/frontier/evaluate.py` | 230 | Scoring pool designs on a place's stored components. |
+| `pluvium/frontier/model.py` | 297 | Pluvium Blend as benchmarked on the frontier, for any country, every day. |
 | `pluvium/frontier/oof.py` | 109 | Out-of-fold forecasts: what each component says about days it was not trained on. |
-| `pluvium/frontier/report.py` | 140 | The frontier benchmark as tables: where the new Blend stands, what each part added, and what changed since the first. |
+| `pluvium/frontier/report.py` | 249 | The frontier benchmark as tables: where the new Blend stands, what each part added, and what changed since the first. |
 | `pluvium/frontier/store.py` | 232 | The component store: every component's forecasts for a place, kept so that pools can be fitted and scored in minutes. |
 | `pluvium/guard/__init__.py` | 24 | What can go wrong when the model is running, and what Pluvium does about it. |
 | `pluvium/guard/consistency.py` | 71 | Outputs that contradict each other, found and repaired. |
@@ -141,14 +141,17 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/sources/nwp.py` | 382 | Live driving fields: GFS (NOAA, hourly to 5 days), ECMWF IFS and AIFS (ECMWF open data, CC-BY-4.0), read by byte range from their public buckets and averaged onto the exact grids the model was trained on (ERA5's 1 degree hourly and 1.5 degree upper-air), so live input looks like training input. |
 | `pluvium/sources/stations.py` | 204 | Point truth: hourly weather reports from about 250 Caribbean airports and stations (NOAA's Integrated Surface Database, ``noaa-global-hourly-pds`` on AWS Open Data). |
 | `pluvium/synthetic.py` | 206 | A synthetic Caribbean for tests and demonstrations: an island with a mountain spine, trade winds, afternoon storms, cold fronts that sweep south in the cool season, and rain made where the wind meets the slope -- with "reanalysis" fields and "CMORPH" truth produced by the same weather, so the whole pipeline can be trained and scored without a network. |
-| `pluvium/tails/__init__.py` | 21 | The tail of the rain distribution: heavy days, record storms, and what calibration does to them. |
+| `pluvium/tails/__init__.py` | 23 | The tail of the rain distribution: heavy days, record storms, and what calibration does to them. |
 | `pluvium/tails/alerts.py` | 77 | From chances to warnings: three tiers for heavy rain, and what they have meant. |
+| `pluvium/tails/audit.py` | 101 | The hand-over audit: do the raw systems know better here, when the forecast leaves the training range? |
 | `pluvium/tails/consensus.py` | 49 | The raw consensus: what the systems say before anyone calibrates them. |
-| `pluvium/tails/override.py` | 50 | The hand-over: when a forecast leaves the range calibration was trained on, the raw consensus takes it back. |
+| `pluvium/tails/gpd.py` | 64 | The generalised Pareto distribution: the shape of rain beyond a high threshold. |
+| `pluvium/tails/override.py` | 93 | The hand-over: when a forecast leaves the range calibration was trained on, the raw consensus takes it back. |
+| `pluvium/tails/returns.py` | 115 | How rare is this amount, here? |
 | `pluvium/tails/stratify.py` | 143 | Learn the tail from every heavy-rain row, without biasing the chances. |
 | `pluvium/tails/support.py` | 64 | Support: has the calibration ever seen a forecast like this one? |
 | `pluvium/tails/twcrps.py` | 45 | Scoring the tail on its own: the threshold-weighted CRPS. |
-| `pluvium/tails/withheld.py` | 150 | What happens when the storm is bigger than anything in training? |
+| `pluvium/tails/withheld.py` | 158 | What happens when the storm is bigger than anything in training? |
 | `pluvium/train.py` | 571 | Training on one GPU: batches built on every CPU core, bf16 on the GPU, the fastest batch size found by measuring, a learning-rate schedule that ends when the time budget does, checkpoints that resume exactly, and (optionally) a mirror of every checkpoint on the Hugging Face Hub so a rented machine that stops loses nothing. |
 | `pluvium/training/__init__.py` | 20 | How the network is taught, beyond the loss: |
 | `pluvium/training/augment.py` | 53 | Perturbations with a physical meaning, applied to training examples. |
@@ -160,4 +163,4 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/weather.py` | 283 | What the weather *is*, in the words people use: intensity classes, drizzle versus rain versus showers, thunder. |
 | `pluvium/zarrlite.py` | 166 | A minimal reader for consolidated Zarr v2 stores over HTTPS (the public ERA5 stores on Google Cloud). |
 
-155 modules, 21,073 lines.
+158 modules, 21,626 lines.

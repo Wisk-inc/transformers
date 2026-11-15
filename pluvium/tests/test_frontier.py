@@ -99,24 +99,43 @@ def test_evaluate_scores_designs_and_the_pool_beats_its_components(tmp_path):
     assert res["audits"] == {}                                            # no design asked for one
 
 
-def test_an_audited_design_is_the_declared_one_or_the_one_without_handover(tmp_path):
+def test_the_staged_verdict_makes_the_design_the_declared_one_or_the_one_without_handover(tmp_path):
     from pluvium.frontier import report as R
 
     store = make_store(tmp_path / "place")
     common = dict(bands=(0, 5, 11), smooth=0.0, rows=4000, iters=40)
-    designs = [PoolDesign(name="stack", record=True, audit=True, record_quantile=0.99, **common),
+    designs = [PoolDesign(name="stack", record=True, staged=True, record_quantile=0.99, **common),
                PoolDesign(name="declared", record=True, record_quantile=0.99, **common), PoolDesign(name="pool", **common)]
-    res = evaluate(store, designs, components=False)
-    (verdict,) = res["audits"]["stack"]                                   # one refit, one verdict, from training rows
-    assert verdict["rows"] > 10 and verdict["days"] > 3 and verdict["edge_mm"] >= 20.0
-    row = res["groups"]["days 1-3"]
-    twin = "declared" if verdict["keep"] else "pool"                      # audited = one or the other, exactly
-    other = "pool" if verdict["keep"] else "declared"
-    assert row["stack"]["50"]["bss"] == row[twin]["50"]["bss"] and row["stack"]["crps"] == row[twin]["crps"]
-    assert row["stack"]["50"]["bss"] != row[other]["50"]["bss"]           # and the hand-over does change the forecast
-    table = R.audits({"place": res})
-    assert len(table) == 3 and ("yes" if verdict["keep"] else "no") in table[2]
-    assert R.audits({"place": {"audits": {}}}) == [] and "declared" in R.ABLATIONS
+    for keep in (True, False):                                            # what the place's staged storms said
+        verdict = {"keep": keep, "evidence": True, "gain": 0.04 if keep else -0.02, "storms": ["2024-10-08"]}
+        res = evaluate(store, designs, components=False, verdict=verdict)
+        assert res["staged"] == verdict
+        (check,) = res["audits"]["stack"]                                 # the yearly check: one refit, reported only
+        assert check["rows"] > 10 and check["days"] > 3 and check["edge_mm"] >= 20.0
+        row = res["groups"]["days 1-3"]
+        twin, other = ("declared", "pool") if keep else ("pool", "declared")   # one or the other, exactly, all year
+        assert row["stack"]["50"]["bss"] == row[twin]["50"]["bss"] and row["stack"]["crps"] == row[twin]["crps"]
+        assert row["stack"]["50"]["bss"] != row[other]["50"]["bss"]       # and the hand-over does change the forecast
+        assert R.kept(res) is keep and R.kept(res, "yearly") == check["keep"]
+    free = evaluate(store, designs, components=False)                     # no verdict given: the hand-over stays on
+    assert free["staged"] is None and free["groups"]["days 1-3"]["stack"]["crps"] == free["groups"]["days 1-3"]["declared"]["crps"]
+    assert "declared" in R.ABLATIONS
+
+
+def test_staged_verdict_is_read_from_the_file_beside_the_store(tmp_path):
+    from pluvium.benchmarks import frontier_bench as FB
+
+    folder = tmp_path / "store" / "place"
+    folder.mkdir(parents=True)
+    scores = lambda b: {"brier": {"50": b}, "amount_mm": 10.0, "rows_handed_over": 0.05}   # noqa: E731
+    experiment = {"storms": ["2024-10-08"], "storm": {"observed_mean_mm": 20.0, "calibrated": scores(0.08), "raw": scores(0.07),
+                                                       "q0.999 w0.69": scores(0.075)},
+                  "control": {"q0.999 w0.69": {"rows_handed_over": 0.0001}}}
+    (folder / "staged.json").write_text(json.dumps(experiment))
+    cfg = FrontierConfig(archive="a", truth="t", out=str(tmp_path))
+    v = FB.staged_verdict(cfg, "place")                                    # nothing is downloaded: the experiment is there
+    assert v["keep"] and abs(v["gain"] - (1 - 0.075 / 0.08)) < 1e-9 and v["setting"] == "q0.999 w0.69"
+    assert FB.POOL_RECORD == (FB.DESIGNS[0].record_quantile, FB.DESIGNS[0].record_width)
 
 
 def test_frontier_bench_writes_results_and_resumes(tmp_path):
@@ -134,10 +153,10 @@ def test_frontier_bench_writes_results_and_resumes(tmp_path):
     again = FB.evaluate_place(store.folder, out, designs=designs)              # everything is there: nothing is redone
     assert (out / "place.json").stat().st_mtime_ns == stamp and again["cells"] == res["cells"]
     top = FB.DESIGNS[0]
-    assert top.name == "stack" and top.online and top.record and top.audit and top.bands == (0, 5, 11) and top.eta == 1.0
+    assert top.name == "stack" and top.online and top.record and top.staged and top.bands == (0, 5, 11) and top.eta == 1.0
     assert [d.name for d in FB.DESIGNS[1:]] == ["declared", "pool", "pool_online", "pool_record"]
     declared = FB.DESIGNS[1]                                                   # the same, with the hand-over always on
-    assert declared.record and not declared.audit and (declared.online, declared.eta, declared.bands) == (True, 1.0, (0, 5, 11))
+    assert declared.record and not declared.staged and (declared.online, declared.eta, declared.bands) == (True, 1.0, (0, 5, 11))
 
 
 def test_a_half_written_quarter_is_not_taken_for_a_quarter(tmp_path):

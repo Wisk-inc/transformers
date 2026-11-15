@@ -9,15 +9,21 @@ ask:
 * how long will it last, and how much will fall (median and a bad case)?
 * is lightning active nearby right now, and could it flood?
 
-Two products, one package:
+Three products, one package:
 
 * **Pluvium's network** runs on the NatureV1 / iHELIX engine (geometric attention on the sphere) and forecasts hour by
   hour. **Pluvium-500** is the full-size model: 57.9M parameters ("500" is its name, not its parameter count). It is
   trained on one GPU by a single resumable program.
 * **Pluvium Blend** forecasts each day's rain out to 14 days. It reads every operational system at once: ECMWF ENS, HRES
-  and AIFS, NOAA GEFS, GFS and GraphCast, and Pluvium's network where it runs. It needs no GPU.
+  and AIFS, NOAA GEFS, GFS and GraphCast, and Pluvium's network where it runs. It needs no GPU. It learns from every
+  verified day, says when a forecast is beyond anything it was trained on, and gives each amount in the place's own
+  terms ("about once in 6 years").
+* **Pluvium Cyclone** forecasts where every tropical cyclone in the North Atlantic and the eastern North Pacific will
+  go, from the same six systems: a track, a circle that should hold the centre two times in three, and the chance of
+  the centre passing near each place. Track only. It needs no GPU.
 
-> Research model, not an official forecast. Follow your national meteorological service.
+> Research model, not an official forecast. Follow your national meteorological service and, for hurricanes, the
+> National Hurricane Center.
 
 ## Install
 
@@ -65,8 +71,13 @@ set up in minutes:
 pluvium setup --country TT --root ~/pluvium-TT     # area, terrain, provinces and every town (Trinidad and Tobago)
 pluvium blend train --root ~/pluvium-TT            # learn Pluvium Blend from a year of archived runs (CPU, ~2 h)
 pluvium blend forecast --root ~/pluvium-TT         # 14 days of daily rain chances for every town
+pluvium blend learn --root ~/pluvium-TT            # every day: update the weights from the days now verified
 pluvium program --root ~/pluvium-TT --country TT   # train Pluvium's own network for the country (GPU)
 ```
+
+`pluvium blend forecast` writes one row per place and day: the chance of 1, 10, 25 and 50 mm; the median, 90th
+percentile and expected rain; how many raw systems call for 50 mm; an alert tier (watch, warning, extreme); whether
+the forecast is beyond the training record; and how rare the expected amount is at that place.
 
 * `--country` takes ISO codes, one or several (`DO,HT` for Hispaniola). `--box south,north,west,east` sets the extent
   by hand; split large countries into regions.
@@ -76,7 +87,25 @@ pluvium program --root ~/pluvium-TT --country TT   # train Pluvium's own network
 * Set up and tested from live data: Jamaica, Trinidad and Tobago, Sri Lanka (eastern hemisphere) and Ghana (which
   straddles longitude 0).
 
-## Train Pluvium-500 on one GPU
+## Hurricane tracks
+
+```bash
+pluvium cyclone --root ~/storms                          # every storm alive now: track, cone, passage chances
+pluvium cyclone --root ~/storms --time 2025-10-25T22     # as it would have been issued then
+```
+
+It reads the National Hurricane Center's public decks and sea-level pressure from six systems, follows the storm in
+every ensemble member, and combines the tracks with weights learned from the forecasts that have already verified.
+For each storm it writes a bulletin and a data file: the track to five days, the circle that should hold the centre
+two times in three at each lead, the chance of the centre passing within 150 km of each listed place, and scenarios
+when the tracks split.
+
+## Train
+
+Every command that trains something, ready to copy, is in [docs/TRAINING.md](docs/TRAINING.md).
+`notebooks/pluvium_blend_cell.py` is one cell that sets up a country, trains Pluvium Blend and forecasts, on a CPU.
+
+### Pluvium-500 on one GPU
 
 `notebooks/rtx6000_pluvium.py` is one copy-paste cell for an NVIDIA RTX PRO 6000 Blackwell (96 GB). Set
 `GPU_HOURS` and a Hub token and run it. The program then:
@@ -100,7 +129,24 @@ GPU_HOURS=24 HF_TOKEN=... HF_REPO=you/Pluvium-500 pluvium program
 
 The full explanation is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), every module's purpose is in
 [docs/MODULES.md](docs/MODULES.md), and what can go wrong in operation (and what Pluvium does about it) is in
-[docs/FAILURE_MODES.md](docs/FAILURE_MODES.md). In short:
+[docs/FAILURE_MODES.md](docs/FAILURE_MODES.md). Four short papers are in [docs/papers](docs/papers/README.md), and
+the ideas that were built, tested and dropped are in [docs/WHAT_DID_NOT_WORK.md](docs/WHAT_DID_NOT_WORK.md).
+
+Pluvium Blend, in short:
+
+* each system is post-processed by its own small network, trained on every heavy-rain day with weights that keep
+  the chances unbiased;
+* a pool weighs them by threshold band and lead, fitted on forecasts the networks did not train on;
+* online weights move after every verified day towards whoever has been right;
+* a forecast beyond anything in the training period is handed back, in part, to what the raw systems say, in the
+  places where that improved the forecast of storms withheld from training;
+* scenarios arrange the calibrated amounts in space like the ECMWF ensemble's members.
+
+Pluvium Cyclone, in short: a tracker on sea-level pressure, a consensus whose weights minimise the expected error
+given the systems' error covariance so far, a circle sized from verified errors and the systems' spread, and a
+cloud of tracks from which passage chances are read.
+
+Pluvium's network, in short:
 
 * **Inputs**:
   * the global models' fields: GFS, ECMWF IFS and AIFS live, ERA5 in training;
@@ -136,7 +182,37 @@ The full explanation is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), every m
 
 ## Benchmarks
 
-**A full year, 14 days, six regions**: see [docs/FULL_YEAR_BENCHMARK.md](docs/FULL_YEAR_BENCHMARK.md). Pluvium Blend
+Losses are reported beside wins in every one of these.
+
+**The second generation of Pluvium Blend (version 0.3)**: see
+[docs/FRONTIER_BENCHMARK.md](docs/FRONTIER_BENCHMARK.md). The first full-year benchmark, below, found three weak
+spots: 50 mm, winter in mid-latitude climates, and structure at long range. Version 0.3 was aimed at them and scored
+on the same year by the same rules, with every part of the design scored on its own.
+
+<!-- frontier-summary:start -->
+<!-- frontier-summary:end -->
+
+![Heavy rain, place by place](docs/img/frontier_heavy_rain.png)
+
+**Hurricane tracks**: see [docs/CYCLONE_BENCHMARK.md](docs/CYCLONE_BENCHMARK.md). Pluvium Cyclone against the
+National Hurricane Center's best tracks, beside the Center's official forecast and guidance, on the forecasts all of
+them made. Settings were chosen on three seasons and tested once on a fourth (East Pacific 2025, 167 forecasts of 18
+storms).
+
+* **Against single models:** lower error than ECMWF HRES at all 8 leads from 12 to 120 hours (8 with 95% confidence)
+  and than NOAA GFS at all 8 (5 with 95% confidence).
+* **Against the Center's simple consensus (TVCN):** level.
+* **Against the official forecast:** behind at every lead on the test season, by 2 to 25 nautical miles (125 against
+  100 at five days). Ahead at every lead on the North Atlantic 2025 development season, which is not the result to
+  trust. Google DeepMind's cyclone model is better than both.
+* **Uncertainty:** the circle meant to hold the centre two times in three held it 70% of the time. The chance of
+  the centre passing within 150 km of a place scored a Brier skill of 0.47, against 0.42 for the raw cloud of
+  ensemble members.
+
+![Track error by lead](docs/img/cyclone_track_error.png)
+
+**The first full year, 14 days, six regions (version 0.2)**: see
+[docs/FULL_YEAR_BENCHMARK.md](docs/FULL_YEAR_BENCHMARK.md). Pluvium Blend
 against ECMWF ENS, HRES and AIFS and NOAA GEFS, GFS and GraphCast, from real archived runs only. It is scored on April
 2025 to March 2026, every season, in the Caribbean, the Maritime Continent, the Alps, the US Pacific Northwest, the US
 Great Plains and the southern Andes. Each system is scored raw and after the same post-processing.

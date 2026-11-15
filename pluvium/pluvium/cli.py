@@ -140,6 +140,20 @@ def cmd_cyclone(args) -> None:
     print(f"{len(found)} storm(s); bulletins and data in {Path(args.root).expanduser() / 'cyclone'}")
 
 
+def handover_line(model) -> str:
+    """One line on what a frontier blend does with a forecast beyond its training record, and why."""
+    verdict = model.meta.get("handover", {})
+    mode = verdict.get("mode", "auto")
+    found = "were forecast better with it" if verdict.get("keep", True) else "were not forecast better with it"
+    test = f"the storms staged in the training period {found}"
+    if model.hands_over:
+        why = test if mode == "auto" else f"set to always; {test}"
+        return f"record storms: a forecast beyond the training record is handed, in part, to the raw systems ({why})"
+    why = test if mode == "auto" else f"set to never; {test}"
+    return (f"record storms: forecast by the calibration alone ({why}); the table still flags a forecast beyond the "
+            "record. --handover always overrules this")
+
+
 def cmd_blend(args) -> None:
     """Pluvium Blend for any country: train it on a year of archived runs, or forecast 14 days for every town."""
     from .area import Area
@@ -154,12 +168,18 @@ def cmd_blend(args) -> None:
             Area.for_countries(codes, cache=root / "cache" / "areas")
         root.mkdir(parents=True, exist_ok=True)
         area.save(root / "area.json")
-        kind = BlendModel if args.classic else FrontierBlend
-        model = kind.train(area, root, start=args.start, end=args.end)
+        if args.classic:
+            model = BlendModel.train(area, root, start=args.start, end=args.end)
+        else:
+            model = FrontierBlend.train(area, root, start=args.start, end=args.end, handover=args.handover or "auto")
         print(f"blend for {area.name} trained on {model.meta['runs']} runs at {model.meta['cells']:,} places "
               f"({len(model.meta['components'])} components pooled); saved in {root / 'blend'}")
+        if isinstance(model, FrontierBlend):
+            print(handover_line(model))
         return
     model = load_blend(root / "blend")
+    if args.handover and isinstance(model, FrontierBlend):    # overrule the staged verdict for this run (not saved)
+        model.set_handover(args.handover)
     now = None
     if args.time:
         from .util import hour_of
@@ -244,6 +264,10 @@ def main(argv=None) -> None:
     p.add_argument("--time", default=None, help="forecast as of this UTC hour, e.g. 2026-11-14T12 (default: now)")
     p.add_argument("--classic", action="store_true",
                    help="train the first Blend (no tail weighting, online weights or record-storm hand-over)")
+    p.add_argument("--handover", choices=["auto", "always", "never"], default=None,
+                   help="what to do with a forecast beyond the training record: follow the verdict of the storms "
+                        "staged at training (the default), always hand it to the raw systems, or never. With train "
+                        "it is saved in the model; with forecast it applies to that run only")
     p.set_defaults(func=cmd_blend)
     p = sub.add_parser("cyclone", help="Pluvium Cyclone: track, cone and passage chances for every storm alive now")
     p.add_argument("--root", default="pluvium-cyclone", help="folder for decks, pressure fields, tracks and bulletins")

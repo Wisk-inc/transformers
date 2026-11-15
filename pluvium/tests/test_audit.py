@@ -1,6 +1,6 @@
 # Copyright 2026 Nathan. Apache-2.0.
-"""The hand-over audit: kept where the raw systems are the better guide beyond the training range, switched off where
-they overcall, and the trust the raw systems earned at the top of the training forecasts."""
+"""The yearly check of the hand-over: it sees a gain where the raw systems are the better guide beyond the training
+range and harm where they overcall; and the trust the raw systems earned at the top of the training forecasts."""
 
 import numpy as np
 
@@ -36,7 +36,7 @@ def test_audit_keeps_the_handover_where_calibration_shrinks_storms():
     assert a.rows > 50 and 0.0 < a.share < 0.02 and a.days >= 3
     assert a.chance_of_harm < 0.1                                         # however the storm days are resampled
     assert a.brier["100"][1] < a.brier["100"][0]
-    assert "kept" in a.line() and a.to_json()["keep"] is True
+    assert "with the hand-over (-" in a.line() and "% of resamples" in a.line() and a.to_json()["keep"] is True
 
 
 def test_audit_switches_the_handover_off_where_the_raw_systems_overcall():
@@ -44,7 +44,7 @@ def test_audit_switches_the_handover_off_where_the_raw_systems_overcall():
     support = Support.from_rows(raw_mean, None, 0.99)
     a = audit_handover(p, p_raw, raw_mean, y, support, None, day)
     assert not a.keep and a.handed > a.without and a.chance_of_harm > 0.9
-    assert "switched off" in a.line()
+    assert "with the hand-over (+" in a.line()
     # the verdict is about rows beyond the edge only: everywhere else the two forecasts are the same forecast
     inside = raw_mean <= support.edge_mm
     assert weighted_brier(p[inside], y[inside], 50.0, np.ones(inside.sum())) > 0

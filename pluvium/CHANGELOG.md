@@ -17,9 +17,11 @@ saved by 0.2 load and forecast as before.
   New command: `pluvium blend learn`.
 - **Record storms** (`pluvium.tails.support`, `pluvium.tails.override`): a forecast beyond anything in the training
   period is handed back, in part, to what the raw systems say.
-- **The hand-over is audited** (`pluvium.tails.audit`): at every training it is applied to the training period's own
-  out-of-fold forecasts and used only where it does no harm. Added after the benchmark showed the hand-over hurts
-  where the raw systems overcall heavy rain.
+- **Each place decides about the hand-over** (`pluvium.tails.withheld`): at every training the four wettest days are
+  withheld, forecast without having been seen, and scored with and without it. It is used only where it helped.
+  Added after the benchmark showed the hand-over hurts where the raw systems overcall heavy rain.
+  `--handover always` or `never` overrules the verdict. An audit of the training period's ordinary days
+  (`pluvium.tails.audit`) is reported beside it and decides nothing.
 - **Scenarios** (`pluvium.scenarios`): calibrated amounts arranged in space like the ECMWF ensemble's members
   (ensemble copula coupling), or like past observed days (Schaake shuffle).
 - **The forecast table** has three new columns: an alert tier for 50 mm (`pluvium.tails.alerts`), a flag for a

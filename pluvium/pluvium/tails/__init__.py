@@ -11,9 +11,10 @@ ordinary day and wrong on the day that matters most. This package holds what Plu
 * :mod:`.support` measures how far a forecast lies outside anything seen in training;
 * :mod:`.override` hands the forecast back to the raw consensus in proportion, so a record storm is not calibrated
   away;
-* :mod:`.withheld` tunes that hand-over honestly: it trains with the largest storms withheld and tests on them;
-* :mod:`.audit` decides, from training data alone, whether a place should use the hand-over at all: where the raw
-  systems overcall heavy rain it does harm, and is switched off;
+* :mod:`.withheld` tests that hand-over honestly: it trains with the largest storms withheld and forecasts them. A
+  place uses the hand-over only if it helped on its own staged storms;
+* :mod:`.audit` reports what the hand-over does to an ordinary year of forecasts (a check that was tried as the
+  switch and did not work as one);
 * :mod:`.gpd` and :mod:`.returns` put amounts in context with extreme-value theory (return periods);
 * :mod:`.alerts` turns all of it into alert levels.
 """

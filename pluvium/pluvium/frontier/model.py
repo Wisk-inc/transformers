@@ -10,8 +10,9 @@ Pluvium Blend as benchmarked on the frontier, for any country, every day.
 * **online weights**: the components and the pool are re-weighed after every verified day
   (:mod:`pluvium.pool.online`). The weights are part of the saved model and move on with :meth:`FrontierBlend.learn`;
 * **record storms**: a forecast outside anything the training period held is handed back, in part, to what the raw
-  systems say (:mod:`pluvium.tails.override`), but only where an audit at training time finds that this does no
-  harm (:mod:`pluvium.tails.audit`). Where the raw systems overcall heavy rain, the calibration keeps the forecast.
+  systems say (:mod:`pluvium.tails.override`), but only where that helped on storms staged inside the training
+  period: its wettest days are withheld from training, then forecast with and without the hand-over
+  (:mod:`pluvium.tails.withheld`). Where it did not help, the calibration keeps the forecast.
 
 Its forecast table also says, for every place and day, which alert tier applies (:mod:`pluvium.tails.alerts`),
 whether the forecast is beyond the training record, and how rare the expected amount is at that place
@@ -41,10 +42,15 @@ from ..tails.override import agree_share_from, blend_raw, handover
 from ..tails.returns import ReturnLevels
 from ..tails.stratify import table_order
 from ..tails.support import Support
+from ..tails.withheld import valid_days, verdict_line, withheld_experiment
+from ..tails.withheld import verdict as staged_verdict
 from ..util import hour_of, hour_to_datetime64, log
 from .oof import components_for, fit_component, oof_rows, row_arrays, usable
 
 BANDS = (0, 5, 11)
+HANDOVER_MODES = ("auto", "always", "never")
+#: days of training below which no storms are staged (the verdict then keeps the hand-over)
+MIN_DAYS_TO_STAGE = 90
 HEAVY_INDEX = int(np.searchsorted(B.THRESHOLDS, 25.0))
 ENSEMBLES = {"ens", "gefs"}
 
@@ -68,17 +74,37 @@ class FrontierBlend(BlendModel):
 
     @property
     def hands_over(self) -> bool:
-        """Whether record storms are handed to the raw systems: only where the audit at training found no harm in it
-        (:mod:`pluvium.tails.audit`). A model saved before the audit existed hands over."""
-        return self.support is not None and bool(self.meta.get("handover", {}).get("keep", True))
+        """Whether record storms are handed to the raw systems. With the mode ``"auto"`` (the default): only where
+        the storms staged at training were forecast better with the hand-over (:mod:`pluvium.tails.withheld`).
+        ``"always"`` and ``"never"`` overrule that verdict: see :meth:`set_handover`. A model saved before the verdict
+        existed hands over."""
+        verdict = self.meta.get("handover", {})
+        mode = verdict.get("mode", "auto")
+        if self.support is None or mode == "never":
+            return False
+        return True if mode == "always" else bool(verdict.get("keep", True))
+
+    def set_handover(self, mode: str) -> None:
+        """Choose how record storms are treated: ``"auto"`` (follow the verdict of the storms staged at training),
+        ``"always"`` or ``"never"``.
+
+        The verdict rests on four storms of one training period, so it can be wrong. A place that would rather hand
+        every record forecast to the raw systems than see one shrunk can set ``"always"``; a place where the raw
+        systems are known to overcall can set ``"never"``."""
+        if mode not in HANDOVER_MODES:
+            raise ValueError(f"handover must be one of {HANDOVER_MODES}, not {mode!r}")
+        self.meta["handover"] = {**self.meta.get("handover", {}), "mode": mode}
 
     # ------------------------------------------------------------------------------------- train --
     @classmethod
     def from_table(cls, table: dict, n: int, systems: list, area_json: dict, clim: dict, grid: tuple, cells: tuple,
                    max_rows: int = 400_000, pool_rows: int = 300_000, seed: int = 0, eta: float = 1.0,
                    share: float = 0.02, pool_prior: float = 0.5, latency_hours: int = 48,
-                   record_quantile: float = 0.999, meta: dict | None = None) -> FrontierBlend:
-        """Fit everything from a training table built with ``keep_raw=True``."""
+                   record_quantile: float = 0.999, meta: dict | None = None, handover: str = "auto") -> FrontierBlend:
+        """Fit everything from a training table built with ``keep_raw=True``. ``handover``: ``"auto"``,
+        ``"always"`` or ``"never"`` (:meth:`set_handover`); the storms are staged and the verdict saved whichever is chosen."""
+        if handover not in HANDOVER_MODES:
+            raise ValueError(f"handover must be one of {HANDOVER_MODES}, not {handover!r}")
         models = components_for(systems)
         every = np.arange(len(table["run"]))
         nets = {}
@@ -103,23 +129,32 @@ class FrontierBlend(BlendModel):
         run_online(online, p_exp, pres, rows["lead"], rows["y"], issued, rows["valid"] + 24 + latency_hours, weights)
         raw_mean = np.concatenate([table["raw_mean"][i][c] for i, c in order])
         support = Support.from_rows(raw_mean, weights, record_quantile)
-        # is the hand-over worth having here? asked of the training period's own out-of-fold forecasts
+        # is the hand-over worth having here? the place's own storms decide: the wettest days of the training period
+        # are withheld, forecast without having been seen, and scored with and without the hand-over
+        if np.unique(valid_days(table)).size >= MIN_DAYS_TO_STAGE:
+            staged = staged_verdict(withheld_experiment(table, n, list(systems), top=4, quantiles=(record_quantile,),
+                                                        widths=(support.width,), max_rows=max_rows, seed=seed))
+        else:
+            staged = staged_verdict({})                             # too short a period to stage storms in: kept
+        log(f"blend: {verdict_line(staged)}")
+        # the yearly check: what the hand-over did to the training period's out-of-fold forecasts (reported only)
         raw_p = np.concatenate([table["raw_p"][i][c] for i, c in order]).astype(np.float32)
-        verdict = audit_handover(p_exp[:, -1], raw_p, raw_mean, rows["y"], support, weights, rows["valid"] // 24)
-        log(f"blend: {verdict.line()}")
+        yearly = audit_handover(p_exp[:, -1], raw_p, raw_mean, rows["y"], support, weights, rows["valid"] // 24)
         info = {"components": list(models), "cells": int(n), "kind": "frontier", "latency_hours": latency_hours,
-                "learned_days": [], "handover": verdict.to_json(), **(meta or {})}
+                "learned_days": [], "handover": {"keep": bool(staged["keep"]), "mode": handover, "staged": staged,
+                                                 "yearly": yearly.to_json()}, **(meta or {})}
         return cls(nets, pool, list(systems), area_json, clim, grid, info, models, online, support, cells)
 
     @classmethod
     def train(cls, area, root, start: str = "2024-04-01T00", end: str = "2025-04-01T00", workers: int = 8,
-              max_cells: int = 1500, max_rows: int = 400_000) -> FrontierBlend:
+              max_cells: int = 1500, max_rows: int = 400_000, handover: str = "auto") -> FrontierBlend:
         root = Path(root).expanduser()
         data = cls.prepare(area, root, start, end, workers, max_cells, keep_raw=True)
         cells, table, lat, lon = data["cells"], data["table"], data["lat"], data["lon"]
         clim = cls.grid_climatology(area, data["truth"], lat, lon, start, end)
         model = cls.from_table(table, len(cells), list(ARCHIVE_SYSTEMS), area.to_json(), clim, (lat, lon),
-                               (cells.lat, cells.lon), max_rows, meta={"trained": [start, end], "runs": int(len(data["runs"]))})
+                               (cells.lat, cells.lon), max_rows, meta={"trained": [start, end], "runs": int(len(data["runs"]))},
+                               handover=handover)
         days = np.arange(hour_of(start), hour_of(end), 24)              # how rare an amount is, from the same record
         model.returns = ReturnLevels.fit(data["truth"].days(area.name, days).reshape(days.size, -1))
         model.save(root / "blend")
@@ -294,4 +329,4 @@ def load_blend(directory) -> BlendModel:
     return FrontierBlend.load(directory) if meta.get("kind") == "frontier" else BlendModel.load(directory)
 
 
-__all__ = ["BANDS", "FrontierBlend", "load_blend"]
+__all__ = ["BANDS", "HANDOVER_MODES", "FrontierBlend", "load_blend"]

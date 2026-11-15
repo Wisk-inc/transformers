@@ -12,14 +12,17 @@ def scores(bss50: float, bss1: float = 0.30, crps: float = 2.0) -> dict:
             "crps": crps, "rmse": 5.0, "acc": 0.5, "sharpness": 0.7}
 
 
-def place(stack: float, declared: float, online: float, rival: float, verdicts: list) -> dict:
+def place(stack: float, declared: float, online: float, rival: float, staged: bool, yearly: list) -> dict:
+    """A place's result: the three hand-over designs' skill at 50 mm, what its staged storms said (the rule that
+    decides) and what the yearly check said at each refit (reported only)."""
     row = {"stack": scores(stack), "declared": scores(declared), "pool_online": scores(online), "pool": scores(online - 0.01),
            "pool_record": scores(declared - 0.01), "blend_ops": scores(0.9), "ens": scores(rival), "gfs": scores(rival - 0.05),
            "ens_raw": scores(rival - 0.2)}
     return {"cells": 100, "groups": {g: row for g in GROUPS},
             "seasons": {g: {s: row for s in F.SEASONS} for g in GROUPS}, "leads": {},
-            "audits": {"stack": [{"keep": k, "rows": 1200, "days": 40, "edge_mm": 45.0, "without": 0.004, "handed": 0.0041,
-                                  "chance_of_harm": 0.8} for k in verdicts]}}
+            "staged": {"keep": staged, "evidence": True, "gain": 0.05 if staged else -0.015, "storms": ["2024-10-08"]},
+            "audits": {"stack": [{"keep": k, "rows": 1200, "days": 40, "edge_mm": 45.0, "without": 0.004,
+                                  "handed": 0.00399 if k else 0.00401, "chance_of_harm": 0.8} for k in yearly]}}
 
 
 def first(top: float, rival: float) -> dict:
@@ -27,9 +30,10 @@ def first(top: float, rival: float) -> dict:
     return {"groups": {g: row for g in GROUPS}, "seasons": {g: {s: row for s in F.SEASONS} for g in GROUPS}}
 
 
-# coast: the hand-over helps and the audit keeps it. mountains: it hurts and the audit switches it off.
-NEW = {"coast": place(stack=0.12, declared=0.12, online=0.10, rival=0.11, verdicts=[True] * 4),
-       "mountains": place(stack=0.09, declared=0.07, online=0.09, rival=0.10, verdicts=[False] * 4)}
+# coast: the hand-over helps and the staged storms keep it (the yearly check would have dropped it).
+# mountains: it hurts and the staged storms switch it off.
+NEW = {"coast": place(stack=0.12, declared=0.12, online=0.10, rival=0.11, staged=True, yearly=[False] * 4),
+       "mountains": place(stack=0.09, declared=0.07, online=0.09, rival=0.10, staged=False, yearly=[False] * 4)}
 OLD = {"coast": first(0.08, 0.11), "mountains": first(0.085, 0.10)}
 
 
@@ -55,15 +59,29 @@ def test_before_after_marks_leads_and_gains():
     assert "+0.085 -> +0.090 (+0.100) +" in lines[3] and "**" not in lines[3]
 
 
-def test_handover_three_ways_and_the_audits_agreement_with_the_test_year():
-    lines = R.handover_three_ways(NEW, GROUPS[0], {"coast": "Coast", "mountains": "Mountains"})
-    assert lines[2] == "| Coast | +0.1000 | **+0.1200** | **+0.1200** | 4 of 4 |"
-    assert lines[3] == "| Mountains | **+0.0900** | +0.0700 | **+0.0900** | 0 of 4 |"
-    assert lines[4] == "| **Mean** | +0.0950 | +0.0950 | +0.1050 | |"       # audited beats both fixed choices
+def test_handover_three_ways_and_each_rules_agreement_with_the_test_year():
+    titles = {"coast": "Coast", "mountains": "Mountains"}
+    lines = R.handover_three_ways(NEW, GROUPS[0], titles)
+    assert lines[2] == "| Coast | +0.1000 | **+0.1200** | **+0.1200** | keep |"
+    assert lines[3] == "| Mountains | **+0.0900** | +0.0700 | **+0.0900** | switch off |"
+    assert lines[4] == "| **Mean** | +0.0950 | +0.0950 | +0.1050 | |"       # deciding by place beats both fixed choices
+    # the staged storms were right in both places; the yearly check only in the mountains
     assert R.audit_agreement(NEW, GROUPS[0]) == (2, 2) and R.audit_agreement(NEW, GROUPS[0], ["coast"]) == (1, 1)
-    wrong = {"coast": place(0.10, 0.12, 0.10, 0.11, [False] * 4)}          # it would have helped; the audit said no
-    assert R.audit_agreement(wrong, GROUPS[0]) == (0, 1)
-    assert R.kept(NEW["mountains"]) == [False] * 4 and R.kept({"groups": {}}) == []
+    assert R.audit_agreement(NEW, GROUPS[0], rule="yearly") == (1, 2)
+    assert R.audit_misses(NEW, GROUPS[0]) == ""                            # right in both places: nothing to confess
+    assert R.audit_misses(NEW, GROUPS[0], titles, rule="yearly") == (
+        "The yearly check would have been wrong in the Coast it switched off a hand-over that then would have added "
+        "0.0200 of Brier skill at 50 mm on days 1-3.")
+    wrong = {"coast": place(0.10, 0.12, 0.10, 0.11, staged=False, yearly=[True] * 4)}   # it would have helped
+    assert R.audit_agreement(wrong, GROUPS[0]) == (0, 1) and R.audit_agreement(wrong, GROUPS[0], rule="yearly") == (1, 1)
+    assert R.audit_misses(wrong, GROUPS[0], titles).startswith("The verdict was wrong in the Coast it switched off")
+    assert R.audit_outcomes(NEW, GROUPS[0], ["mountains"])[0][:2] == ("mountains", False)
+    assert R.kept(NEW["mountains"]) is False and R.kept(NEW["coast"], "yearly") is False and R.kept({"groups": {}}) is None
+    table = R.rules_table(NEW, GROUPS[0], titles)
+    assert len(table) == 4
+    assert table[2] == "| Coast | -5.0% | **keep** | +0.25% | switch off (at 0 of 4 refits: keep) | +0.0200 |"
+    assert table[3] == "| Mountains | +1.5% | **switch off** | +0.25% | **switch off** (at 0 of 4 refits: keep) | -0.0200 |"
+    assert R.rules_table({"x": {"groups": {GROUPS[0]: {}}}}) == []
 
 
 def test_names_results_on_disk_and_the_rarity_paragraph(tmp_path):
@@ -71,6 +89,7 @@ def test_names_results_on_disk_and_the_rarity_paragraph(tmp_path):
 
     assert R.join_names(["alps"]) == "Alps" and R.join_names(["alps", "jamaica"]) == "Alps and Jamaica"
     assert R.join_names(["alps", "jamaica", "caribbean"]) == "Alps, Jamaica and Caribbean" and R.join_names([]) == "none"
+    assert R.join_names(["alps", "jamaica", "great_plains"], the=True) == "the Alps, Jamaica and the US Great Plains"
     (tmp_path / "jamaica.json").write_text(json.dumps({"cells": 450}))
     (tmp_path / "alps_tail.json").write_text(json.dumps({"rows": 1}))
     assert list(R.load_results(tmp_path)) == ["jamaica"] and list(R.load_results(tmp_path, "_tail")) == ["alps"]
@@ -88,7 +107,8 @@ def test_names_results_on_disk_and_the_rarity_paragraph(tmp_path):
 
 def test_ablation_and_stripping_ablations():
     lines = R.ablation(NEW, board=(("Brier skill, 50 mm", "bss", "50", True),))
-    assert any(line.startswith("| Pool + online weights + audited hand-over (Pluvium Blend) | +0.1050") for line in lines)
+    assert any(line.startswith("| Pool + online weights + hand-over where the staged storms say so (Pluvium Blend) | +0.1050")
+               for line in lines)
     assert any(line.startswith("| Pool + online weights + hand-over, always on (as first declared) | +0.0950") for line in lines)
     bare = R.without(NEW)
     row = bare["coast"]["groups"][GROUPS[0]]

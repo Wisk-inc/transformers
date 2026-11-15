@@ -7,9 +7,10 @@ benchmark's, so its scoreboard reads them too. Three things are added here:
 
 * **before and after**: the first benchmark's Blend against the new one, place by place, for any score;
 * **ablation**: the pool alone, with the online layer, with the record-storm hand-over, with both as first declared,
-  and with the hand-over audited, so the worth of each part is on the page, losses included;
+  and with the hand-over decided place by place, so the worth of each part is on the page, losses included;
 * **the online weights**: where the weight went over the year;
-* **the audits**: where the hand-over was kept and where it was switched off, and on what evidence.
+* **the hand-over's two rules**: what each place's staged storms said, what the yearly check would have said, and
+  what the hand-over then did in the test year.
 """
 
 from __future__ import annotations
@@ -24,16 +25,15 @@ from ..benchmarks import fullyear as F
 
 #: the benchmark's places, in the order the pages show them, with short names
 PLACE_ORDER = ("jamaica", "caribbean", "maritime", "alps", "pacific_nw", "great_plains", "andes_south")
-PLACE_NAMES = {"jamaica": "Jamaica", "caribbean": "Caribbean", "maritime": "Maritime Continent", "alps": "Alps",
-               "pacific_nw": "US Pacific Northwest", "great_plains": "US Great Plains", "andes_south": "Southern Andes"}
-#: scored before the hand-over audit existed, and scored after it was fixed
-SEEN_FIRST = ("caribbean", "maritime", "alps", "pacific_nw")
-SCORED_AFTER = ("great_plains", "andes_south", "jamaica")
+PLACE_NAMES = F.SHORT_TITLES
+#: scored before the rule that decides the hand-over was final, and scored after
+SEEN_FIRST = ("caribbean", "maritime", "alps", "pacific_nw", "andes_south")
+SCORED_AFTER = ("great_plains", "jamaica")
 ABLATIONS = ("declared", "pool", "pool_online", "pool_record")
 PARTS = (("pool", "Pool alone"), ("pool_online", "Pool + online weights"),
          ("pool_record", "Pool + hand-over, always on"),
          ("declared", "Pool + online weights + hand-over, always on (as first declared)"),
-         ("stack", "Pool + online weights + audited hand-over (Pluvium Blend)"))
+         ("stack", "Pool + online weights + hand-over where the staged storms say so (Pluvium Blend)"))
 
 
 def load_results(folder, suffix: str = "", places=PLACE_ORDER) -> dict:
@@ -42,9 +42,12 @@ def load_results(folder, suffix: str = "", places=PLACE_ORDER) -> dict:
     return {k: json.loads((folder / f"{k}{suffix}.json").read_text()) for k in places if (folder / f"{k}{suffix}.json").exists()}
 
 
-def join_names(places, titles: dict = PLACE_NAMES) -> str:
-    """"A", "A and B" or "A, B and C" from place keys."""
+def join_names(places, titles: dict = PLACE_NAMES, the: bool = False) -> str:
+    """"A", "A and B" or "A, B and C" from place keys. With ``the``, names that take an article in a sentence get
+    one ("the Alps", "the US Great Plains"; not "Jamaica")."""
     words = [titles.get(p, p) for p in places]
+    if the:
+        words = [w if w == "Jamaica" else "the " + w for w in words]
     if not words:
         return "none"
     return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
@@ -163,17 +166,28 @@ def online_weights(res: dict, design: str = "stack") -> list:
     return lines
 
 
-def kept(res: dict, design: str = "stack") -> list:
-    """The hand-over audit's verdict at each refit of a place's result: ``[True, False, ...]``."""
-    return [bool(a["keep"]) for a in res.get("audits", {}).get(design, [])]
+RULES = ("staged", "yearly")
+
+
+def kept(res: dict, rule: str = "staged") -> bool | None:
+    """Whether a rule kept the hand-over in a place, or ``None`` if the result does not say.
+
+    ``"staged"`` is the rule that decides: the place's staged storms (:func:`pluvium.tails.withheld.verdict`).
+    ``"yearly"`` is the check that is only reported: the out-of-fold audit at the first refit
+    (:mod:`pluvium.tails.audit`)."""
+    if rule == "staged":
+        verdict = res.get("staged")
+        return None if not verdict else bool(verdict["keep"])
+    checks = res.get("audits", {}).get("stack", [])
+    return bool(checks[0]["keep"]) if checks else None
 
 
 def handover_three_ways(results: dict, group: str, titles: dict | None = None, t: str = "50") -> list:
-    """Brier skill at ``t`` mm with no hand-over, with it always on, and audited, place by place, with the mean.
-    Bold is the best of the three in a row."""
+    """Brier skill at ``t`` mm with no hand-over, with it always on, and as the place's staged storms decided, place
+    by place, with the mean. Bold is the best of the three in a row."""
     names = ("pool_online", "declared", "stack")
-    lines = ["| Place | No hand-over | Always on (as first declared) | Audited (Pluvium Blend) | Kept at the refits |",
-             "|---|---|---|---|---|"]
+    lines = ["| Place | No hand-over | Always on (as first declared) | As the staged storms decided (Pluvium Blend) | "
+             "Their verdict |", "|---|---|---|---|---|"]
     cols = {m: [] for m in names}
     for place, res in results.items():
         vals = {m: _cell(res["groups"][group].get(m), "bss", t) for m in names}
@@ -183,28 +197,49 @@ def handover_three_ways(results: dict, group: str, titles: dict | None = None, t
             cols[m].append(v)
         best = max(vals.values())
         cells = [f"**{vals[m]:+.4f}**" if vals[m] == best else f"{vals[m]:+.4f}" for m in names]
-        verdicts = kept(res)
-        lines.append(f"| {(titles or F.REGION_TITLES).get(place, place)} | " + " | ".join(cells)
-                     + f" | {sum(verdicts)} of {len(verdicts)} |")
+        verdict = kept(res)
+        said = "-" if verdict is None else ("keep" if verdict else "switch off")
+        lines.append(f"| {(titles or F.REGION_TITLES).get(place, place)} | " + " | ".join(cells) + f" | {said} |")
     if cols["stack"]:
         lines.append("| **Mean** | " + " | ".join(f"{np.mean(cols[m]):+.4f}" for m in names) + " | |")
     return lines
 
 
-def audit_agreement(results: dict, group: str = "days 1-3", places=None, t: str = "50") -> tuple:
-    """In how many places the audit's first verdict had the sign of what the hand-over then did in the test year
-    (Brier skill at ``t`` mm: always on against none). Returns ``(agree, places counted)``."""
-    agree = n = 0
+def audit_outcomes(results: dict, group: str = "days 1-3", places=None, t: str = "50", rule: str = "staged") -> list:
+    """Per place: ``(place, the rule's verdict, what the hand-over then did in the test year)``. The last is the
+    change in Brier skill at ``t`` mm from having the hand-over always on instead of never."""
+    out = []
     for place, res in results.items():
         if places is not None and place not in places:
             continue
-        verdicts = kept(res)
+        verdict = kept(res, rule)
         did = _cell(res["groups"][group].get("declared"), "bss", t) - _cell(res["groups"][group].get("pool_online"), "bss", t)
-        if not verdicts or did != did:
+        if verdict is not None and did == did:
+            out.append((place, verdict, did))
+    return out
+
+
+def audit_agreement(results: dict, group: str = "days 1-3", places=None, t: str = "50", rule: str = "staged") -> tuple:
+    """In how many places a rule's verdict had the sign of what the hand-over then did in the test year (Brier skill
+    at ``t`` mm: always on against none). Returns ``(agree, places counted)``."""
+    outcomes = audit_outcomes(results, group, places, t, rule)
+    return sum(int(verdict == (did >= 0)) for _, verdict, did in outcomes), len(outcomes)
+
+
+def audit_misses(results: dict, group: str = "days 1-3", titles: dict = PLACE_NAMES, t: str = "50",
+                 rule: str = "staged") -> str:
+    """A sentence on the places where a rule's verdict went against the test year, or ``""`` if there are none."""
+    parts = []
+    for place, verdict, did in audit_outcomes(results, group, None, t, rule):
+        if verdict == (did >= 0):
             continue
-        n += 1
-        agree += int(verdicts[0] == (did >= 0))
-    return agree, n
+        name = titles.get(place, place)
+        name = name if name == "Jamaica" else "the " + name
+        parts.append(f"in {name} it {'kept' if verdict else 'switched off'} a hand-over that then "
+                     f"{'cost' if did < 0 else 'would have added'} {abs(did):.4f} of Brier skill at {t} mm on {group}")
+    if not parts:
+        return ""
+    return ("The verdict was wrong " if rule == "staged" else "The yearly check would have been wrong ") + "; ".join(parts) + "."
 
 
 def rarity_lines(path, day: str = "2025-10-28", place: str = "Jamaica") -> list:
@@ -228,22 +263,39 @@ def rarity_lines(path, day: str = "2025-10-28", place: str = "Jamaica") -> list:
             f"{d['median_period_y']:.0f} years. These are rough figures from five years of satellite estimates.", ""]
 
 
-def audits(results: dict, design: str = "stack", titles: dict | None = None) -> list:
-    """One row per place: what the hand-over audit found on the training period at the first refit, and in how many
-    of the refits the hand-over was kept."""
-    lines = ["| Place | Training rows beyond the edge (days) | Edge, mm | Brier at 50 mm on them: calibrated -> handed over | "
-             "Resamples in which it did harm | Hand-over kept at refits |", "|---|---|---|---|---|---|"]
+def rules_table(results: dict, group: str = "days 1-3", titles: dict | None = None, t: str = "50") -> list:
+    """One row per place: what each of the two training-data rules said about the hand-over, and what the hand-over
+    then did in the test year.
+
+    The staged storms (the rule that decides): the change in the Brier score at 50 mm on the storms withheld from
+    training. The yearly check (reported only): the change over all the training period's out-of-fold forecasts at
+    the first refit, and at how many of the refits it would have kept the hand-over. The test year: Brier skill at
+    ``t`` mm with the hand-over always on, minus without it. Bold marks a verdict with the sign of the test year."""
+    lines = ["| Place | Staged storms: Brier at 50 mm on the withheld storms | Their verdict | Yearly check: Brier at 50 mm "
+             "over the training period | It would have said | Test year: what the hand-over did |", "|---|---|---|---|---|---|"]
     for place, res in results.items():
-        rows = res.get("audits", {}).get(design)
-        if not rows:
+        verdict, checks = res.get("staged"), res.get("audits", {}).get("stack", [])
+        did = _cell(res["groups"][group].get("declared"), "bss", t) - _cell(res["groups"][group].get("pool_online"), "bss", t)
+        if not verdict or did != did:
             continue
-        a = rows[0]
-        kept = "".join("yes " if r["keep"] else "no " for r in rows).strip().replace(" ", ", ")
-        lines.append(f"| {(titles or F.REGION_TITLES).get(place, place)} | {a['rows']:,} ({a['days']}) | {a['edge_mm']:.0f} | "
-                     f"{a['without']:.5f} -> {a['handed']:.5f} | {100 * a['chance_of_harm']:.0f}% | {kept} |")
+
+        def say(keep: bool) -> str:
+            word = "keep" if keep else "switch off"
+            return f"**{word}**" if keep == (did >= 0) else word
+
+        staged = f"{-100 * verdict['gain']:+.1f}%" if verdict.get("evidence") else "no storms"
+        if checks:
+            a = checks[0]
+            change = 100.0 * (a["handed"] - a["without"]) / max(a["without"], 1e-12)
+            yearly = f"{change:+.2f}%"
+            would = say(bool(a["keep"])) + f" (at {sum(bool(c['keep']) for c in checks)} of {len(checks)} refits: keep)"
+        else:
+            yearly, would = "-", "-"
+        lines.append(f"| {(titles or F.REGION_TITLES).get(place, place)} | {staged} | {say(bool(verdict['keep']))} | {yearly} | "
+                     f"{would} | {did:+.4f} |")
     return lines if len(lines) > 2 else []
 
 
-__all__ = ["ABLATIONS", "PARTS", "PLACE_NAMES", "PLACE_ORDER", "SCORED_AFTER", "SEEN_FIRST", "ablation", "audit_agreement",
-           "audits", "before_after", "best_rival", "handover_three_ways", "join_names", "kept", "load_results",
-           "online_weights", "rarity_lines", "tally", "without"]
+__all__ = ["ABLATIONS", "PARTS", "PLACE_NAMES", "PLACE_ORDER", "RULES", "SCORED_AFTER", "SEEN_FIRST", "ablation",
+           "audit_agreement", "audit_misses", "audit_outcomes", "before_after", "best_rival", "handover_three_ways",
+           "join_names", "kept", "load_results", "online_weights", "rarity_lines", "rules_table", "tally", "without"]

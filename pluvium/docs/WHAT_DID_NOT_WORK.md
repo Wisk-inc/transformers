@@ -41,20 +41,38 @@ was not adopted. The long-range anomaly correlation in mid-latitudes remains a w
 16% of ordinary training rows. It is now a hinge that is exactly zero inside the range of the training forecasts.
 
 **Handing every record storm to the raw systems (test data).** The design written down before the test year handed
-over everywhere. In the two mountain regions that was wrong. On days 1-3 at 50 mm the Alps scored 0.080 with the
-hand-over and 0.091 without, and the US Pacific Northwest 0.288 against 0.307. The raw systems overcall heavy rain
-over mountains against a satellite truth, so the calibration was right to discount them. The staged-storm experiment
-had been run on two regions before the test, and both were regions where the hand-over helps. Run on all seven, it
-shows the problem in training data: with the Alps' four largest storms withheld, the hand-over made the 50 mm score
-worse (0.0781 against 0.0770). The remedy is the audit described in the benchmark: the hand-over is applied to the
-training period's own out-of-fold forecasts and used only where it does no harm there.
+over everywhere. That was right in some places and wrong in others. On days 1-3 at 50 mm the Alps scored 0.080 with
+the hand-over and 0.091 without, and the US Pacific Northwest 0.288 against 0.307. The Southern Andes scored 0.283
+with it and 0.265 without, and the Caribbean 0.087 against 0.082. Where the raw systems overcall heavy rain against
+this truth, the calibration was right to discount them. The staged-storm experiment had been run on two regions
+before the test, and both were regions where the hand-over helps. Run on all seven, it separates them: with the
+Alps' four largest storms withheld from training, the hand-over made the 50 mm score worse (0.0781 against 0.0770).
+The remedy is that each place decides from its own staged storms.
 
-**Discounting the raw systems before handing over.** A gentler remedy was tried first: scale the raw chances by how
-often they verified at the top of the training forecasts, and never let the hand-over lower a chance. On the withheld
-storms it still did harm in the Alps (0.0776 against 0.0770 calibrated) and gave away most of the gain in the
-Southern Andes (0.0819 against 0.0782 for the plain hand-over) and part of it in the Great Plains, the Caribbean
-and Jamaica. A switch decided by an audit is simpler and did better. The code stays in `pluvium.tails.override`
-(`tail_trust`) and is not used.
+**An audit of an ordinary year as the switch (training and test data).** Before settling on the staged storms, the
+hand-over was switched by an audit: apply it to all of the training period's out-of-fold forecasts, a sample a
+hundred times larger than four storms, and keep it unless the Brier score at 50 mm rose. That sample is the wrong
+one. The hand-over touches one row in a thousand, nearly all of them heavy days of a kind the networks have seen,
+and over a year its effect is a few tenths of a percent of the score: +0.20% in the Alps, +0.21% in the Pacific
+Northwest, +0.41% in the Caribbean, +0.07% in the Southern Andes, 0.00% in the Maritime Continent, -0.17% in the
+Great Plains, -0.20% in Jamaica. The sign of so small a number is not evidence. Computed on the one-network
+component's forecast in place of the pool's, it changes in three of the seven places (the Alps -0.01%, the Pacific
+Northwest -0.28%, the Southern Andes -0.27%). In the test year the audit was right in the Alps and the Pacific
+Northwest and wrong in the Caribbean and the Southern Andes, where it switched off a hand-over that would have
+helped. The audit is still run and reported as the price of the hand-over in an ordinary year. It decides nothing.
+
+**Discounting the raw systems before handing over.** A gentler remedy: scale the raw chances by how often they
+verified at the top of the training forecasts, and never let the hand-over lower a chance. On the withheld storms
+it still did harm in the Alps (0.0776 against 0.0770 calibrated) and gave away most of the gain in the Southern
+Andes (0.0819 against 0.0782 for the plain hand-over) and part of it in the Great Plains, the Caribbean and
+Jamaica. A switch per place is simpler and did better. The code stays in `pluvium.tails.override` (`tail_trust`)
+and is not used.
+
+**Starting the hand-over further out.** If the hand-over costs a little inside the top of the training range,
+start it later: at the 99.99th percentile of the training forecasts, or at their maximum, where no training row
+can speak against it. On the staged storms that gave the gain away. The improvement at 50 mm fell from 6.4% to
+0.04% in Jamaica, from 4.3% to 0.9% in the Great Plains and from 1.8% to 0.8% in the Caribbean. The gain comes from
+forecasts just beyond what the training period held, which is where the hand-over already starts.
 
 **The hand-over is not free even where it is kept.** Its effect on the test year is shown part by part in the
 benchmark ("What each part added"), including the scores where it cost something (test data).
@@ -92,3 +110,7 @@ Four times a choice that looked right on a small or already-seen sample did not 
 bias correction, the Atlantic win over the official forecast, and a hand-over tested on two regions that both
 happened to like it. In each case the fix was the same. Decide on data kept apart, write the decision down, then
 look once. And where a rule can be checked on every place's own training data, let each place check it.
+
+A second lesson came from the audit. A bigger sample is not better evidence when most of it is beside the point.
+Four storms that ask the right question beat four hundred thousand rows that mostly do not. And a rule that was
+changed twice after results were seen has to say so wherever its results are shown.

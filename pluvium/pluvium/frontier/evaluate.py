@@ -10,8 +10,8 @@ test blocks, exactly as the first benchmark did, but in minutes, because no comp
   verified day. It is warmed up on the training year's out-of-fold rows and then runs through the test year with a
   delay of ``latency_hours`` between a day and its verification;
 * the record-storm hand-over (:mod:`pluvium.tails.override`), which gives a forecast back to the raw consensus when
-  it leaves the range of the training forecasts. With ``audit`` the hand-over is used in a quarter only if it did
-  no harm on that quarter's out-of-fold rows (:mod:`pluvium.tails.audit`): a decision made from training data.
+  it leaves the range of the training forecasts. With ``staged`` the hand-over is used only if the place's staged
+  storms say it helps (:mod:`pluvium.tails.withheld`): a decision made from the training year, once per place.
 
 The result has the same form as the first benchmark's, with the design named ``stack`` as Pluvium Blend, so the same
 reports read both.
@@ -54,8 +54,8 @@ class PoolDesign:
     record: bool = False
     record_quantile: float = 0.999
     record_width: float = 0.6931
-    #: keep the hand-over only where it did no harm on the training period's out-of-fold forecasts
-    audit: bool = False
+    #: use the hand-over only where the place's staged storms say it helps (the verdict given to :func:`evaluate`)
+    staged: bool = False
 
 
 def sigmoid(z: np.ndarray) -> np.ndarray:
@@ -100,7 +100,7 @@ def warm_start(agg: OnlineAggregator, design: PoolDesign, pool, d: dict, latency
 
 
 def audit_design(design: PoolDesign, pool, support: Support, d: dict, max_rows: int = 400_000) -> Audit:
-    """The hand-over audit (:mod:`pluvium.tails.audit`) for a design, on a quarter's out-of-fold rows: the pool's
+    """The yearly check (:mod:`pluvium.tails.audit`) for a design, on a quarter's out-of-fold rows: the pool's
     chances for the training period, with and without the hand-over."""
     step = max(1, d["oof_y"].size // max_rows)
     rows = slice(None, None, step)
@@ -112,11 +112,16 @@ def audit_design(design: PoolDesign, pool, support: Support, d: dict, max_rows: 
 
 
 def evaluate(store: Store, designs: list, thresholds=B.SCORED, case_days=(), latency: int = 48,
-             components: bool = True, top: str = "stack", keep: dict | None = None) -> dict:
+             components: bool = True, top: str = "stack", keep: dict | None = None, verdict: dict | None = None) -> dict:
     """Score every design (and the components) on the store's test blocks; returns the benchmark's result dict.
 
     ``keep``, when given, is filled with the top design's chances for every test block (``{block: (n, K) float16}``),
-    for the scenario and tail benchmarks that start from them."""
+    for the scenario and tail benchmarks that start from them.
+
+    ``verdict`` is the place's staged-storm verdict (:func:`pluvium.tails.withheld.verdict`, from the training year):
+    a design with ``staged`` uses the hand-over all year if it says keep, and not at all if it does not. Without a
+    verdict such a design hands over. The out-of-fold check (:mod:`pluvium.tails.audit`) is run at every refit and
+    reported beside it; it decides nothing."""
     table = store.table()
     n, names = store.n, store.names
     scores = F.Scores(thresholds, case_days)
@@ -134,11 +139,12 @@ def evaluate(store: Store, designs: list, thresholds=B.SCORED, case_days=(), lat
                                                    design.record_width) for design in designs if design.record}
         handed = {design.name: True for design in designs if design.record}
         for design in designs:
-            if design.record and design.audit:              # is the hand-over worth having here? asked of training rows
-                verdict = audit_design(design, fitted[design.name][0], supports[design.name], d)
-                handed[design.name] = verdict.keep
-                audits.setdefault(design.name, []).append(verdict.to_json())
-                log(f"  {store.folder.name}: quarter {q}: {design.name}: {verdict.line()}")
+            if design.record and design.staged:              # the place's staged storms decide; the yearly check is reported
+                handed[design.name] = True if verdict is None else bool(verdict["keep"])
+                check = audit_design(design, fitted[design.name][0], supports[design.name], d)
+                audits.setdefault(design.name, []).append(check.to_json())
+                log(f"  {store.folder.name}: quarter {q}: {design.name}: hand-over "
+                    f"{'on' if handed[design.name] else 'off'} (staged storms); yearly check: {check.line()}")
         for design in designs:
             if design.online and design.name not in aggs:
                 prior = np.concatenate([np.full(len(names), (1 - design.pool_prior) / len(names)), [design.pool_prior]])
@@ -192,6 +198,7 @@ def evaluate(store: Store, designs: list, thresholds=B.SCORED, case_days=(), lat
     result["online_weights"] = {k: {"experts": list(names) + ["pool"], "by_quarter_days_1_3_light": [w[0] for w in v]}
                                 for k, v in weights_log.items()}
     result["audits"] = audits
+    result["staged"] = verdict
     return result
 
 

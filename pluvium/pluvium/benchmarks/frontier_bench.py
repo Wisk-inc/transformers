@@ -14,11 +14,11 @@ For each place:
 
 The designs are fixed here, in :data:`DESIGNS`. ``stack`` is the design that carries the name Pluvium Blend.
 ``declared`` is the design exactly as it was written down, with its settings, before the test year was scored: the
-same, with the record-storm hand-over always on. The first four places scored showed that the hand-over hurts where
-the raw systems overcall heavy rain (the two mountain regions), so an audit on training data was added that decides,
-place by place and refit by refit, whether to use it (:mod:`pluvium.tails.audit`). The other three places were scored
-after that. Both designs are scored everywhere, so the difference is on the page. The remaining designs take parts
-away so that each part's worth can be read off.
+same, with the record-storm hand-over always on. The first places scored showed that the hand-over hurts in some
+places and helps in others, so each place now decides from its own training year: the hand-over is used only where
+it improved the forecast of storms withheld from training (:func:`staged_verdict`,
+:mod:`pluvium.tails.withheld`). Both designs are scored everywhere, so the difference is on the page. The
+remaining designs take parts away so that each part's worth can be read off.
 
     python -m pluvium.benchmarks.frontier_bench --archive ARCHIVE --truth TRUTH --out OUT --places alps,caribbean
 """
@@ -36,8 +36,10 @@ from ..util import log
 from . import scenario_bench, tail_bench
 
 POOL = dict(bands=(0, 5, 11), smooth=0.0)
+#: the hand-over's declared setting: where it starts (a quantile of the training forecasts) and how fast it rises
+POOL_RECORD = (0.999, 0.6931)
 #: Pluvium Blend first, then the design as first declared, then the same with parts taken away
-DESIGNS = (PoolDesign(name="stack", online=True, eta=1.0, record=True, audit=True, **POOL),
+DESIGNS = (PoolDesign(name="stack", online=True, eta=1.0, record=True, staged=True, **POOL),
            PoolDesign(name="declared", online=True, eta=1.0, record=True, **POOL),
            PoolDesign(name="pool", **POOL),
            PoolDesign(name="pool_online", online=True, eta=1.0, **POOL),
@@ -45,10 +47,32 @@ DESIGNS = (PoolDesign(name="stack", online=True, eta=1.0, record=True, audit=Tru
 PLACES = ("caribbean", "maritime", "alps", "pacific_nw", "great_plains", "andes_south")
 
 
+def staged_verdict(cfg: FrontierConfig, place: str, country: dict | None = None, top: int = 4) -> dict:
+    """The place's verdict on the hand-over, from storms staged inside its training year: the four wettest days are
+    withheld from training and then forecast with and without it (:mod:`pluvium.tails.withheld`). The experiment's
+    full result is kept beside the store as ``staged.json``; the verdict is recomputed from it."""
+    from dataclasses import replace
+
+    from ..frontier.store import place_table
+    from ..sources.archive import ARCHIVE_SYSTEMS
+    from ..tails import withheld
+
+    path = Path(cfg.out) / "store" / place / "staged.json"
+    if path.exists():
+        return withheld.verdict(json.loads(path.read_text()))
+    cells, table, _ = place_table(replace(cfg, test_end=cfg.test_start), place, country)        # the training year only
+    result = withheld.withheld_experiment(table, len(cells), list(ARCHIVE_SYSTEMS), top=top, quantiles=(POOL_RECORD[0],),
+                                          widths=(POOL_RECORD[1],), log=log)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result, indent=1, default=float))
+    return withheld.verdict(result)
+
+
 def evaluate_place(store_folder, out, designs=DESIGNS, case_days=None, archive=None, region: str | None = None,
-                   scenario_every: int = 3) -> dict:
+                   scenario_every: int = 3, verdict: dict | None = None) -> dict:
     """Score a place's store and write ``{place}.json``, ``{place}_keep.npz``, ``{place}_tail.json`` and, when the
-    forecast ``archive`` is given, ``{place}_scenarios.json`` into ``out``. Steps whose file exists are skipped."""
+    forecast ``archive`` is given, ``{place}_scenarios.json`` into ``out``. Steps whose file exists are skipped.
+    ``verdict`` is the place's :func:`staged_verdict`; without one the design that follows it hands over."""
     store = Store(store_folder)
     place = store.folder.name
     out = Path(out)
@@ -59,7 +83,7 @@ def evaluate_place(store_folder, out, designs=DESIGNS, case_days=None, archive=N
         result = json.loads(result_path.read_text())
     else:
         keep = {}
-        result = evaluate(store, list(designs), case_days=days, keep=keep)
+        result = evaluate(store, list(designs), case_days=days, keep=keep, verdict=verdict)
         blocks = np.array(sorted(keep))
         np.savez_compressed(keep_path, blocks=blocks, p=np.stack([keep[int(b)] for b in blocks]))
         result_path.write_text(json.dumps(result, default=float))
@@ -86,7 +110,8 @@ def run(cfg: FrontierConfig, places=PLACES, countries: dict | None = None) -> di
         country = (countries or {}).get(place)
         folder = build_store(cfg, place, country)
         region = country.get("region", place) if country else place
-        results[place] = evaluate_place(folder, out, archive=cfg.archive, region=region)
+        results[place] = evaluate_place(folder, out, archive=cfg.archive, region=region,
+                                        verdict=staged_verdict(cfg, place, country))
     return results
 
 

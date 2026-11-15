@@ -25,10 +25,13 @@ pluvium blend forecast --root ~/pluvium-JM
 ```
 
 `blend train` fits the design benchmarked in [FRONTIER_BENCHMARK.md](FRONTIER_BENCHMARK.md): components trained on
-every heavy day, the pool, the online weights, and the record-storm hand-over. At the end it audits the hand-over on
-the training period's own forecasts and prints the verdict: kept, or switched off because the raw systems overcall
-heavy rain in this area. `--classic` trains the first Blend instead. `--start` and `--end` change the training
-period.
+every heavy day, the pool, the online weights, and the record-storm hand-over. At the end it stages record storms:
+the four wettest days of the training period are withheld, forecast without having been seen, and scored with and
+without the hand-over. It prints the verdict: kept, or switched off because those storms were not forecast better
+with it. `--handover always` keeps it whatever the verdict, and `--handover never` drops it. The verdict rests on
+four storms and can be wrong. A country in the path of hurricanes may prefer to hand every record forecast to the
+raw systems: that is what `always` is for. `--classic` trains the first Blend instead. `--start` and `--end` change
+the training period.
 
 The forecast table has one row per place and day: the chance of 1, 10, 25 and 50 mm, the median, 90th percentile and
 expected rain, how many raw systems call for 50 mm, the alert tier (watch, warning, extreme), whether the forecast is

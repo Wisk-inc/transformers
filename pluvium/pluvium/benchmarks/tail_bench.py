@@ -24,6 +24,7 @@ import numpy as np
 from .. import blend as B
 from ..tails import alerts
 from ..tails.twcrps import tw_crps
+from .fullyear import place_name
 
 LEAD_GROUPS = {"days 1-3": (1, 3), "days 4-7": (4, 7), "days 8-10": (8, 10), "days 11-14": (11, 14)}
 
@@ -102,7 +103,7 @@ def markdown(results: list) -> str:
              "| Place | " + " | ".join(LEAD_GROUPS) + " |", "|---|" + "---|" * len(LEAD_GROUPS)]
     for r in results:
         cells = [f"{r['groups'][g]['skill_tw25']:+.3f}" if g in r["groups"] else "-" for g in LEAD_GROUPS]
-        lines.append(f"| {r['region'].replace('_', ' ').title()} | " + " | ".join(cells) + " |")
+        lines.append(f"| {place_name(r['region'])} | " + " | ".join(cells) + " |")
     lines += ["", "**What a warning for 50 mm meant, days 1-3** (issued: share of all place-days; came: how often 50 mm "
               "or more then fell; caught: share of all 50 mm cases covered)", "",
               "| Place | 50 mm days | Watch (10%+): issued / came / caught | Warning (30%+) | Extreme (60%+) |", "|---|---|---|---|---|"]
@@ -115,7 +116,7 @@ def markdown(results: list) -> str:
             t = a[name]
             cells.append("never issued" if t["issued"] == 0 else
                          f"{100 * t['share']:.2f}% / {100 * t['hit_rate']:.0f}% / {100 * t['caught']:.0f}%")
-        lines.append(f"| {r['region'].replace('_', ' ').title()} | {100 * a['base_rate']:.2f}% | " + " | ".join(cells) + " |")
+        lines.append(f"| {place_name(r['region'])} | {100 * a['base_rate']:.2f}% | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 
 

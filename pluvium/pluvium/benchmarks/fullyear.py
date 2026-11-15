@@ -729,6 +729,16 @@ REGION_TITLES = {"caribbean": "Caribbean (tropical islands and coasts)", "mariti
                  "jamaica": "Jamaica at 8 km (with Pluvium's network)"}
 
 
+#: short names of the benchmark's places, for table rows and sentences
+SHORT_TITLES = {"jamaica": "Jamaica", "caribbean": "Caribbean", "maritime": "Maritime Continent", "alps": "Alps",
+                "pacific_nw": "US Pacific Northwest", "great_plains": "US Great Plains", "andes_south": "Southern Andes"}
+
+
+def place_name(region: str) -> str:
+    """A place's short name for a table row: its own if it is one of the benchmark's, else its key made readable."""
+    return SHORT_TITLES.get(region, region.replace("_", " ").title())
+
+
 def _name(m: str, with_network: bool = False, stacked: bool = True) -> str:
     if m.endswith("_raw"):
         return f"{LABELS.get(m[:-4], m[:-4])} (raw)"

@@ -5,7 +5,7 @@
 
 ``frontier_heavy_rain.png``: Brier skill for 50 mm or more on days 1-3, place by place: the first Blend, the new
 Blend and the best other system. ``frontier_handover.png``: what the record-storm hand-over did in the test year in
-each place, and what the audit had said about it from training data.
+each place, and what the place's staged storms had said about it from the training year.
 """
 import json
 import sys
@@ -63,12 +63,13 @@ for y, place in enumerate(places):
     ax.plot(mine, y, "o", ms=9, color=BLUE, mec=SURFACE, mew=2, zorder=4)
     label = F.LABELS.get(str(who).replace("_raw", ""), str(who)) + (" raw" if str(who).endswith("_raw") else "")
     right = max(v for v in (mine, rival, first) if v == v)
-    ax.text(right + 0.006, y, f"{mine:+.3f}   best other: {label} {rival:+.3f}", fontsize=8, color=INK2, va="center")
+    was = f" (first {first:+.3f})" if first == first else ""
+    ax.text(right + 0.006, y, f"{mine:+.3f}{was}   best other: {label} {rival:+.3f}", fontsize=8, color=INK2, va="center")
 ax.set_yticks(range(len(places)))
 ax.set_yticklabels([SHORT[p] for p in places], color=INK)
 ax.set_ylim(-0.6, len(places) - 0.4)
 lo, hi = ax.get_xlim()
-ax.set_xlim(min(lo, -0.005), hi + 0.42 * (hi - lo))
+ax.set_xlim(min(lo, -0.005), hi + 0.6 * (hi - lo))
 ax.axvline(0, color=AXIS, lw=1)
 ax.set_xlabel("Brier skill score for 50 mm or more, days 1-3 (higher is better; 0 is the climatology)")
 handles = [plt.Line2D([], [], color=BLUE, marker="o", ms=9, mec=SURFACE, mew=2, lw=0),
@@ -88,34 +89,33 @@ print("saved", out_dir / "frontier_heavy_rain.png")
 rows = []
 for place in places:
     res = new[place]
-    verdicts = [bool(a["keep"]) for a in res.get("audits", {}).get("stack", [])]
+    verdict = R.kept(res)                                                 # what the place's staged storms said
     effect = skill(res, "declared") - skill(res, "pool_online")
-    if verdicts and effect == effect:
-        rows.append((place, effect, verdicts))
+    if verdict is not None and effect == effect:
+        rows.append((place, effect, verdict, res["staged"].get("gain", float("nan"))))
 if rows:
     fig, ax = plt.subplots(figsize=(8.2, 0.5 * len(rows) + 1.9))
     fig.patch.set_facecolor(SURFACE)
     frame(ax)
-    span = max(abs(e) for _, e, _ in rows) or 1e-3
-    for y, (place, effect, verdicts) in enumerate(rows):
-        on = verdicts[0]
+    span = max(abs(e) for _, e, _, _ in rows) or 1e-3
+    for y, (place, effect, on, gain) in enumerate(rows):
         ax.barh(y, effect, height=0.5, color=BLUE if on else ORANGE, zorder=3)
-        said = "kept" if all(verdicts) else ("switched off" if not any(verdicts) else
-                                              f"kept at {sum(verdicts)} of {len(verdicts)} refits")
+        said = ("kept" if on else "switched off") + (f" ({-100 * gain:+.1f}% on staged storms)" if gain == gain else "")
         side = 1 if effect >= 0 else -1
-        ax.text(effect + side * 0.03 * span, y, f"{effect:+.4f}   audit: {said}", fontsize=8, color=INK2, va="center",
+        ax.text(effect + side * 0.03 * span, y, f"{effect:+.4f}   {said}", fontsize=8, color=INK2, va="center",
                 ha="left" if side > 0 else "right")
     ax.axvline(0, color=INK2, lw=1, zorder=4)
     ax.set_yticks(range(len(rows)))
-    ax.set_yticklabels([SHORT[p] for p, _, _ in rows], color=INK)
+    ax.set_yticklabels([SHORT[p] for p, _, _, _ in rows], color=INK)
     ax.set_ylim(-0.6, len(rows) - 0.4)
-    ax.set_xlim(-2.4 * span, 2.4 * span)
+    ax.set_xlim(-3.0 * span, 3.0 * span)
     ax.set_xlabel("Change in Brier skill at 50 mm on days 1-3 from handing record storms to the raw systems, test year")
     handles = [plt.Rectangle((0, 0), 1, 1, color=BLUE), plt.Rectangle((0, 0), 1, 1, color=ORANGE)]
-    fig.legend(handles, ["Audit on training data said: keep the hand-over", "Audit said: switch it off"], loc="upper left",
-               ncol=2, frameon=False, fontsize=9, bbox_to_anchor=(0.01, 1.0))
-    fig.text(0.01, -0.03, "Bars to the right: the hand-over helped in the test year. The audit saw training data only. "
-             "Colour is its verdict at the first refit.", fontsize=8, color=MUTED)
+    fig.legend(handles, ["Staged storms in the training year said: keep the hand-over", "They said: switch it off"],
+               loc="upper left", ncol=2, frameon=False, fontsize=9, bbox_to_anchor=(0.01, 1.0))
+    fig.text(0.01, -0.03, "Bars to the right: the hand-over helped in the test year. The verdict saw the training year only: "
+             "its four wettest days,\nwithheld from training and then forecast. In brackets: the change in the Brier score "
+             "at 50 mm on those storms.", fontsize=8, color=MUTED)
     fig.tight_layout(rect=(0, 0.01, 1, 0.93))
     fig.savefig(out_dir / "frontier_handover.png", dpi=200, facecolor=SURFACE, bbox_inches="tight")
     plt.close(fig)

@@ -32,8 +32,9 @@ pluvium = f"{sys.executable} -m pluvium.cli"
 if not (root / "area.json").exists():
     sh(f"{pluvium} setup --country {COUNTRY} --root {root}")
 
-# 3. the blend: about two hours the first time, nearly all of it downloads. It prints the hand-over audit's verdict
-#    (whether record storms are handed to the raw systems here) and saves the model in ROOT/blend.
+# 3. the blend: about two hours the first time, nearly all of it downloads. It stages record storms in the training
+#    period and prints whether forecasts beyond the record are handed to the raw systems here. Add
+#    "--handover always" to hand them over whatever that test says. The model is saved in ROOT/blend.
 if not (root / "blend" / "blend.json").exists():
     sh(f"{pluvium} blend train --root {root} --start {TRAIN_START} --end {TRAIN_END}")
 
