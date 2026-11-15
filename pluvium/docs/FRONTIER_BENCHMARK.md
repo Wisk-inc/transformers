@@ -8,7 +8,9 @@ The test year is the same as before (April 2025 to March 2026), and the weak spo
 
 One thing was changed after scoring began. The design as written down handed every record storm to the raw systems. The first places scored showed that this helps in some places and does harm in others. Each place now decides from its own training year: the hand-over is used only where it improved the forecast of storms withheld from training. A first remedy, an audit on out-of-fold forecasts, was tried and dropped. Its verdict went against the test year in 3 of 7 places, and its sign changes with which calibrated forecast it is computed on. The rule now used was fixed when 5 of the 7 places had been scored (the Caribbean, the Maritime Continent, the Alps, the US Pacific Northwest and the Southern Andes). Only Jamaica and the US Great Plains were scored after it. The design as written down, the final one and the design with no hand-over are scored everywhere and shown side by side.
 
-One assumption of the test was too kind. The online weights were given each day's rain two days after it fell. The satellite record is published about four and a half months late. The truth is CMORPH, a satellite estimate, which is weak on frozen precipitation and on the heaviest rain.
+One assumption of the test was too kind. The online weights were given each day's rain two days after it fell. The satellite record is published about four and a half months late, and [a later section](#with-the-rain-known-140-days-late) repeats the test with that delay.
+
+The truth throughout is CMORPH, a satellite estimate, which is weak on frozen precipitation and on the heaviest rain.
 
 ## What changed
 
@@ -27,6 +29,7 @@ One assumption of the test was too kind. The online weights were given each day'
 - At 1 mm, which is rain or no rain, the new Blend leads in 24 of 28 cells (the first: 26), and improved on the first in 13. On days 1-7, 81 of 84 comparisons with single post-processed systems are better with 95% confidence and 0 are worse.
 - The CRPS leads in 25 of 28 cells (was 23), the RMSE in 21 of 28 (was 20) and the anomaly correlation in 18 of 28 (was 16).
 - Days 11-14 got slightly worse. There the new Blend leads every other system at 1 mm in 4 of 7 places (the first: 6) and at 50 mm in 2 (the first: 5). Mean Brier skill at 1 mm on those days went from +0.0394 to +0.0390. The pool alone scores +0.0396: the online weights for that lead group learn from few forecasts that verify late, and cost a little.
+- The online weights were scored with each day's rain known two days later, and the satellite record is published about 140 days late. With that delay, mean Brier skill on days 1-3 over 7 places is +0.3585 at 1 mm and +0.2081 at 50 mm. The figures above correspond to +0.3591 and +0.2133, and with no online weights the Blend scores +0.3583 and +0.2055.
 - Each place's staged storms kept the record-storm hand-over in Jamaica, the Caribbean, the Maritime Continent, the US Great Plains and the Southern Andes and switched it off in the Alps and the US Pacific Northwest. That verdict had the sign of what the hand-over then did in the test year in 7 of 7 places (2 of the 2 scored after the rule was final). The out-of-fold audit tried first would have been right in 4 of 7.
 - On days 11-14 one coupled scenario has 0.88 of the weather's spatial variability (raw ECMWF ENS: 0.84), and the CRPS of rain averaged over two-degree boxes is 2.26 mm against 2.93 for uncoupled draws and 2.57 for the raw ensemble (means over 7 places).
 - The weak spots that remain are listed [near the end](#what-is-still-weak).
@@ -351,6 +354,23 @@ Observed over Jamaica on 2025-10-28 (CMORPH): 154 mm on average, up to 447 mm; 1
 
 How rare that was: a generalised Pareto fit to Jamaica's CMORPH record from 2020-01 to 2025-04 (5.1 years, 450 places, all before the test year) puts the daily amount reached once a year at 79 mm on average over the places, and once in five years at 123 mm. On 2025-10-28, 100% of places had more than their once-a-year amount, 78% more than their once-in-five-years amount, and 35% an amount rarer than once in 20 years, which is as far as a record of that length can say. The median place had a day expected about once in 13 years. These are rough figures from five years of satellite estimates.
 
+## With the rain known 140 days late
+
+The online weights learn from each day's rain, and in the test they were given it two days after it fell. The record used as truth, NOAA's CMORPH climate data record, is not available that soon. On 15 November 2026 its newest complete month was May 2026: the files for May had been written on 9 October and those for June were still arriving. A live system therefore learns from each day about 140 days late. The test year was scored again with that delay and nothing else changed, in all 7 places. The delay was applied to the warm-up over the training period as well, which is a little harsher than live use, where all of the training period's rain is known by the time a blend is trained. The table gives the mean Brier skill over those places.
+
+| Rain, days | No online weights | Online, rain known after 2 days (the benchmark) | Online, rain known late |
+|---|---|---|---|
+| 1 mm, days 1-3 | +0.3583 | +0.3591 | +0.3585 |
+| 1 mm, days 4-7 | +0.2491 | +0.2494 | +0.2490 |
+| 1 mm, days 8-10 | +0.1231 | +0.1226 | +0.1224 |
+| 1 mm, days 11-14 | +0.0397 | +0.0390 | +0.0392 |
+| 50 mm, days 1-3 | +0.2055 | +0.2133 | +0.2081 |
+| 50 mm, days 4-7 | +0.0989 | +0.1022 | +0.1009 |
+| 50 mm, days 8-10 | +0.0417 | +0.0412 | +0.0416 |
+| 50 mm, days 11-14 | +0.0091 | +0.0077 | +0.0099 |
+
+With the delay, skill is lower than in the benchmark in 35 of the 56 cells (place, lead group, 1 or 50 mm) and lower than with no online weights at all in 28. The scoreboard hardly moves: the Blend is ahead of every other system at 1 mm in 25 of 28 cells (with the two-day delay: 24) and at 50 mm in 16 (with the two-day delay: 15). What the delay takes away is most of the small gain the online weights gave at 50 mm on days 1-3. The other tables on this page keep the two-day delay, because that is the test as it was declared.
+
 ## What is still weak
 
 - At 50 mm the Blend is behind some other system in 13 of 28 place and lead-group cells, 4 of them on days 1-7. The largest gaps: Jamaica days 11-14 (0.357 behind ECMWF HRES raw); Jamaica days 8-10 (0.052 behind ECMWF HRES); US Pacific Northwest days 8-10 (0.016 behind ECMWF ENS); US Great Plains days 4-7 (0.007 behind ECMWF ENS raw). Beyond a week the skill of every system at 50 mm is close to zero and one storm can decide a cell.
@@ -358,7 +378,7 @@ How rare that was: a generalised Pareto fit to Jamaica's CMORPH record from 2020
 - Days 11-14 carry little skill for anyone. Brier skill at 1 mm on those days: Jamaica -0.006, Caribbean +0.054, Maritime Continent +0.113, Alps +0.032, US Pacific Northwest +0.002, US Great Plains +0.033, Southern Andes +0.045. Zero is the climatology.
 - In the Alps and the US Pacific Northwest the staged storms were not forecast better with the hand-over, so it is off there, and a storm beyond the record is forecast by the calibration alone, which shrinks it. The table still flags such a forecast.
 - The verdict on the hand-over rests on four storms per place. It had the sign of what the hand-over then did in the test year in 7 of 7 places. That is partly hindsight: the rule was fixed after 5 of the 7 places had been scored. It can be overruled (`pluvium blend train --handover always` or `never`).
-- The online weights were scored with each day's rain known two days later. The satellite record is published about four and a half months late, so a live system learns that much later.
+- The online weights were scored with each day's rain known two days later. The satellite record is published about four and a half months late, so a live system learns that much later ([what that costs](#with-the-rain-known-140-days-late)).
 - The quarterly refits used every run before each quarter. A live system can train only on runs whose rain has been published, which are about five months old. That gap was not tested.
 - The truth is one satellite product. CMORPH underestimates frozen and orographic precipitation and the heaviest rain. Winter was scored against radar and gauges for the two US places only.
 - The test year is the one on which the weak spots were found. A fresh year is the test that counts, and it does not exist yet.

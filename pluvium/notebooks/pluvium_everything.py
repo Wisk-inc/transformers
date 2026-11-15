@@ -10,6 +10,7 @@
 COUNTRY = "JM"                              # ISO codes: "JM", "TT", "DO,HT", "PH", "KE" ...
 ROOT = "~/pluvium-JM"                       # the country's working folder; about 5 GB if a blend is trained here
 HANDOVER = "auto"                           # record storms: "auto" follows the storms staged in training; "always"; "never"
+LEARN = False                               # True: first learn from the rain NOAA has published since (see step 5)
 HURRICANES = True                           # a bulletin for every tropical cyclone alive now
 BASINS = "al,ep"                            # al: North Atlantic, ep: East Pacific
 
@@ -180,11 +181,13 @@ why_not = ("TRAIN_NETWORK is 'no'" if TRAIN_NETWORK == "no" else
            if free_gb < 150 and not resuming else "")
 step(f"4. The Pluvium-500 network on the GPU ({GPU_HOURS} hours)", network, why_not)
 
-# 5. rain for the country, 14 days: sets the country up, downloads a trained blend or trains one, reads the newest runs
-later = (root / "live_archive").exists()    # not the first forecast here: also learn from the days now verified
+# 5. rain for the country, 14 days: sets the country up, downloads a trained blend or trains one, reads the newest runs.
+#    LEARN = True first updates the blend's weights from rain published since it last learned. NOAA publishes the rain
+#    record about five months late and a month at a time, so that is worth doing about once a month. Each run learns
+#    from two weeks of rain and takes about ten minutes, nearly all of it reading the two big ensembles.
 step(f"5. Rain for {COUNTRY}, 14 days",
      lambda: run(PLUVIUM + ["now", "--country", COUNTRY, "--root", root, "--repo", HF_REPO]
-                 + (["--handover", HANDOVER] if HANDOVER != "auto" else []) + (["--learn"] if later else [])))
+                 + (["--handover", HANDOVER] if HANDOVER != "auto" else []) + (["--learn"] if LEARN else [])))
 
 # 6. share the blend trained here, so that the next person's step 5 is a download
 trained_here = (root / "blend" / "blend.json").exists() and not (root / "blend" / "FETCHED").exists()
@@ -207,7 +210,7 @@ if HURRICANES:
     print(f"hurricane bulletins and data: {root / 'cyclone'}")
 if TOKEN:
     print(f"repository: https://huggingface.co/{HF_REPO}")
-print(f"every day after this: pluvium now --country {COUNTRY} --root {root} --learn")
+print(f"every day after this: pluvium now --country {COUNTRY} --root {root}      (about a minute)")
 failed = [what for what, outcome in steps if outcome.startswith("FAILED")]
 if failed:
     print(f"\n{len(failed)} step(s) failed and are listed above. Running the cell again repeats only what is missing.")

@@ -10,6 +10,8 @@ The components are now trained on every heavy-rain row, with weights that keep t
 
 The gains are small. Mean Brier skill at 50 mm on days 1-3 went from +0.1901 to +0.2133, and at 1 mm from +0.3588 to +0.3591. Part of the gain at 50 mm comes from a hand-over for record storms, which is the subject of paper 2; without it the changes described here score +0.1996. On days 11-14 the new Blend leads in fewer places than the first did (at 1 mm in 4 of 7, the first in 6).
 
+One assumption of the test was too kind. The online weights were given each day's rain two days after it fell. The satellite record used as truth is published about four and a half months late, which we found out only when running the system live in November 2026. With the rain held back 140 days (section 4.7, all 7 places), mean Brier skill on days 1-3 is +0.3585 at 1 mm and +0.2081 at 50 mm. The benchmark's figures for the same places are +0.3591 and +0.2133, and with no online weights at all +0.3583 and +0.2055.
+
 The rain test year (April 2025 to March 2026) is the year on which the weak spots were found. Every design choice was made inside the training year and written down before the test year was scored, but a second look at a year is weaker evidence than a fresh year.
 
 ## 1. What the first benchmark found
@@ -47,7 +49,7 @@ The experts are the seven components and the pool. Each lead group (days 1-3, 4-
 
 The second-order term is that of Bernstein online aggregation (Wintenberger, 2017), which Berrisch and Ziel (2021) applied to probabilistic forecasts. Dividing by `S` lets one learning rate serve 1 mm and 50 mm. The last line is a fixed share (Herbster and Warmuth, 1998): a little weight returns to the prior at every step, so an expert that was written off can come back. The prior gives half the weight to the pool. The settings are `eta = 1` and `alpha = 0.02`.
 
-The weights do not start cold. Before the test they are run through the training period's out-of-fold forecasts in time order. In the benchmark a day's rows are then learned from 48 hours after the day ends. For the truth used here that delay is much too short; the record is published about four and a half months late.
+The weights do not start cold. Before the test they are run through the training period's out-of-fold forecasts in time order. In the benchmark a day's rows are then learned from 48 hours after the day ends. For the truth used here that delay is much too short (section 4.7).
 
 ### 2.4 Record storms
 
@@ -223,11 +225,30 @@ Rain of 10 mm or more.
 | Share of rows with the rain: CMORPH / MRMS | 1.3% / 1.8% | 1.3% / 1.8% | 1.7% / 2.3% | 1.3% / 1.8% |
 | Rows where the two truths agree | 99% | 99% | 99% | 99% |
 
+### 4.7 With the rain known 140 days late
+
+The record we use as truth, NOAA's CMORPH climate data record, is not available two days after the fact. On 15 November 2026 its newest complete month was May 2026: the files for May had been written on 9 October and those for June were still arriving. A live system therefore learns from each day about 140 days late. We scored the test year again with that delay and nothing else changed, in all 7 places. The delay was applied to the warm-up over the training period as well, which is a little harsher than live use, where all of the training period's rain is known by the time a blend is trained. The table gives the mean Brier skill over those places.
+
+| Rain, days | No online weights | Online, rain known after 2 days (the benchmark) | Online, rain known late |
+|---|---|---|---|
+| 1 mm, days 1-3 | +0.3583 | +0.3591 | +0.3585 |
+| 1 mm, days 4-7 | +0.2491 | +0.2494 | +0.2490 |
+| 1 mm, days 8-10 | +0.1231 | +0.1226 | +0.1224 |
+| 1 mm, days 11-14 | +0.0397 | +0.0390 | +0.0392 |
+| 50 mm, days 1-3 | +0.2055 | +0.2133 | +0.2081 |
+| 50 mm, days 4-7 | +0.0989 | +0.1022 | +0.1009 |
+| 50 mm, days 8-10 | +0.0417 | +0.0412 | +0.0416 |
+| 50 mm, days 11-14 | +0.0091 | +0.0077 | +0.0099 |
+
+With the delay, skill is lower than in the benchmark in 35 of the 56 cells (place, lead group, 1 or 50 mm) and lower than with no online weights at all in 28. The scoreboard hardly moves: the Blend is ahead of every other system at 1 mm in 25 of 28 cells (the benchmark: 24) and at 50 mm in 16 (the benchmark: 15). What the delay takes away is most of the small gain the online weights gave at 50 mm on days 1-3.
+
+A second difference between the benchmark and live use is not measured here. The benchmark refitted every quarter on all runs before it, and a live system can train only on runs whose rain has been published, which are about five months old.
+
 ## 5. Limits
 
 - The test year is the one on which the weak spots were found (see the summary).
 - The gains are small in absolute terms, and at long leads every system is close to the climatology.
-- The online weights were tested with rain known after two days. The record arrives about 140 days late. The quarterly refits also used runs more recent than a live system could train on.
+- The online weights were tested with rain known after two days. The record arrives about 140 days late (section 4.7). The quarterly refits also used runs more recent than a live system could train on.
 - There is one truth, a satellite estimate, which underestimates orographic and frozen precipitation and the heaviest rain.
 - The scores are for daily totals on a quarter-degree grid (8 km for Jamaica). Nothing here speaks to hourly rain.
 - The anomaly correlation of the expected amount at long range is still behind raw models in mid-latitudes.

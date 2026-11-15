@@ -105,6 +105,13 @@ def test_learning_catches_up_with_a_rain_record_that_arrives_late(model, tmp_pat
                         lambda z, lead, cells: {"mean": np.full(n, 1.2, np.float32), "_members": None})
     first = blend.first_unlearned()
     assert first == hour_of("2024-07-05T00")                    # 15 days after training ended: runs it has not seen
+    # a day is verified by runs on the training's pattern: every second day to 3 days ahead, every fourth to 14
+    day = hour_of("2024-04-13T00")                              # 12 days after the first training run
+    runs = blend.verifying_runs(day)
+    assert [(lead, reach) for lead, _, reach in runs] == [(1, 14), (3, 3), (5, 14), (9, 14), (13, 14)]
+    assert all((day - init) // 24 == lead - 1 for lead, init, _ in runs)
+    assert [lead for lead, _, _ in blend.verifying_runs(day + 24)] == [2, 6, 10, 14]
+    assert blend.verifying_runs(day, leads=(1, 7)) == [(1, day, 14), (7, day - 144, 14)]
     rain, now = Rain("2024-07-20T00", "2024-07-07T00"), hour_of("2025-01-10T00")
     before = blend.online.updates
     got = blend.learn(tmp_path / "cache", rain, now, max_days=4, since=first, until=rain.last)

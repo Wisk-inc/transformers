@@ -4,7 +4,7 @@ Every module of the package, what it is for, and its size. Generated from the mo
 
 | Module | Lines | Purpose |
 |---|---|---|
-| `pluvium/__init__.py` | 18 | Pluvium: rain forecasts for every town, in any country, on the NatureV1 / iHELIX engine. |
+| `pluvium/__init__.py` | 20 | Pluvium: rain forecasts for every town, in any country, on the NatureV1 / iHELIX engine. |
 | `pluvium/advection.py` | 70 | Rain already falling, carried forward (experimental as an input to a neural forecaster of this kind). |
 | `pluvium/area.py` | 195 | Where Pluvium forecasts: one country, several, or any box between 60 S and 60 N. |
 | `pluvium/atmos/__init__.py` | 33 | Theoretical atmospheric physics computed from the driving fields and given to the network as inputs. |
@@ -28,11 +28,11 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/benchmarks/tail_bench.py` | 157 | The heavy end of the forecast, scored on its own. |
 | `pluvium/benchmarks/winter_bench.py` | 142 | Winter, scored twice: against the satellite and against radar and gauges. |
 | `pluvium/blend.py` | 323 | Pluvium Blend: one calibrated forecast from every operational system and Pluvium's own network. |
-| `pluvium/blendlive.py` | 330 | Pluvium Blend for any country, every day. |
+| `pluvium/blendlive.py` | 340 | Pluvium Blend for any country, every day. |
 | `pluvium/calibrate.py` | 147 | Making the stated chances true: isotonic recalibration fitted on held-out forecasts. |
 | `pluvium/card.py` | 146 | The model card written next to a trained Pluvium: what it is, how it was trained, and how well it did. |
 | `pluvium/chain.py` | 256 | The intensity chain (experimental): rain at a place as a hidden Markov chain over *intensity states* -- dry, light, moderate, heavy -- whose hour-by-hour transition matrix the network writes for every place. |
-| `pluvium/cli.py` | 395 | ``pluvium forecast / place / program / info``. |
+| `pluvium/cli.py` | 402 | ``pluvium forecast / place / program / info``. |
 | `pluvium/convection.py` | 90 | The convective environment: how ready the air is to make thunderstorms, from the driving model's temperature, humidity and wind at 850, 700, 500 and 200 hPa (the forecaster's classic instability and moisture indices). |
 | `pluvium/cyclone/__init__.py` | 27 | Pluvium Cyclone: where a tropical cyclone will go, from every operational system at once. |
 | `pluvium/cyclone/approach.py` | 86 | How close will it come? |
@@ -74,9 +74,9 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/forecast.py` | 544 | The live forecast: for every town and village in the Caribbean, hour by hour for three days -- the chance of rain, whether it will be drizzle, showers, steady or heavy rain or thunderstorms, when it is most likely to start (in local time) and when it will be heaviest, how much may fall, the flash-flood risk, and why. |
 | `pluvium/frontier/__init__.py` | 27 | Pluvium Frontier: the second generation of Pluvium Blend. |
 | `pluvium/frontier/evaluate.py` | 237 | Scoring pool designs on a place's stored components. |
-| `pluvium/frontier/model.py` | 362 | Pluvium Blend as benchmarked on the frontier, for any country, every day. |
+| `pluvium/frontier/model.py` | 381 | Pluvium Blend as benchmarked on the frontier, for any country, every day. |
 | `pluvium/frontier/oof.py` | 109 | Out-of-fold forecasts: what each component says about days it was not trained on. |
-| `pluvium/frontier/report.py` | 351 | The frontier benchmark as tables: where the new Blend stands, what each part added, and what changed since the first. |
+| `pluvium/frontier/report.py` | 368 | The frontier benchmark as tables: where the new Blend stands, what each part added, and what changed since the first. |
 | `pluvium/frontier/store.py` | 232 | The component store: every component's forecasts for a place, kept so that pools can be fitted and scored in minutes. |
 | `pluvium/guard/__init__.py` | 24 | What can go wrong when the model is running, and what Pluvium does about it. |
 | `pluvium/guard/consistency.py` | 71 | Outputs that contradict each other, found and repaired. |
@@ -168,4 +168,4 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/weather.py` | 283 | What the weather *is*, in the words people use: intensity classes, drizzle versus rain versus showers, thunder. |
 | `pluvium/zarrlite.py` | 166 | A minimal reader for consolidated Zarr v2 stores over HTTPS (the public ERA5 stores on Google Cloud). |
 
-163 modules, 23,005 lines.
+163 modules, 23,060 lines.

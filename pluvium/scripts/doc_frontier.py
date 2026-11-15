@@ -419,11 +419,17 @@ if late:
               "fell. The record used as truth, NOAA's CMORPH climate data record, is not available that soon. On 15 "
               "November 2026 its newest complete month was May 2026: the files for May had been written on 9 October "
               "and those for June were still arriving. A live system therefore learns from each day about 140 days "
-              f"late. The test year was scored again with that delay and nothing else changed, in {where}. The table "
-              "gives the mean Brier skill over those places.", ""] + R.late_rows(new, late) + [
+              f"late. The test year was scored again with that delay and nothing else changed, in {where}. The delay "
+              "was applied to the warm-up over the training period as well, which is a little harsher than live use, "
+              "where all of the training period's rain is known by the time a blend is trained. The table gives the "
+              "mean Brier skill over those places.", ""] + R.late_rows(new, late) + [
         "", f"With the delay, skill is lower than in the benchmark in {lower} of the {cells} cells (place, lead group, "
-        f"1 or 50 mm) and lower than with no online weights at all in {below}. The other tables on this page keep the "
-        "two-day delay, because that is the test as it was declared.", ""]
+        f"1 or 50 mm) and lower than with no online weights at all in {below}. The scoreboard hardly moves: the Blend "
+        f"is ahead of every other system at 1 mm in {R.late_leads(new, late, '1')[2]} of "
+        f"{R.late_leads(new, late, '1')[0]} cells (with the two-day delay: {R.late_leads(new, late, '1')[1]}) and at "
+        f"50 mm in {R.late_leads(new, late, '50')[2]} (with the two-day delay: {R.late_leads(new, late, '50')[1]}). "
+        "What the delay takes away is most of the small gain the online weights gave at 50 mm on days 1-3. The other "
+        "tables on this page keep the two-day delay, because that is the test as it was declared.", ""]
 lines += ["## What is still weak", ""] + weak_rows() + [""]
 lines += ["## Every place", "",
           "Each cell: the new Blend (best other system and which). Bold where the Blend is ahead.", ""]

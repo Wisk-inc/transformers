@@ -279,7 +279,27 @@ class FrontierBlend(BlendModel):
         end = (self.meta.get("trained") or [None, None])[1]
         return hour_of(end) + 24 * (DAYS + 1) if end else 0
 
-    def learn(self, cache, truth, now: int | None = None, leads=(1, 2, 3, 5, 7, 10, 14), max_days: int = 14,
+    def verifying_runs(self, day: int, leads=None) -> list:
+        """The runs that forecast ``day`` and are learned from: ``[(lead, start hour, days of the run to read)]``.
+
+        With ``leads`` left out these follow the pattern the blend was trained on (and the benchmark scored): 00 UTC
+        runs every second day, read to 3 days, and every fourth day, read to 14, counted from the first run of the
+        training period (:func:`pluvium.sources.archive.run_set`). That keeps the reading to a few runs a day. With
+        ``leads`` given, a run is read to 14 days for every day at each of those leads."""
+        if leads is not None:
+            return [(int(lead), day - 24 * (int(lead) - 1), DAYS) for lead in leads]
+        start = (self.meta.get("trained") or [None])[0]
+        origin = hour_of(start) if start else 0
+        origin += (-origin) % 24
+        out = []
+        for lead in range(1, DAYS + 1):
+            init = day - 24 * (lead - 1)
+            k = (init - origin) // 24
+            if k % 2 == 0 and (lead <= 3 or k % 4 == 0):
+                out.append((lead, init, DAYS if k % 4 == 0 else 3))
+        return out
+
+    def learn(self, cache, truth, now: int | None = None, leads=None, max_days: int = 14,
               since: int | None = None, until: int | None = None) -> list:
         """Learn from days whose rain is known and not yet learned from, at most ``max_days`` of them, oldest first.
 
@@ -287,8 +307,8 @@ class FrontierBlend(BlendModel):
         days. The satellite record Pluvium trains on arrives months late, so the command line passes ``since``
         (:meth:`first_unlearned`) and ``until`` (the last day the record holds) and each call catches up a little.
 
-        For each day the runs that forecast it at ``leads`` days ahead are read (from ``cache``, downloaded when
-        missing), the experts' chances at the training places are rebuilt, and the weights are updated against
+        For each day the runs that forecast it (:meth:`verifying_runs`) are read from ``cache``, downloaded when
+        missing, the experts' chances at the training places are rebuilt, and the weights are updated against
         ``truth`` (a :class:`pluvium.sources.cmorph_daily.DailyTruth`, or anything with ``days(name, [hour])``).
         Returns the days learned from. Call :meth:`save` afterwards."""
         from ..benchmarks.fullyear import CellSet, system_at_cells
@@ -323,11 +343,10 @@ class FrontierBlend(BlendModel):
                 continue
             clim = self._clim_at(lat, lon, int(stamp[5:7]))
             used = 0
-            for lead in leads:
-                init = day - 24 * (lead - 1)
+            for lead, init, reach in self.verifying_runs(day, leads):
                 per = {}
                 for system in self.systems:
-                    if lead > LIMIT.get(system, DAYS) or not reader.read(system, init, min(DAYS, LIMIT.get(system, DAYS))):
+                    if lead > LIMIT.get(system, DAYS) or not reader.read(system, init, min(reach, LIMIT.get(system, DAYS))):
                         continue
                     f = system_at_cells(reader.load(name, system, init), int(lead), cells)
                     if f is not None:

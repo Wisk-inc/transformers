@@ -345,7 +345,24 @@ def late_counts(new: dict, late: dict, amounts=("1", "50")) -> tuple:
     return cells, lower, below
 
 
+def late_leads(new: dict, late: dict, t: str = "50") -> tuple:
+    """``(cells, leads in the benchmark, leads with the rain late)``: in how many place and lead-group cells the
+    Blend's Brier skill at ``t`` mm is ahead of every other system. The other systems' scores do not depend on when
+    the rain is known, so they are read from the benchmark's results."""
+    cells = bench = slow = 0
+    for place in late:
+        for g in F.LEAD_GROUPS:
+            rival, _ = best_rival(new[place]["groups"][g], "bss", t, True)
+            b = F._value(new[place]["groups"][g].get("stack"), "bss", t)
+            s = F._value(late[place]["groups"][g].get("stack"), "bss", t)
+            if b == b and s == s and rival == rival:
+                cells += 1
+                bench += b > rival
+                slow += s > rival
+    return cells, bench, slow
+
+
 __all__ = ["ABLATIONS", "PARTS", "PLACE_NAMES", "PLACE_ORDER", "RULES", "SCORED_AFTER", "SEEN_FIRST", "ablation",
            "audit_agreement", "audit_misses", "audit_outcomes", "before_after", "best_rival", "handover_three_ways",
-           "join_names", "kept", "late_counts", "late_mean", "late_rows", "load_results", "online_weights",
-           "rarity_lines", "rules_table", "tally", "without", "without_online"]
+           "join_names", "kept", "late_counts", "late_leads", "late_mean", "late_rows", "load_results",
+           "online_weights", "rarity_lines", "rules_table", "tally", "without", "without_online"]

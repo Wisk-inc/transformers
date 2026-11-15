@@ -261,12 +261,19 @@ if late:
            "The record we use as truth, NOAA's CMORPH climate data record, is not available two days after the fact. "
            "On 15 November 2026 its newest complete month was May 2026: the files for May had been written on 9 October "
            "and those for June were still arriving. A live system therefore learns from each day about 140 days late. "
-           f"We scored the test year again with that delay and nothing else changed, in {LATE_WHERE}. The table gives "
-           "the mean Brier skill over those places.", ""] + R.late_rows(new, late) + [
+           f"We scored the test year again with that delay and nothing else changed, in {LATE_WHERE}. The delay was "
+           "applied to the warm-up over the training period as well, which is a little harsher than live use, where "
+           "all of the training period's rain is known by the time a blend is trained. The table gives the mean Brier "
+           "skill over those places.", ""] + R.late_rows(new, late) + [
         "", f"With the delay, skill is lower than in the benchmark in {lower} of the {cells} cells (place, lead group, 1 or "
-        f"50 mm) and lower than with no online weights at all in {below}. A second difference between the benchmark and "
-        "live use is not measured here: the benchmark refitted every quarter on all runs before it, and a live system "
-        "can train only on runs whose rain has been published, which are about five months old.", ""]
+        f"50 mm) and lower than with no online weights at all in {below}. The scoreboard hardly moves: the Blend is "
+        f"ahead of every other system at 1 mm in {R.late_leads(new, late, '1')[2]} of {R.late_leads(new, late, '1')[0]} "
+        f"cells (the benchmark: {R.late_leads(new, late, '1')[1]}) and at 50 mm in {R.late_leads(new, late, '50')[2]} "
+        f"(the benchmark: {R.late_leads(new, late, '50')[1]}). What the delay takes away is most of the small gain "
+        "the online weights gave at 50 mm on days 1-3.", "",
+        "A second difference between the benchmark and live use is not measured here. The benchmark refitted every "
+        "quarter on all runs before it, and a live system can train only on runs whose rain has been published, which "
+        "are about five months old.", ""]
 p1 += ["## 5. Limits", "",
        "- " + SAME_YEAR,
        "- The gains are small in absolute terms, and at long leads every system is close to the climatology.",

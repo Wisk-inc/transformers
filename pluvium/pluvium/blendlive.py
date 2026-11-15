@@ -70,31 +70,41 @@ class BlendModel:
         """Download a period of runs and CMORPH for an area and build the training table:
         ``{"cells", "table", "lat", "lon", "truth", "runs"}``."""
         from .benchmarks.fullyear import CellSet, build_table, land_mask
-        from .sources.cmorph_daily import DailyTruth, stage_daily
+        from .sources.cmorph_daily import DailyTruth, stage_daily, truth_until
+        from .util import PluviumError
 
         root = Path(root).expanduser()
         region = {area.name: tuple(area.target_box)}
+        a = hour_of(start)
+        days = np.arange(a - a % 24, hour_of(end), 24)
+        date = lambda h: str(hour_to_datetime64(int(h)))[:10]      # noqa: E731
+
+        def too_little(known: int, last: int | None) -> PluviumError:
+            ends = "" if last is None else (f" Today it ends on {date(last)}, so a period ending on "
+                                            f"{date(last - 24 * (DAYS + 1))} or earlier will work.")
+            return PluviumError(
+                f"The satellite rain record (NOAA CMORPH) has {known} of the {days.size} days from {start[:10]} to "
+                f"{end[:10]}, too few to train on. NOAA publishes it about five months late.{ends} With --start and "
+                "--end left out, the most recent year the record covers is used.")
+
+        # ask how far the rain record goes before an hour of downloads, not after
+        last = truth_until()
+        if last is not None:
+            reach = int(np.sum(days <= last))
+            if reach < min(30, days.size):
+                raise too_little(reach, last)
+            if hour_of(end) > last - 24 * DAYS:
+                log(f"blend for {area.name}: NOAA's rain record ends on {date(last)}, so the last runs of this period "
+                    "are only partly verified")
         runs, long = run_set(start, end, every=2, long_every=4)
         log(f"blend for {area.name}: reading {len(runs)} runs of {len(ARCHIVE_SYSTEMS)} systems ...")
         stage_archive(root / "archive", runs, long, regions=region, workers=workers)
-        a = hour_of(start)
         stage_daily(root / "truth", region, start, str(hour_to_datetime64(hour_of(end) + 24 * (DAYS + 1)))[:13], workers=4)
         truth = DailyTruth(root / "truth")
         lat, lon = truth.grid(area.name)
-        days = np.arange(a - a % 24, hour_of(end), 24)
         known = int(sum(np.isfinite(day).mean() > 0.5 for day in truth.days(area.name, days)))
-        if known < min(30, days.size):                              # nothing to learn from: say why, and what to do
-            from .sources.cmorph_daily import truth_until
-            from .util import PluviumError
-
-            last = truth_until()
-            ends = "" if last is None else f" Today it ends on {str(hour_to_datetime64(last))[:10]}."
-            hint = "" if last is None else (f" A period ending on {str(hour_to_datetime64(last - 24 * (DAYS + 1)))[:10]} "
-                                            "or earlier will work.")
-            raise PluviumError(
-                f"The satellite rain record (NOAA CMORPH) has {known} of the {days.size} days from {start[:10]} to "
-                f"{end[:10]}, too few to train on. NOAA publishes it about five months late.{ends}{hint} "
-                "`pluvium now` picks the most recent year that is complete by itself.")
+        if known < min(30, days.size):                              # the listing was not reachable, or it was wrong
+            raise too_little(known, last)
         reader = ArchiveReader(root / "archive", region)
         mask = land_mask(reader, area.name, lat, lon, root / "masks")
         ii, jj = np.nonzero(mask)
