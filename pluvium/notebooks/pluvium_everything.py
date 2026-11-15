@@ -89,7 +89,7 @@ def step(what: str, action, skip: str = "") -> bool:
 # 1. the package: from PyPI, or from the source tree when PyPI cannot be reached
 def install() -> None:
     try:
-        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.4.3"])
+        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.5.0"])
     except RuntimeError:
         run([sys.executable, "-m", "pip", "install", "-q", "git+https://github.com/Wisk-inc/transformers.git"
              "@claude/linear-context-architecture-a35c6h#subdirectory=pluvium"])
@@ -221,6 +221,7 @@ print("its columns: the place and its parish; the chance of 1, 10, 25 and 50 mm;
       "rain; how many raw systems call for 50 mm; the alert tier; whether the forecast is beyond the training record; "
       "how rare the amount is")
 print(f"by parish: pluvium now --country {COUNTRY} --root {root} --parishes")
+print(f"when in the day, first three days: pluvium now --country {COUNTRY} --root {root} --when")
 if HURRICANES:
     print(f"hurricane bulletins and data: {root / 'cyclone'}")
 if TOKEN:

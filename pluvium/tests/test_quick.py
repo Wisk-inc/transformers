@@ -254,6 +254,65 @@ def test_parishes_are_named_one_way_summarised_and_can_be_asked_for(tmp_path):
     assert write_table(full, names, tmp_path / "u.csv").read_text().splitlines()[0].startswith("place,date,")
 
 
+def test_first_days_say_when_in_the_day_and_each_period_can_be_listed(tmp_path):
+    names = ["Hamlet", "Capital"]
+    areas = ["Saint Ann", "Kingston"]
+    population = np.array([120, 900_000])
+    day = {"date": "2026-11-15", "p_ge_1": np.array([0.2, 0.7]), "p_ge_25": np.array([0.0, 0.1]),
+           "mean_mm": np.array([0.4, 6.2])}
+    result = {"days": [day, dict(day, date="2026-11-16"), dict(day, date="2026-11-17"), dict(day, date="2026-11-18")]}
+    chance = np.zeros((3, 4, 2))
+    chance[:, :, 1] = [0.1, 0.05, 0.3, 0.6]                              # the capital: afternoons
+    chance[:, :, 0] = [0.05, 0.02, 0.1, 0.15]                            # the hamlet: rain unlikely all day
+    labels = ["Sat 7 pm to 1 am", "Sun 1 am to 7 am", "Sun 7 am to 1 pm", "Sun 1 pm to 7 pm"] + [f"p{k}" for k in range(8)]
+    periods = {"labels": labels, "starts": [f"2026-11-15T{6 * (k % 4):02d}" for k in range(12)], "chance": chance,
+               "systems": ["ens"], "zone": "America/Jamaica", "days": 3}
+    text = quick.brief(result, names, population, top=2, days=4, periods=periods)
+    lines = text.splitlines()
+    assert lines[1].endswith("most likely Sun 1 pm to 7 pm (60%)")       # the capital, first day
+    assert "most likely" not in lines[4]                                 # the fourth day has no periods
+    assert not any("most likely" in line for line in lines[6:])          # the hamlet: unlikely in every period
+    listed = quick.brief(result, names, population, top=1, days=2, periods=periods, when=True).splitlines()
+    assert "most likely" not in listed[1] and listed[2].startswith("      Sat 7 pm to 1 am")
+    assert listed[5] == "      Sun 1 pm to 7 pm       rain  60%" and len(listed) == 1 + 2 * 5
+    by = quick.by_area(result, areas, days=1, periods=periods)
+    assert "Kingston (1 places)" in by and by.splitlines()[2].endswith("most likely Sun 1 pm to 7 pm (60%)")
+    rows = quick.write_periods(periods, names, tmp_path / "p.csv", areas=areas).read_text().splitlines()
+    assert rows[0] == "place,area,starts_utc,period,p_ge_1mm" and len(rows) == 1 + 12 * 2
+    assert rows[8] == "Capital,Kingston,2026-11-15T18,Sun 1 pm to 7 pm,0.60"
+    assert quick.zone_of(tmp_path) == "UTC" and quick.usual_at(tmp_path, [18.0], [-77.0], 0, 3) is None
+
+
+def test_usual_timing_is_read_at_places_by_month_and_fetched_for_a_blend_that_lacks_it(tmp_path):
+    from pluvium.util import hour_of
+
+    # a 2 x 2 grid: in November the last period at the first cell, in December the first period everywhere
+    given = np.full((12, 4, 2, 2), 0.25, np.float32)
+    given[10, :, 0, 0] = [0.0, 0.0, 0.1, 0.9]
+    given[11] = np.array([0.9, 0.1, 0.0, 0.0], np.float32)[:, None, None]
+    folder = tmp_path / "blend"
+    folder.mkdir()
+    np.savez_compressed(folder / "timing.npz", lat=np.array([18.0, 18.25]), lon=np.array([-77.5, -77.25]), given=given)
+    day0 = hour_of("2026-11-29T00")                                    # two days of November, then December
+    usual = quick.usual_at(tmp_path, [18.02, 18.24], [-77.49, -77.26], day0, 3)
+    assert usual.shape == (3, 4, 2)
+    assert np.allclose(usual[0, :, 0], [0, 0, 0.1, 0.9]) and np.allclose(usual[0, :, 1], 0.25)
+    assert np.allclose(usual[2, :, 0], [0.9, 0.1, 0, 0])               # the third day is in December
+    # a blend downloaded before its repository had the file gets it on the next run, and only if it is the real thing
+    hub = tmp_path / "hub" / "org" / "repo" / "blends" / "testland"
+    hub.mkdir(parents=True)
+    url = lambda repo, name, file: str(tmp_path / "hub" / repo / "blends" / name / file)     # noqa: E731
+    later = tmp_path / "later"
+    (later / "blend").mkdir(parents=True)
+    assert quick.top_up("org/repo", "testland", later, url=url) is False                      # nothing published yet
+    np.savez_compressed(hub / "timing.npz", lat=np.zeros(2), lon=np.zeros(2), given=np.zeros((3, 3)))
+    assert quick.top_up("org/repo", "testland", later, url=url) is False                      # not the right shape
+    (hub / "timing.npz").write_bytes((folder / "timing.npz").read_bytes())
+    assert quick.top_up("org/repo", "testland", later, url=url) is True
+    assert (later / "blend" / "timing.npz").read_bytes() == (folder / "timing.npz").read_bytes()
+    assert "timing.npz" in quick.BLEND_FILES and "timing.npz" not in quick.REQUIRED
+
+
 def test_now_command_prints_what_it_used_and_the_forecast(model, tmp_path, monkeypatch, capsys):
     from pluvium import cli
 

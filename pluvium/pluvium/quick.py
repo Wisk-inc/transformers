@@ -34,8 +34,11 @@ from .util import hour_of, hour_to_datetime64, hub_quiet, hub_refusal, log
 DEFAULT_REPO = "CorxLabs/Pluvium-500"
 HUB = "https://huggingface.co"
 FOLDER = "blends"
-#: what a published blend is made of; the last is missing from blends trained before 0.3
-BLEND_FILES = ("blend.json", "blend.pt", "climatology.npz", "returns.npz")
+#: when in the day it usually rains over the area, by month (:func:`add_timing`)
+TIMING = "timing.npz"
+#: what a published blend is made of. ``returns.npz`` is missing from blends trained before 0.3, and ``timing.npz``
+#: from those trained before 0.5 (without it the forecast has no time of day)
+BLEND_FILES = ("blend.json", "blend.pt", "climatology.npz", "returns.npz", TIMING)
 REQUIRED = BLEND_FILES[:3]
 #: when NOAA's bucket cannot be asked how far the satellite record goes: assume it ends this many days ago
 FALLBACK_LAG_DAYS = 200
@@ -251,6 +254,8 @@ def publish_blend(repo: str, root, token: str | None = None, private: bool = Fal
     try:
         model.save(stage)                                       # written afresh, so always in the safe format
         load_blend(stage, trusted=False)
+        if (root / "blend" / TIMING).exists():                  # when it usually rains there, if it was learned
+            shutil.copy2(root / "blend" / TIMING, stage / TIMING)
         (stage / "README.md").write_text(blend_card(model), encoding="utf-8")
         if api is None:
             token = token or os.environ.get("HF_TOKEN")
@@ -299,7 +304,10 @@ def ready(country, root=None, repo: str | None = DEFAULT_REPO, train: bool = Tru
         say(f"setting up {', '.join(codes)} in {root} ...")
         area, _, _ = setup(codes, root, say=say)
     if (root / "blend" / "blend.json").exists():
-        return root, load_blend(root / "blend", trusted=not (root / "blend" / "FETCHED").exists()), "local"
+        fetched = (root / "blend" / "FETCHED").exists()
+        if fetched and repo and not (root / "blend" / TIMING).exists():   # downloaded before the repository had it
+            top_up(repo, area.name, root, token)
+        return root, load_blend(root / "blend", trusted=not fetched), "local"
     if repo and fetch_blend(repo, area.to_json(), root, token, say):
         return root, load_blend(root / "blend", trusted=False), "downloaded"
     if not train:
@@ -310,7 +318,51 @@ def ready(country, root=None, repo: str | None = DEFAULT_REPO, train: bool = Tru
     say(f"no trained blend is published for {area.name}: training one on {start[:10]} to {end[:10]} "
         "(about an hour and a half the first time, nearly all of it downloads) ...")
     model = FrontierBlend.train(area, root, start=start, end=end, handover=handover)
+    try:                                                        # the daily forecast stands without it
+        add_timing(root, say=say)
+    except Exception as error:
+        say(f"the usual time of day of rain was not learned ({type(error).__name__}: {str(error)[:160]}); "
+            f"`pluvium blend timing --root {root}` tries again")
     return root, model, "trained"
+
+
+def add_timing(root, say=log) -> Path:
+    """Learn when in the day it usually rains over the blend's area during its training period, and save it beside
+    the blend as ``timing.npz``. The time-of-day forecast (:func:`periods_of`) needs it: checked for Jamaica, the
+    systems' members alone place a wet day's rain worse than what is usual at the place. Reads the satellite
+    record a second time, about a minute a month."""
+    from . import timing as T
+    from .frontier.model import load_blend
+
+    root = Path(root).expanduser()
+    model = load_blend(root / "blend", trusted=not (root / "blend" / "FETCHED").exists())
+    trained = model.meta.get("trained")
+    if not trained:
+        raise ValueError("this blend does not say which period it was trained on")
+    usual = T.fit_usual(root, model.area_json["name"], model.area_json["target_box"], trained[0], trained[1], say=say)
+    path = root / "blend" / TIMING
+    np.savez_compressed(path, lat=usual["lat"], lon=usual["lon"], given=usual["given"])
+    return path
+
+
+def top_up(repo: str, name: str, root, token: str | None = None, url=None) -> bool:
+    """Fetch the usual time of day of rain (``timing.npz``) for a blend that was downloaded before its repository
+    had it. True when it is now in the folder. Any failure leaves the folder as it was."""
+    import os
+
+    try:
+        body = _get((url or blend_url)(repo, name, TIMING), token or os.environ.get("HF_TOKEN") or None)
+        if body is None:
+            return False
+        import io
+
+        with np.load(io.BytesIO(body), allow_pickle=False) as z:          # arrays only: nothing in it can run
+            if not {"lat", "lon", "given"} <= set(z.files) or z["given"].shape[:2] != (12, 4):
+                return False
+        (Path(root).expanduser() / "blend" / TIMING).write_bytes(body)
+        return True
+    except Exception:
+        return False
 
 
 def places_of(root, model) -> tuple:
@@ -352,16 +404,110 @@ def _tidy(name: str) -> str:
     return name
 
 
+def zone_of(root) -> str:
+    """The time zone most of the area's places keep (an IANA name such as ``America/Jamaica``), or ``UTC`` when
+    the folder has no town list."""
+    from .domain import PointSet
+
+    path = Path(root) / "towns.npz"
+    if not path.exists():
+        return "UTC"
+    extra = PointSet.load(path).extra
+    if "timezone" not in extra or not len(extra["timezone"]):
+        return "UTC"
+    zones, counts = np.unique(np.asarray(extra["timezone"]).astype(str), return_counts=True)
+    return str(zones[np.argmax(counts)])
+
+
+def usual_at(root, lat, lon, day0: int, days: int) -> np.ndarray | None:
+    """How rain is usually spread over the day at the places, for each of ``days`` days from ``day0``:
+    ``(days, 4, places)``, from ``blend/timing.npz`` (:func:`pluvium.timing.usual_timing` on the area's grid), or
+    None when the blend has no such file."""
+    path = Path(root) / "blend" / "timing.npz"
+    if not path.exists():
+        return None
+    with np.load(path) as z:
+        glat, glon, given = z["lat"], z["lon"], z["given"]                     # given: (12, 4, H, W)
+    i = np.clip(np.round((np.asarray(lat) - glat[0]) / (glat[1] - glat[0])).astype(int), 0, glat.size - 1)
+    j = np.clip(np.round((np.asarray(lon) - glon[0]) / (glon[1] - glon[0])).astype(int), 0, glon.size - 1)
+    months = [int(str(hour_to_datetime64(int(day0) + 24 * d))[5:7]) for d in range(days)]
+    return np.stack([given[m - 1][:, i, j] for m in months])
+
+
+def periods_of(model, root, result: dict, lat, lon, days: int | None = None) -> dict | None:
+    """When in the day it rains, for the first days of a forecast (:mod:`pluvium.timing`). Returns None when the
+    blend has no record of when it usually rains (``timing.npz``, :func:`add_timing`) or no system's six-hour
+    fields can be read, otherwise
+
+    * ``labels``  what each period is called in the area's clock, e.g. ``Sun 1 pm to 7 pm``;
+    * ``starts``  the UTC hour each period begins, as text;
+    * ``chance``  ``(days, 4, places)`` the chance of at least 1 mm in the period;
+    * ``systems`` the systems whose six-hour fields went in, ``zone`` the clock, ``days`` how many days are split.
+    """
+    from . import timing as T
+    from .sources.archive import ArchiveReader
+
+    days = min(days or T.DAYS, len(result["days"]))
+    name = model.area_json["name"]
+    day0 = hour_of(result["day0"] + "T00")
+    usual = usual_at(root, lat, lon, day0, days)
+    if usual is None:                                           # the members alone are not good enough to show
+        return None
+    runs = {system: hour_of(started) for system, started in result["runs"].items()}
+    reader = ArchiveReader(Path(root) / "live_archive", {name: tuple(model.area_json["target_box"])})
+    members = T.read_periods(reader, name, runs, day0, lat, lon, days)
+    if not members:
+        return None
+    shares = T.member_shares(members, days)
+    given = T.mixed(T.conditional(shares, usual), usual)
+    daily = np.stack([np.asarray(result["days"][d]["p_ge_1"], np.float64) for d in range(days)])
+    zone = zone_of(root)
+    return {"labels": T.labels(day0, zone, days), "chance": T.chances(daily, given),
+            "starts": [str(hour_to_datetime64(day0 + T.HOURS * k))[:13] for k in range(T.PERIODS * days)],
+            "systems": sorted(members), "zone": zone, "days": days}
+
+
+def write_periods(periods: dict, names, path, areas=None) -> Path:
+    """One row per place and period of the first days: when it starts (UTC), what it is called in the area's
+    clock, and the chance of at least 1 mm in it."""
+    import csv
+
+    path = Path(path)
+    where = [] if areas is None else ["area"]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["place", *where, "starts_utc", "period", "p_ge_1mm"])
+        for k, label in enumerate(periods["labels"]):
+            d, j = divmod(k, 4)
+            for n, name in enumerate(names):
+                w.writerow([name, *([areas[n]] if areas is not None else []), periods["starts"][k], label,
+                            f"{periods['chance'][d, j, n]:.2f}"])
+    return path
+
+
+def _when(periods: dict | None, d: int, index, least: float = 0.2) -> str:
+    """``most likely Sun 1 pm to 7 pm (48%)`` for day ``d`` at the places ``index`` (their median), or nothing when
+    the day has no periods or rain is unlikely in all of them."""
+    if periods is None or d >= periods["days"]:
+        return ""
+    chance = np.median(periods["chance"][d][:, index].reshape(4, -1), axis=1)
+    j = int(np.argmax(chance))
+    if chance[j] < least:
+        return ""
+    return f"   most likely {periods['labels'][4 * d + j]} ({100 * chance[j]:.0f}%)"
+
+
 def _plain(name: str) -> str:
     """A name as people type it, for matching: lower case, and ``St`` or ``St.`` read as ``Saint``."""
     words = name.strip().lower().replace(".", " ").split()
     return " ".join("saint" if w in ("st", "ste") else w for w in words)
 
 
-def by_area(result: dict, areas: list, days: int = 5, area: str | None = None) -> str:
+def by_area(result: dict, areas: list, days: int = 5, area: str | None = None, periods: dict | None = None) -> str:
     """The next ``days`` days for every first-level area (parish, province, state), or for those whose name
     contains ``area``. Each line gives the typical place in the area (the median of its places) and, in brackets,
-    the range across its places: an area is not one number, and its wettest corner is what a warning is about."""
+    the range across its places: an area is not one number, and its wettest corner is what a warning is about.
+    With ``periods`` (:func:`periods_of`) the first days also say when in the day rain is most likely."""
     from .blendlive import ALERT_NAMES
 
     names = sorted({a for a in areas if a})
@@ -374,7 +520,7 @@ def by_area(result: dict, areas: list, days: int = 5, area: str | None = None) -
     for name in names:
         idx = np.flatnonzero(where == name)
         lines.append(f"{name} ({idx.size:,} places)")
-        for d in result["days"][:days]:
+        for number, d in enumerate(result["days"][:days]):
             date = np.datetime64(d["date"]).astype(datetime)
             rain, heavy, amount = (np.asarray(d[k])[idx] for k in ("p_ge_1", "p_ge_25", "mean_mm"))
             worst = int(np.asarray(d["alert"])[idx].max()) if "alert" in d and len(d["alert"]) else 0
@@ -382,15 +528,16 @@ def by_area(result: dict, areas: list, days: int = 5, area: str | None = None) -
             lines.append(f"  {date:%a %d %b}   rain {100 * np.median(rain):3.0f}% ({100 * rain.min():.0f} to "
                          f"{100 * rain.max():.0f})   25 mm or more {100 * np.median(heavy):3.0f}% (up to "
                          f"{100 * heavy.max():.0f})   expected {np.median(amount):5.1f} mm (up to {amount.max():.1f})"
-                         + flag)
+                         + _when(periods, number, idx) + flag)
     return "\n".join(lines)
 
 
 def brief(result: dict, names: list, population: np.ndarray, top: int = 5, days: int = 5, place: str | None = None,
-          areas: list | None = None, area: str | None = None) -> str:
+          areas: list | None = None, area: str | None = None, periods: dict | None = None, when: bool = False) -> str:
     """A few lines a person can read: the next ``days`` days at the ``top`` largest places, or at the places whose
     name contains ``place``, or at the largest places of the areas whose name contains ``area`` (with ``areas``,
-    each place's area, from :func:`areas_of`)."""
+    each place's area, from :func:`areas_of`). With ``periods`` (:func:`periods_of`) the first days say when in
+    the day rain is most likely, and with ``when`` each of their four periods gets a line of its own."""
     from .blendlive import ALERT_NAMES
 
     inside = np.ones(len(names), bool)
@@ -412,23 +559,29 @@ def brief(result: dict, names: list, population: np.ndarray, top: int = 5, days:
     lines = []
     for k in idx:
         lines.append(names[k] + (f", {areas[k]}" if areas is not None and areas[k] else ""))
-        for d in result["days"][:days]:
+        for number, d in enumerate(result["days"][:days]):
             date = np.datetime64(d["date"]).astype(datetime)
             alert = ALERT_NAMES[int(d["alert"][k])] if "alert" in d else ""
             beyond = "beyond the training record" if "beyond_record" in d and d["beyond_record"][k] else ""
             flags = ", ".join(x for x in (alert, beyond) if x)
             lines.append(f"  {date:%a %d %b}   rain {100 * d['p_ge_1'][k]:3.0f}%   25 mm or more {100 * d['p_ge_25'][k]:3.0f}%"
-                         f"   expected {d['mean_mm'][k]:5.1f} mm" + (f"   [{flags}]" if flags else ""))
+                         f"   expected {d['mean_mm'][k]:5.1f} mm" + ("" if when else _when(periods, number, [k]))
+                         + (f"   [{flags}]" if flags else ""))
+            if when and periods is not None and number < periods["days"]:
+                for j in range(4):
+                    lines.append(f"      {periods['labels'][4 * number + j]:<22} rain {100 * periods['chance'][number, j, k]:3.0f}%")
     return "\n".join(lines)
 
 
 def forecast(country, root=None, repo: str | None = DEFAULT_REPO, time=None, learn: bool = False, train: bool = True,
-             handover: str | None = None, token: str | None = None, say=log) -> dict:
+             handover: str | None = None, token: str | None = None, say=log, when: bool = True) -> dict:
     """The 14-day rain forecast for every town of ``country`` (ISO codes), from nothing if need be.
 
-    Returns ``{"root", "table", "result", "names", "population", "areas", "model", "how"}``: the folder, the CSV
-    written, the forecast as :meth:`pluvium.blendlive.BlendModel.forecast` returns it, the places, each place's
-    parish or province (None without a town list), the model and how it was
+    Returns ``{"root", "table", "result", "names", "population", "areas", "periods", "periods_table", "model",
+    "how"}``: the folder, the CSV written, the forecast as :meth:`pluvium.blendlive.BlendModel.forecast` returns
+    it, the places, each place's parish or province (None without a town list), when in the day it rains on the
+    first three days (:func:`periods_of`; None with ``when=False`` or when no six-hour fields can be read) with its
+    own CSV, the model and how it was
     obtained (``"local"``, ``"downloaded"`` or ``"trained"``). ``learn=True`` first updates the online weights from
     the days whose rain is now known (slow the first time: it reads two weeks of past runs). ``time`` forecasts as
     of another UTC hour, ``handover`` overrules the staged storms' verdict for this run.
@@ -446,10 +599,18 @@ def forecast(country, root=None, repo: str | None = DEFAULT_REPO, time=None, lea
     areas = areas_of(root)
     result = model.forecast(lat, lon, root / "live_archive", now=now)
     table = write_table(result, names, root / f"blend_{result['day0']}.csv", areas=areas)
+    periods, periods_table = None, None
+    if when:
+        try:                                                    # the daily forecast stands without it
+            periods = periods_of(model, root, result, lat, lon)
+        except Exception as error:
+            say(f"the time of day was not worked out ({type(error).__name__}: {str(error)[:160]})")
+        if periods is not None:
+            periods_table = write_periods(periods, names, root / f"blend_{result['day0']}_periods.csv", areas=areas)
     return {"root": root, "table": table, "result": result, "names": names, "population": population, "areas": areas,
-            "model": model, "how": how}
+            "periods": periods, "periods_table": periods_table, "model": model, "how": how}
 
 
 __all__ = ["DEFAULT_REPO", "areas_of", "blend_card", "blend_url", "brief", "by_area", "catch_up", "codes_of",
-           "default_root", "fetch_blend", "forecast", "places_of", "publish_blend", "ready", "recent_year", "same_area",
-           "setup"]
+           "default_root", "fetch_blend", "forecast", "periods_of", "places_of", "publish_blend", "ready",
+           "recent_year", "same_area", "setup", "usual_at", "write_periods", "zone_of"]

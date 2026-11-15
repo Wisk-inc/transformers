@@ -64,6 +64,13 @@ largest towns. The second time it takes about a minute.
 `--parishes` prints one block per parish (province or state in other countries): the typical place in it and the
 range across its places. `--parish "St Ann"` prints the largest towns of one parish.
 
+For the first three days each line names the six-hour period in which rain is most likely, in the place's own
+clock, and `--when` lists all four periods of each day with their chance. The chance for a period is the calibrated
+chance of a wet day, spread over the day by the systems' members mixed half and half with when it usually rains at
+the place. On Jamaica's wet days the mix placed the rain 7.8% better than the usual pattern alone, and the members
+alone placed it 4.9% worse. It rarely changes which period is the most likely one. The measurements are in
+[docs/TIMING_BENCHMARK.md](docs/TIMING_BENCHMARK.md). This needs no GPU.
+
 `--country` takes any ISO codes (`TT`, `DO,HT`, `PH`, `KE`). The table it writes has one row per place and day,
 with the place's parish: the chance of 1, 10, 25 and 50 mm; the median, 90th percentile and expected rain; how many raw systems call for 50 mm;
 an alert tier (watch, warning, extreme); whether the forecast is beyond the training record; and how rare the

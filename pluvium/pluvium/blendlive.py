@@ -250,7 +250,7 @@ class BlendModel:
                 init = day0 - 24 * back
                 if now - init < LATENCY.get(system, 8):
                     continue
-                if reader.read(system, init, min(DAYS, LIMIT.get(system, DAYS))):
+                if reader.read(system, init, min(days, LIMIT.get(system, DAYS))):     # only as far as is asked for
                     runs[system] = (init, reader.load(self.area_json["name"], system, init))
                     break
         if not runs:

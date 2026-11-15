@@ -46,10 +46,20 @@ The second call takes about a minute.
 pluvium now --country JM --place "Port Antonio"    # the places whose name contains this
 pluvium now --country JM --parishes                # every parish: its typical place and the range across it
 pluvium now --country JM --parish "St Ann"         # the largest towns of one parish
+pluvium now --country JM --when                    # the first three days in six-hour periods, each with its chance
 pluvium now --country JM --learn                   # first learn from the days whose rain has been published since
 pluvium now --country DO,HT --storms               # two countries, and every tropical cyclone alive now
 pluvium blend publish --root ~/pluvium-JM --repo you/your-repo   # share the blend you trained
 ```
+
+For the first three days each place's line also names the six-hour period in which rain is most likely, in the
+place's own clock (in Jamaica: 7 pm to 1 am, 1 am to 7 am, 7 am to 1 pm, 1 pm to 7 pm). The chance for a period is
+the blend's calibrated chance of a wet day, spread over the day by the systems' members mixed half and half with
+when it usually rains at the place. On Jamaica's wet days that mix placed the rain 7.8% better than the usual
+pattern alone, and the members alone placed it 4.9% worse, so a blend without the usual pattern shows no periods.
+It rarely changes which period is the most likely one. The numbers, and where it does not help, are in
+[docs/TIMING_BENCHMARK.md](docs/TIMING_BENCHMARK.md). Every period of every place is written to
+`blend_<date>_periods.csv`. This needs no GPU.
 
 Nobody has to fetch or convert the six systems' output by hand. Pluvium asks each public archive for the rain
 fields over the country and nothing else. A system whose newest run is not out yet is read from its previous run,

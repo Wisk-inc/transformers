@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.0 (November 2026)
+
+When in the day it rains, for the first three days. No GPU needed.
+
+- `pluvium now` names, for each place and each of the first three days, the six-hour period in which rain is most
+  likely, in the place's own clock. `--when` lists all four periods of each day with their chance, `--no-when`
+  skips the work (about 40 seconds), and every period of every place is written to `blend_<date>_periods.csv`.
+- The chance for a period is the blend's calibrated chance of a wet day, times the chance that the period is wet
+  given a wet day. That second number is a half-and-half mix of the systems' members and of when it usually rains
+  at the place, from six-hour satellite rain over the blend's training year (`pluvium.timing`).
+- Checked for Jamaica on 61 past runs (docs/TIMING_BENCHMARK.md). On wet days the mix placed the rain 7.8% better
+  than the usual pattern alone (90% interval 3.6% to 11.9%). The members alone placed it 4.9% worse, so a blend
+  with no record of the usual pattern shows no periods. The mix named the wettest period no more often than the
+  usual pattern does (66.7% against 66.5%). The chance printed for a period is only as good as the daily chance: a
+  weak blend scored on runs it had not seen was 5.8% worse than the usual chance of rain in that period.
+- `pluvium blend timing --root ...` adds the usual pattern (`timing.npz`, 6 KB for Jamaica) to a blend that has
+  none. `pluvium blend train` makes it, `pluvium blend publish` shares it, and a blend downloaded before its
+  repository had the file gets it on the next run.
+- `pluvium now --days 3` read every system out to day 14 and threw eleven days away. It now reads as far as asked.
+- `python -m pluvium.benchmarks.timing_bench --root ...` repeats the check for another country.
+
 ## 0.4.3 (November 2026)
 
 The GPU training starts, and fills the card.

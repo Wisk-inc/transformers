@@ -121,7 +121,7 @@ def cmd_now(args) -> None:
     from .quick import brief, by_area, forecast
 
     got = forecast(args.country, args.root, args.repo or None, time=args.time, learn=args.learn,
-                   train=not args.no_train, handover=args.handover)
+                   train=not args.no_train, handover=args.handover, when=not args.no_when)
     model, result = got["model"], got["result"]
     source = {"local": "the blend already in this folder", "downloaded": f"the blend published in {args.repo}",
               "trained": "a blend trained just now"}[got["how"]]
@@ -133,20 +133,29 @@ def cmd_now(args) -> None:
         print("not available right now, and left out: " + ", ".join(missing))
     if isinstance(model, FrontierBlend):
         print(handover_line(model))
+    periods = got.get("periods")                                # when in the day, for the first three days
+    if periods is not None:
+        print(f"time of day: six-hour periods in the clock of {periods['zone']}, from {', '.join(periods['systems'])}"
+              ", mixed half and half with when it usually rains at each place")
+    elif not args.no_when and not (Path(got["root"]) / "blend" / "timing.npz").exists():
+        print("time of day: not shown, because this blend has no record of when it usually rains. "
+              f"`pluvium blend timing --root {got['root']}` adds it (about a quarter of an hour)")
     print()
     areas = got.get("areas")                                    # each place's parish or province, if there is a town list
     if args.parishes and areas is None:
         print("this folder has no town list, so there are no parishes or provinces to group by")
     elif args.parishes:                                         # every parish, or the ones named with --parish
-        print(by_area(result, areas, days=args.days, area=args.parish))
+        print(by_area(result, areas, days=args.days, area=args.parish, periods=periods))
     else:                                                       # the largest towns: of the country, or of --parish
         print(brief(result, got["names"], got["population"], top=args.top, days=args.days, place=args.place,
-                    areas=areas, area=args.parish))
+                    areas=areas, area=args.parish, periods=periods, when=args.when))
     print()
     alerts = alert_summary(result)
     if alerts:
         print(alerts)
     print(f"every place and all 14 days: {got['table']}")
+    if got.get("periods_table"):
+        print(f"every place and every period of the first three days: {got['periods_table']}")
     if args.storms:
         args.root, args.basins, args.offline, args.replay_days = str(got["root"]), args.basins, False, 10
         cmd_cyclone(args)
@@ -227,6 +236,13 @@ def cmd_blend(args) -> None:
             raise SystemExit("publish needs --repo, e.g. --repo CorxLabs/Pluvium-500")
         publish_blend(args.repo, root, private=args.private)
         return
+    if args.action == "timing":
+        from .quick import add_timing
+
+        path = add_timing(root)
+        print(f"when in the day it usually rains: saved in {path}. `pluvium now` uses it for the time of day, and "
+              "`pluvium blend publish` uploads it with the blend")
+        return
     if args.action == "train":
         codes = [c.strip() for c in (args.country or "").split(",") if c.strip()]
         area = Area.load(root / "area.json") if (root / "area.json").exists() and not codes else \
@@ -247,6 +263,13 @@ def cmd_blend(args) -> None:
               f"({len(model.meta['components'])} components pooled); saved in {root / 'blend'}")
         if isinstance(model, FrontierBlend):
             print(handover_line(model))
+        try:                                                  # for the time of day; the blend stands without it
+            from .quick import add_timing
+
+            add_timing(root)
+        except Exception as error:
+            print(f"the usual time of day of rain was not learned ({type(error).__name__}: {str(error)[:160]}); "
+                  f"`pluvium blend timing --root {root}` tries again")
         return
     model = load_blend(root / "blend")
     if args.handover and isinstance(model, FrontierBlend):    # overrule the staged verdict for this run (not saved)
@@ -319,10 +342,11 @@ def main(argv=None) -> None:
     p.add_argument("--state", default="~/.cache/pluvium/live")
     p.set_defaults(func=cmd_learn)
     p = sub.add_parser("blend", help="Pluvium Blend for any country: train on a year of archived runs, then forecast 14 days")
-    p.add_argument("action", choices=["train", "forecast", "learn", "publish"],
+    p.add_argument("action", choices=["train", "forecast", "learn", "publish", "timing"],
                    help="train: fit the blend; forecast: 14 days for every town; learn: update the online weights "
                         "from the days whose rain is now known (run it daily, before forecast); publish: upload the "
-                        "trained blend to a Hub repository so that others can skip training")
+                        "trained blend to a Hub repository so that others can skip training; timing: learn when in "
+                        "the day it usually rains, for a blend trained before 0.5 (train does it since)")
     p.add_argument("--repo", default=None, help="Hub model repository (publish)")
     p.add_argument("--private", action="store_true", help="create the repository as private (publish)")
     p.add_argument("--country", default=None, help="ISO codes (train; default: the area saved in --root)")
@@ -349,6 +373,9 @@ def main(argv=None) -> None:
     p.add_argument("--parish", "--area", default=None, dest="parish",
                    help="only this parish (province, state): its largest towns, or with --parishes its summary. "
                         "'St Ann' and 'Saint Ann' both work")
+    p.add_argument("--when", action="store_true",
+                   help="for the first three days, a line for each six-hour period with its chance of rain")
+    p.add_argument("--no-when", action="store_true", help="do not work out the time of day (saves about 40 seconds)")
     p.add_argument("--top", type=int, default=5, help="how many places to print")
     p.add_argument("--days", type=int, default=5, help="how many days to print (the table always has 14)")
     p.add_argument("--learn", action="store_true",
