@@ -65,7 +65,7 @@ def sh(cmd, check=True):
     print(f"$ {cmd}", flush=True)
     return subprocess.run(cmd, shell=True, check=check).returncode
 
-sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.5.0'")
+sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.5.1'")
 root = os.path.expanduser(ROOT)
 pluvium = f"{sys.executable} -m pluvium.cli"
 if not os.path.exists(f"{root}/area.json"):
@@ -165,8 +165,15 @@ is unchanged up to a batch of 8 and grows with the square root of the batch abov
 
 A fuller card is not a faster one by itself. Forecasts per second stay about the same; each step holds more
 forecasts and more cells, so there are fewer and steadier steps in the same time. If a step ever needs more than the
-card has, the program makes the step smaller and carries on. A session that resumes on the same card keeps the size
-it found, and a checkpoint from before 0.4.3 is sized again.
+card has, the program makes the step smaller (fewer forecasts and fewer cells) and carries on. A session that resumes
+on the same card keeps the size it found, and a checkpoint from before 0.5.1 is sized again.
+
+Steps are sized on the rainiest issue time of the training years. A step needs more memory when it rained, so a size
+measured on a dry day can be too large for a storm. The log names the issue time it used.
+
+If the run stops on the GPU anyway, `pluvium program` starts it again by itself from its last checkpoint, first with
+steps sized to 85% of the card, then with the batch rule of 0.4.2. The data are on disk by then, so the second try
+is training again within minutes. `PLUVIUM_RETRIES=0` turns this off.
 
 This sizing was checked on simulated cards and on a CPU training run with a stand-in memory meter
 (`tests/test_fit.py`). It has not been run on a GPU by the people who wrote it, so read the first lines of the log.

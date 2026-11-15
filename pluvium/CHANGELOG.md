@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.5.1 (November 2026)
+
+The GPU training starts itself again when it stops.
+
+- The first GPU run of 0.5.0 (an RTX PRO 6000, 96 GB) downloaded its data, began training, and stopped after 138
+  minutes with an error inside the network's attention. The cell showed only "ended with exit code 1", and the
+  error's own last line was not seen, so the cause is not confirmed. Three weaknesses that could each stop a run
+  this way are fixed.
+- Steps were sized on the first issue time, whatever its weather. A step needs more memory when it rained, because
+  the loss scores amounts only where rain fell and each intensity only where it occurred, so a step sized on a dry
+  day could run out on a stormy one. Steps are now sized on the rainiest issue time, which the curriculum already
+  weighs. A size found the old way is measured again when a run resumes.
+- After running out of memory, training gave up extra target cells first, and only those. When the encoder was what
+  ran out, that did not help, and the run stopped after eight tries. Now each try gives up forecasts and target cells
+  together, up to sixteen tries.
+- The CUDA libraries report running out of memory in their own words (`CUBLAS_STATUS_ALLOC_FAILED`, `CUDA error: out
+  of memory`). These stopped the run; now they shrink the step like PyTorch's own out-of-memory error.
+- When a run on a GPU stops with any error, `pluvium program` starts it again from its last checkpoint in a fresh
+  process: first with steps sized to 10 points less of the card (85% instead of 95%), then with the batch rule of
+  0.4.2. The data are on disk by then, so a second try is training again within minutes. `PLUVIUM_RETRIES=0` turns
+  this off.
+- A command that fails in the one-cell notebook is reported with its last line, which is where Python puts the
+  error, instead of only its exit code.
+
 ## 0.5.0 (November 2026)
 
 When in the day it rains, for the first three days. No GPU needed.

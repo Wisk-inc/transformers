@@ -28,11 +28,25 @@ from .losses import PluviumLoss
 from .model import PluviumConfig, PluviumModel
 from .products import WINDOWS, summarize
 from .schedule import DEFAULT, Schedule
-from .util import atomic_save, log
+from .util import atomic_save, hour_to_datetime64, log
 from .verify import Scoreboard
 
 CHECKPOINT = "model.pt"
 META = "pluvium.json"
+#: how the CUDA libraries say that the GPU's memory ran out when they, not PyTorch's allocator, asked for it: cuBLAS
+#: and cuDNN report a failed allocation, or that they could not start for want of memory
+OUT_OF_MEMORY = ("out of memory", "CUBLAS_STATUS_ALLOC_FAILED", "CUBLAS_STATUS_NOT_INITIALIZED",
+                 "CUDNN_STATUS_ALLOC_FAILED", "CUDNN_STATUS_NOT_INITIALIZED")
+#: hours of rain looked at when finding the rainiest issue time to size a step on (a forecast's three days)
+PROBE_HOURS = 72
+
+
+def out_of_memory(error: BaseException) -> bool:
+    """True when ``error`` says the GPU ran out of memory, whoever raised it: PyTorch's ``OutOfMemoryError``, or a
+    ``RuntimeError`` from a CUDA library. Training makes its step smaller for these; any other error stops it."""
+    if isinstance(error, torch.OutOfMemoryError):
+        return True
+    return isinstance(error, RuntimeError) and any(sign in str(error) for sign in OUT_OF_MEMORY)
 
 
 @dataclass
@@ -288,6 +302,7 @@ class Trainer:
         self._usual_cells = (int(builder.max_land), int(builder.ocean_targets))
         self.scale, self.lr_scale, self.fit = 1.0, 1.0, None
         self._probe_examples: dict = {}
+        self._probe_at: int | None = None              # the issue time steps are sized on (:meth:`_probe_start`)
         self.elev = torch.tensor(model.geo.targets.statics[:, 0], dtype=torch.float32, device=self.device)
         self.optimizer = torch.optim.AdamW(_param_groups([self.model, self.loss_fn], cfg.weight_decay), lr=cfg.lr,
                                            betas=(0.9, 0.95), fused=self.device.type == "cuda")
@@ -327,8 +342,10 @@ class Trainer:
 
     def _resume_size(self, state: dict) -> None:
         """Take the step's size from a checkpoint when it still applies. A size found by filling is kept only on a
-        card of the same size with the same share asked for; a batch from before sizing-to-memory existed is not
-        kept when this run fills, since it left most of a large card empty. Otherwise :meth:`run` measures again."""
+        card of the same size with the same share asked for, and only if it was measured on the rainiest issue time
+        (0.4.3 to 0.5.0 measured on the first one, whatever its weather, and could run out of memory on a stormy
+        day). A batch from before sizing-to-memory existed is not kept when this run fills, since it left most of a
+        large card empty, and a filled batch is not kept by the old rule. Otherwise :meth:`run` measures again."""
         if self.cfg.batch_size > 0:                               # a batch given by hand overrules everything
             return
         fit = state.get("fit")
@@ -336,11 +353,12 @@ class Trainer:
         if fit and filling:
             usable = self.meter.usable()
             same_card = abs(float(fit.get("usable", 0.0)) - usable) <= 0.03 * usable
-            if same_card and abs(float(fit.get("share", 0.0)) - self.cfg.memory_share) < 0.005:
+            same_share = abs(float(fit.get("share", 0.0)) - self.cfg.memory_share) < 0.005
+            if same_card and same_share and fit.get("probe") == "rainiest":
                 self._adopt(int(fit["batch"]), float(fit["scale"]), bool(fit["checkpointing"]), fit)
                 log(f"stage {self.stage}: keeping the step size found before (batch {fit['batch']}, "
                     f"{fit['scale']:.2f} times the usual target cells)")
-        elif state.get("batch_size") and not filling:
+        elif state.get("batch_size") and not filling and not (fit and fit.get("policy") == "fill"):
             self.cfg.batch_size = int(state["batch_size"])
 
     def _state(self) -> dict:
@@ -412,7 +430,7 @@ class Trainer:
         key = round(float(scale), 3)
         if key not in self._probe_examples:
             targets = self.builder.choose_targets(True)
-            self._probe_examples[key] = self.builder.example(int(self.train_starts[0]), True, targets)
+            self._probe_examples[key] = self.builder.example(self._probe_start(), True, targets)
         example = self._probe_examples[key]
         moved = None
         try:
@@ -428,7 +446,9 @@ class Trainer:
             self.meter.sync()
             rate = self.cfg.probe_steps * batch / max(time.time() - began, 1e-9)
             return Probe(batch, scale, checkpointing, self.meter.peak() + self._optimizer_bytes(), rate)
-        except torch.OutOfMemoryError:
+        except (torch.OutOfMemoryError, RuntimeError) as error:
+            if not out_of_memory(error):
+                raise
             return Probe(batch, scale, checkpointing, None)
         finally:
             del moved
@@ -454,14 +474,15 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             self.meter.release()
         self._adopt(fit.batch, fit.scale, fit.checkpointing,
-                    {**fit.to_json(), "usable": usable, "share": self.cfg.memory_share, "policy": "fill"})
+                    {**fit.to_json(), "usable": usable, "share": self.cfg.memory_share, "policy": "fill",
+                     "probe": "rainiest", "probe_start": self._probe_start()})
         log(f"step size: {fit.describe()}; learning rate x{self.lr_scale:.2f}")
         return fit.batch
 
     def _fastest_batch(self, candidates=(1, 2, 3, 4, 6, 8, 12, 16, 24, 32)) -> int:
         """Run two training steps at each size on one repeated example; keep the fastest per forecast that fits
         in 90% of the GPU's memory."""
-        example = self.builder.example(int(self.train_starts[0]), True, self.builder.choose_targets(True))
+        example = self.builder.example(self._probe_start(), True, self.builder.choose_targets(True))
         total = torch.cuda.get_device_properties(self.device).total_memory
         best, best_rate = 1, 0.0
         state = {k: v.detach().clone() for k, v in self.model.state_dict().items()}
@@ -484,7 +505,9 @@ class Trainer:
                     break
                 if rate > best_rate * 1.03:
                     best, best_rate = b, rate
-            except torch.OutOfMemoryError:
+            except (torch.OutOfMemoryError, RuntimeError) as error:
+                if not out_of_memory(error):
+                    raise
                 log(f"  batch {b:>2}: out of memory")
                 break
             finally:
@@ -553,8 +576,8 @@ class Trainer:
         while True:
             try:
                 return self._evaluate(starts, targets, b)
-            except torch.OutOfMemoryError:
-                if b == 1:
+            except (torch.OutOfMemoryError, RuntimeError) as error:
+                if b == 1 or not out_of_memory(error):
                     raise
                 b = max(1, b // 2)
                 if self.meter is not None:
@@ -577,9 +600,35 @@ class Trainer:
         return {k: v / n for k, v in sums.items()}
 
     # ---------------------------------------------------------------------------------------- run --
+    def _probe_start(self, sampler=None) -> int:
+        """The issue time a step is sized on: the rainiest of the training ones. A step needs more memory when it
+        rained: the loss scores amounts only where rain fell, and each intensity only where it occurred. A step sized
+        on a dry day can run out of memory on a stormy one, and from 0.4.3 to 0.5.0 sizing used the first issue
+        time, whatever its weather. The curriculum's weights say which is rainiest when there is a curriculum
+        (``sampler``); otherwise the rain at the target cells is counted over 240 issue times spread through the
+        record."""
+        if self._probe_at is not None:
+            return self._probe_at
+        starts = self.train_starts
+        self._probe_at = int(starts[0])
+        try:
+            if sampler is not None:
+                self._probe_at = int(sampler.starts[int(np.argmax(sampler.p))])
+            else:
+                best = -1.0
+                for s in np.unique(starts[np.linspace(0, starts.size - 1, min(starts.size, 240)).astype(int)]):
+                    rain = np.nan_to_num(np.asarray(self.builder.cmorph.targets(np.arange(int(s), int(s) + PROBE_HOURS)),
+                                                    np.float64))
+                    score = 1e3 * float((rain >= 7.6).sum()) + float((rain >= 1.0).sum())     # heavy rain first
+                    if score > best:
+                        best, self._probe_at = score, int(s)
+        except Exception as error:                            # the first issue time is a worse yardstick, not none
+            log(f"the rainiest issue time was not found ({type(error).__name__}: {error}); sizing on the first one")
+        return self._probe_at
+
     def _batch_bytes(self) -> float:
         """Bytes of one batch as the loader hands it over."""
-        example = self.builder.example(int(self.train_starts[0]), True, self.builder.choose_targets(True))
+        example = self.builder.example(self._probe_start(), True, self.builder.choose_targets(True))
         return float(self.cfg.batch_size * sum(np.asarray(v).nbytes for v in example.values()))
 
     def _loader(self, sampler) -> tuple:
@@ -610,18 +659,20 @@ class Trainer:
         return f"  VRAM {used / 2**30:.1f}/{total / 2**30:.1f} GB"
 
     def _shrink(self, times: int) -> bool:
-        """A training step ran out of memory: make the step smaller, so that the run carries on. The extra target
-        cells go first, then forecasts from the batch. False when there is nothing left to give up."""
+        """A training step ran out of memory: make the step smaller, so that the run carries on. Fewer forecasts
+        and fewer extra target cells together: the batch shrinks every part of the step, the cells only the decoder
+        and the loss. Until 0.5.1 the extra cells went first and alone, which does not help when the encoder is what
+        ran out, and the run stopped after eight tries. False when there is nothing left to give up."""
         self.optimizer.zero_grad(set_to_none=True)
         if self.meter is not None:
             self.meter.release()
         batch, scale = self.cfg.batch_size, self.scale
-        if times > 8 or (batch <= 1 and scale <= 1.0):
+        if times > 16 or (batch <= 1 and scale <= 1.0):
             return False
+        if batch > 1:
+            batch = max(1, min(batch - 1, int(batch * 0.85)))
         if scale > 1.0:
             scale = 1.0 + 0.6 * (scale - 1.0) if scale > 1.1 else 1.0
-        else:
-            batch = max(1, min(batch - 1, int(batch * 0.9)))
         log(f"stage {self.stage}: a step ran out of memory at batch {self.cfg.batch_size} and {self.scale:.2f} times "
             f"the usual target cells; carrying on at batch {batch} and {scale:.2f} times")
         self._adopt(batch, scale, bool(self.model.gradient_checkpointing), self.fit)
@@ -636,19 +687,25 @@ class Trainer:
                 self.model.load_state_dict({**self.model.state_dict(), **{
                     k: v.to(self.model.state_dict()[k].dtype) for k, v in self.ema.shadow.items()}})
             return {"step": self.step, "elapsed": self.elapsed, "history": self.history}
-        self.pick_batch_size()
         sampler = None
         if cfg.curriculum:
             from .training import RareEventSampler
 
             sampler = RareEventSampler.from_truth(self.train_starts, lambda h: self.builder.cmorph.targets(h))
+        self._probe_start(sampler)
+        if self.meter is not None and self.cfg.batch_size <= 0:           # the step is about to be sized
+            log(f"stage {self.stage}: steps are sized on the rainiest issue time, "
+                f"{str(hour_to_datetime64(self._probe_start()))[:13]}Z")
+        self.pick_batch_size()
         ran_out = 0
         try:
             while True:
                 try:
                     self._train(sampler, budget)
                     break
-                except torch.OutOfMemoryError:
+                except (torch.OutOfMemoryError, RuntimeError) as error:
+                    if not out_of_memory(error):
+                        raise
                     ran_out += 1
                     if not self._shrink(ran_out):
                         raise

@@ -47,18 +47,22 @@ steps = []                                  # (what, outcome), printed at the en
 
 
 def run(args: list, env: dict | None = None) -> None:
-    """Run a command and show its output line by line, so a notebook shows progress. Stopping the cell stops it."""
+    """Run a command and show its output line by line, so a notebook shows progress. Stopping the cell stops it.
+    A command that fails is reported with its last line, which is where Python puts the error."""
     print("$ " + " ".join(str(a) for a in args), flush=True)
     proc = subprocess.Popen([str(a) for a in args], env=dict(os.environ, PYTHONUNBUFFERED="1", **(env or {})),
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    last = ""
     try:
         for line in proc.stdout:
             print(line, end="", flush=True)
+            last = line.strip() or last
     finally:
         if proc.poll() is None:
             proc.terminate()
     if proc.wait() != 0:
-        raise RuntimeError(f"`{' '.join(str(a) for a in args[:5])} ...` ended with exit code {proc.returncode}")
+        raise RuntimeError(f"`{' '.join(str(a) for a in args[:5])} ...` ended with exit code {proc.returncode}"
+                           + (f": {last[:300]}" if last else ""))
 
 
 def took(started: float) -> str:
@@ -89,7 +93,7 @@ def step(what: str, action, skip: str = "") -> bool:
 # 1. the package: from PyPI, or from the source tree when PyPI cannot be reached
 def install() -> None:
     try:
-        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.5.0"])
+        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.5.1"])
     except RuntimeError:
         run([sys.executable, "-m", "pip", "install", "-q", "git+https://github.com/Wisk-inc/transformers.git"
              "@claude/linear-context-architecture-a35c6h#subdirectory=pluvium"])
@@ -168,6 +172,8 @@ def network() -> None:
     if not TOKEN:
         print("No Hub token: nothing is mirrored, so a stopped session cannot resume and nothing is published.")
     home = Path(os.path.expanduser(NETWORK_ROOT))
+    # if the training stops on the GPU, the program starts it again by itself from its last checkpoint, with smaller
+    # steps (from 0.5.1)
     run(PLUVIUM + ["program"],
         env={"GPU_HOURS": str(GPU_HOURS), "HF_REPO": HF_REPO, "PLUVIUM_ROOT": NETWORK_ROOT, "PLUVIUM_SIZE": SIZE,
              "PLUVIUM_VRAM": VRAM, "PLUVIUM_VRAM_SHARE": str(VRAM_SHARE),

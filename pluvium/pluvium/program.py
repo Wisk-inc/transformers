@@ -27,6 +27,7 @@ import json
 import multiprocessing
 import os
 import shutil
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -682,10 +683,68 @@ def main(argv=None) -> None:
         cfg.countries = tuple(c.strip() for c in args.country.split(",") if c.strip())
     if args.box:
         cfg.box = tuple(float(x) for x in args.box.split(","))
+    if _supervised(cfg):
+        raise SystemExit(supervise(sys.argv[1:] if argv is None else list(argv), cfg.vram_share))
     Program(cfg).run()
 
 
-__all__ = ["DEFAULT_REPO", "Program", "ProgramConfig", "choose_years", "main"]
+#: how much less of the GPU's memory a training step is sized to when a run is started again after it stopped
+RETRY_SHARE_DROP = 0.10
+
+
+def _supervised(cfg: ProgramConfig) -> bool:
+    """A run that fills a GPU is watched by a parent process (:func:`supervise`), unless it is that parent's child,
+    a batch was given by hand, or ``PLUVIUM_RETRIES=0``."""
+    if cfg.vram != "fill" or cfg.batch_size > 0 or os.environ.get("PLUVIUM_ATTEMPT") or os.environ.get("PLUVIUM_RETRIES") == "0":
+        return False
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def supervise(argv: list, share: float, command: list | None = None) -> int:
+    """Run the program in a child process; if it stops with an error, start it again from its last checkpoint, first
+    with each training step sized to ``RETRY_SHARE_DROP`` less of the GPU's memory, then with the batch rule of 0.4.2
+    (``--vram fastest``). The first GPU run of 0.5.0 stopped in its training after downloading for an hour, and the
+    cell only said that it had failed. A fresh process starts with a fresh CUDA context, which some GPU errors leave
+    unusable; the data and the checkpoints are on disk, so a second try is training again within minutes. Returns the
+    last child's exit code. A child stopped by a signal (the notebook's stop button) is not started again."""
+    import signal
+    import subprocess
+
+    command = command or [sys.executable, "-u", "-m", "pluvium.program"]
+    tries = [("fill", share), ("fill", round(max(0.5, share - RETRY_SHARE_DROP), 2)), ("fastest", share)]
+    child = None
+
+    def stop(signum, frame):                                  # stopping this process stops the training too
+        if child is not None and child.poll() is None:
+            child.terminate()
+            child.wait()
+        raise SystemExit(128 + signum)
+
+    previous = signal.signal(signal.SIGTERM, stop)
+    code = 1
+    try:
+        for k, (vram, cut) in enumerate(tries):
+            env = dict(os.environ, PLUVIUM_ATTEMPT=str(k + 1), PLUVIUM_VRAM=vram, PLUVIUM_VRAM_SHARE=str(cut))
+            child = subprocess.Popen([*command, *argv, "--vram", vram, "--vram-share", str(cut)], env=env)
+            code = child.wait()
+            if code == 0 or code < 0:
+                return code
+            if k + 1 < len(tries):
+                then, then_cut = tries[k + 1]
+                log(f"the program stopped (exit code {code}; the error is just above). Starting it again from its last "
+                    "checkpoint, " + (f"with each training step sized to {then_cut:.0%} of the GPU's memory"
+                                      if then == "fill" else "with the batch rule of 0.4.2 (--vram fastest)"))
+        return code
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+__all__ = ["DEFAULT_REPO", "Program", "ProgramConfig", "RETRY_SHARE_DROP", "choose_years", "main", "supervise"]
 
 # ``python -m pluvium.program`` is how the notebook cells start a training run. Until 0.4.3 these two lines were
 # missing: the command imported this module and ended at once with exit code 0, having trained nothing.

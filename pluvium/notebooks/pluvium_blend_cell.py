@@ -22,7 +22,7 @@ def sh(cmd: str, check: bool = True) -> int:
 
 
 # 1. the package: from PyPI, or from the source tree when PyPI is not reachable
-if sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.5.0'", check=False) != 0:
+if sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.5.1'", check=False) != 0:
     sh(f"{sys.executable} -m pip install -q 'git+https://github.com/Wisk-inc/transformers.git"
        f"@claude/linear-context-architecture-a35c6h#subdirectory=pluvium'")
 

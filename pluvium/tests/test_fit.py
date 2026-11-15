@@ -3,6 +3,7 @@
 CPU whose memory is reported by a stand-in meter."""
 
 import math
+import sys
 
 import numpy as np
 import pytest
@@ -186,11 +187,67 @@ def test_training_is_sized_to_the_card_resumes_at_that_size_and_survives_running
 
     monkeypatch.setattr(again, "train_step", step_once_out_of_memory)
     assert again.run()["step"] == 3
-    assert again.scale < fit["scale"] and again.cfg.batch_size == fit["batch"]   # the extra cells went first
+    assert again.scale < fit["scale"] and again.cfg.batch_size == fit["batch"] - 1   # forecasts and cells, together
     # a session on a different card measures again
     other = Meter(Card(capacity=20.0, base=1.0, forecast=3.4, cells=1.0, saved=1.0))
     moved, _ = make_trainer(world, tmp_path / "a", other, max_steps=3)
     assert moved.fit is None and moved.cfg.batch_size == 0
+
+
+def test_steps_are_sized_on_the_rainiest_issue_time_and_every_kind_of_out_of_memory_shrinks_them(world, tmp_path,
+                                                                                                  monkeypatch):
+    # The loss needs more memory when it rained, so a step sized on a dry day ran out on a stormy one. Here the
+    # fourth issue time is the only one whose three days are all heavy rain.
+    from pluvium.train import out_of_memory
+
+    card = Card(capacity=10.0, base=1.0, forecast=3.4, cells=1.0, saved=1.0)
+    trainer, builder = make_trainer(world, tmp_path / "e", Meter(card))
+    wettest = int(trainer.train_starts[3])
+    real_targets = builder.cmorph.targets
+
+    def rain(hours, columns=None):
+        x = np.array(real_targets(hours, columns), dtype=np.float32)
+        x[(np.asarray(hours) >= wettest) & (np.asarray(hours) < wettest + 72)] = 9.0
+        return x
+
+    monkeypatch.setattr(builder.cmorph, "targets", rain)
+    seen, real_example = [], builder.example
+    monkeypatch.setattr(builder, "example", lambda start, *a, **k: seen.append(int(start)) or real_example(start, *a, **k))
+    trainer.pick_batch_size()
+    assert trainer._probe_start() == wettest and set(seen) == {wettest}
+    assert trainer.fit["probe"] == "rainiest" and trainer.fit["probe_start"] == wettest
+    # the CUDA libraries report running out of memory in their own words, and those count; nothing else does
+    assert out_of_memory(torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB"))
+    assert out_of_memory(RuntimeError("CUDA error: CUBLAS_STATUS_ALLOC_FAILED when calling `cublasCreate(handle)`"))
+    assert out_of_memory(RuntimeError("CUDA error: out of memory"))
+    assert not out_of_memory(RuntimeError("CUDA error: an illegal memory access was encountered"))
+    assert not out_of_memory(ValueError("out of memory"))
+    # a step that runs out in the encoder: giving up target cells alone would not help, so forecasts go too
+    trainer._adopt(10, 1.5, False, trainer.fit)
+    for k in range(1, 4):
+        assert trainer._shrink(k)
+    assert trainer.cfg.batch_size < 10 and trainer.scale == pytest.approx(1.0 + 0.5 * 0.6 ** 3)
+    trainer._adopt(1, 1.0, False, trainer.fit)
+    assert not trainer._shrink(1)                                             # nothing left to give up
+
+
+def test_a_run_that_stops_is_started_again_with_smaller_steps_then_the_old_rule(tmp_path):
+    from pluvium.program import supervise
+
+    log = tmp_path / "tries.txt"
+    child = [sys.executable, "-c",
+             "import os, sys; open(sys.argv[1], 'a').write(os.environ['PLUVIUM_VRAM'] + ' ' + "
+             "os.environ['PLUVIUM_VRAM_SHARE'] + ' ' + ' '.join(sys.argv[2:]) + '\\n');"
+             "sys.exit(0 if os.environ['PLUVIUM_ATTEMPT'] == '3' else 1)", str(log)]
+    assert supervise(["--hours", "1"], 0.95, command=child) == 0
+    tries = log.read_text().splitlines()
+    assert tries == ["fill 0.95 --hours 1 --vram fill --vram-share 0.95",
+                     "fill 0.85 --hours 1 --vram fill --vram-share 0.85",
+                     "fastest 0.95 --hours 1 --vram fastest --vram-share 0.95"]
+    once = [sys.executable, "-c", "import sys; sys.exit(0)"]
+    assert supervise([], 0.95, command=once) == 0                              # a run that works is run once
+    always = [sys.executable, "-c", "import sys; sys.exit(3)"]
+    assert supervise([], 0.95, command=always) == 3                            # three tries, then its error
 
 
 def test_a_batch_given_by_hand_and_the_old_rule_are_left_alone(world, tmp_path):
