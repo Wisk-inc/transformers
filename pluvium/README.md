@@ -190,6 +190,16 @@ spots: 50 mm, winter in mid-latitude climates, and structure at long range. Vers
 on the same year by the same rules, with every part of the design scored on its own.
 
 <!-- frontier-summary:start -->
+On the test year, in 7 places (the same year the first Blend was scored on):
+
+- **Heavy rain (50 mm).** Brier skill improved on the first Blend in 13 of 28 place and lead-group cells, and in 7 of 7 on days 1-3. Mean skill over the places on days 1-3 went from +0.1901 to +0.2133. The new Blend leads every other system at 50 mm in 15 of 28 cells (the first led in 14).
+- **In the places scored after the design was final** (Jamaica and the US Great Plains), 50 mm skill improved on the first Blend in 4 of 8 cells, and the new Blend leads every other system in 3 (the first: 0).
+- **Against each post-processed system at 50 mm**, 79 of 161 comparisons are better with 95% confidence and 0 worse.
+- **Rain or no rain (1 mm).** The new Blend leads in 24 of 28 cells (the first: 26), and improved on the first in 13. On days 1-7, 81 of 84 comparisons with single post-processed systems are better with 95% confidence and 0 worse.
+- **CRPS** leads in 25 of 28 cells (was 23); **RMSE** in 21 of 28 (was 20); **ACC** in 18 of 28 (was 16).
+- **Days 11-14 got slightly worse.** There the new Blend leads every other system at 1 mm in 4 of 7 places (the first: 6) and at 50 mm in 2 (the first: 5). Mean Brier skill at 1 mm on those days went from +0.0394 to +0.0390. The pool alone scores +0.0396: the online weights for that lead group learn from few forecasts that verify late, and cost a little.
+- **Record storms.** Each place's staged storms kept the hand-over in Jamaica, the Caribbean, the Maritime Continent, the US Great Plains and the Southern Andes and switched it off in the Alps and the US Pacific Northwest. That verdict had the sign of what the hand-over then did in the test year in 7 of 7 places (2 of the 2 scored after the rule was final). The out-of-fold audit tried first would have been right in 4 of 7.
+- **Structure at long range.** On days 11-14 one coupled scenario has 0.88 of the weather's spatial variability (raw ECMWF ENS: 0.84), and the CRPS of rain averaged over two-degree boxes is 2.26 mm against 2.93 for uncoupled draws and 2.57 for the raw ensemble (means over 7 places).
 <!-- frontier-summary:end -->
 
 ![Heavy rain, place by place](docs/img/frontier_heavy_rain.png)

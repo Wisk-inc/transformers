@@ -104,6 +104,7 @@ agree_yearly, n_yearly = R.audit_agreement(new, G[0], rule="yearly")
 on = [p for p in new if R.kept(new[p]) is True]
 off = [p for p in new if R.kept(new[p]) is False]
 three = {m: mean_over(m, "bss", "50", G[0]) for m in ("pool_online", "declared", "stack")}
+late1 = count("bss", "1", groups=[G[-1]])
 
 # ============================================================================================ paper 1 ==
 p1 = [
@@ -122,7 +123,10 @@ p1 = [
     f"{better50} of {n50} comparisons are better with 95% confidence and {worse50} worse. At 1 mm it leads in "
     f"{c1['new_leads']} of {c1['cells']} cells (the first: {c1['old_leads']}).", "",
     f"The gains are small. Mean Brier skill at 50 mm on days 1-3 went from {m50_old:+.4f} to {m50_new:+.4f}, and at 1 mm "
-    f"from {m1_old:+.4f} to {m1_new:+.4f}. {CAUTION}", "",
+    f"from {m1_old:+.4f} to {m1_new:+.4f}. Part of the gain at 50 mm comes from a fourth change, a hand-over for record "
+    f"storms, which is the subject of paper 2: without it the three changes above score {three['pool_online']:+.4f}. On "
+    f"days 11-14 the new Blend leads in fewer places than the first (at 1 mm in {late1['new_leads']} of "
+    f"{late1['cells']}, the first in {late1['old_leads']}). {CAUTION}", "",
     "## 1. What the first benchmark found", "",
     "The first Blend post-processed each system with a small network, fitted one more network over all six, and "
     "pooled the seven with weights per band of thresholds and lead. Scored over a year in six regions and Jamaica "

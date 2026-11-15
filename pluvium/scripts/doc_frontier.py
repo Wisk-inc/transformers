@@ -292,6 +292,15 @@ summary += [
     f"{rmse['new_leads']} of {rmse['cells']} (was {rmse['old_leads']}); **ACC** in {acc['new_leads']} of {acc['cells']} "
     f"(was {acc['old_leads']}).",
 ]
+late1, late50 = count("bss", "1", groups=[G[-1]]), count("bss", "50", groups=[G[-1]])
+if late1["new_leads"] < late1["old_leads"] or late50["new_leads"] < late50["old_leads"]:
+    summary.append(
+        f"- **Days 11-14 got slightly worse.** There the new Blend leads every other system at 1 mm in "
+        f"{late1['new_leads']} of {late1['cells']} places (the first: {late1['old_leads']}) and at 50 mm in "
+        f"{late50['new_leads']} (the first: {late50['old_leads']}). Mean Brier skill at 1 mm on those days went from "
+        f"{mean_of(old, 'top', 'bss', '1', G[-1]):+.4f} to {mean_of(new, 'stack', 'bss', '1', G[-1]):+.4f}. The pool "
+        f"alone scores {mean_of(new, 'pool', 'bss', '1', G[-1]):+.4f}: the online weights for that lead group learn "
+        "from few forecasts that verify late, and cost a little.")
 if n_all:
     misses = R.audit_misses(new, G[0])
     summary.append("- **Record storms.** Each place's staged storms "

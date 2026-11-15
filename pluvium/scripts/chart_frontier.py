@@ -51,6 +51,7 @@ def skill(res: dict, model: str) -> float:
 fig, ax = plt.subplots(figsize=(8.2, 0.52 * len(places) + 1.9))
 fig.patch.set_facecolor(SURFACE)
 frame(ax)
+notes = []
 for y, place in enumerate(places):
     res = new[place]
     mine = skill(res, "stack")
@@ -64,12 +65,15 @@ for y, place in enumerate(places):
     label = F.LABELS.get(str(who).replace("_raw", ""), str(who)) + (" raw" if str(who).endswith("_raw") else "")
     right = max(v for v in (mine, rival, first) if v == v)
     was = f" (first {first:+.3f})" if first == first else ""
-    ax.text(right + 0.006, y, f"{mine:+.3f}{was}   best other: {label} {rival:+.3f}", fontsize=8, color=INK2, va="center")
+    notes.append((right, y, f"{mine:+.3f}{was}   best other: {label} {rival:+.3f}"))
 ax.set_yticks(range(len(places)))
 ax.set_yticklabels([SHORT[p] for p in places], color=INK)
 ax.set_ylim(-0.6, len(places) - 0.4)
 lo, hi = ax.get_xlim()
-ax.set_xlim(min(lo, -0.005), hi + 0.6 * (hi - lo))
+ax.set_xlim(min(lo, -0.005), hi + 0.75 * (hi - lo))
+gap = 0.022 * (ax.get_xlim()[1] - ax.get_xlim()[0])                      # clear of the marker, whatever the scale
+for right, y, text in notes:
+    ax.text(right + gap, y, text, fontsize=8, color=INK2, va="center")
 ax.axvline(0, color=AXIS, lw=1)
 ax.set_xlabel("Brier skill score for 50 mm or more, days 1-3 (higher is better; 0 is the climatology)")
 handles = [plt.Line2D([], [], color=BLUE, marker="o", ms=9, mec=SURFACE, mew=2, lw=0),

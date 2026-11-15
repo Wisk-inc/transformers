@@ -57,9 +57,11 @@ and over a year its effect is a few tenths of a percent of the score: +0.20% in 
 Northwest, +0.41% in the Caribbean, +0.07% in the Southern Andes, 0.00% in the Maritime Continent, -0.17% in the
 Great Plains, -0.20% in Jamaica. The sign of so small a number is not evidence. Computed on the one-network
 component's forecast in place of the pool's, it changes in three of the seven places (the Alps -0.01%, the Pacific
-Northwest -0.28%, the Southern Andes -0.27%). In the test year the audit was right in the Alps and the Pacific
-Northwest and wrong in the Caribbean and the Southern Andes, where it switched off a hand-over that would have
-helped. The audit is still run and reported as the price of the hand-over in an ordinary year. It decides nothing.
+Northwest -0.28%, the Southern Andes -0.27%). In the test year the audit would have been right in four of the
+seven places (the Alps, the Pacific Northwest, the Great Plains and Jamaica) and wrong in three: in the Caribbean,
+the Maritime Continent and the Southern Andes it would have switched off a hand-over that then helped. Each
+place's staged storms had the right sign in all seven, though that rule was settled after five of them had been
+scored. The audit is still run and reported as the price of the hand-over in an ordinary year. It decides nothing.
 
 **Discounting the raw systems before handing over.** A gentler remedy: scale the raw chances by how often they
 verified at the top of the training forecasts, and never let the hand-over lower a chance. On the withheld storms
