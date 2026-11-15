@@ -111,10 +111,23 @@ def main() -> None:
         from huggingface_hub import HfApi
 
     api = HfApi(token=token)
-    api.create_repo(HF_REPO, repo_type="model", exist_ok=True, private=PRIVATE)
-    print(f"uploading {len(files)} files ({size:.1f} MB) from {source} to https://huggingface.co/{HF_REPO} ...", flush=True)
-    api.upload_folder(folder_path=str(stage), repo_id=HF_REPO, repo_type="model", ignore_patterns=IGNORE,
-                      commit_message="Pluvium: code, model card, papers and benchmarks")
+    try:
+        api.create_repo(HF_REPO, repo_type="model", exist_ok=True, private=PRIVATE)
+        print(f"uploading {len(files)} files ({size:.1f} MB) from {source} to https://huggingface.co/{HF_REPO} ...", flush=True)
+        api.upload_folder(folder_path=str(stage), repo_id=HF_REPO, repo_type="model", ignore_patterns=IGNORE,
+                          commit_message="Pluvium: code, model card, papers and benchmarks")
+    except Exception as error:
+        code = getattr(getattr(error, "response", None), "status_code", None)
+        if code == 401:
+            raise SystemExit("The Hub did not accept the token (HTTP 401). Check that it was pasted whole and has not "
+                             "been revoked.") from None
+        if code == 403:
+            owner = HF_REPO.split("/")[0]
+            raise SystemExit(f"The token is valid but may not write to {HF_REPO} (HTTP 403). It needs write access to "
+                             f"{owner}. A fine-grained token only reaches the accounts it was given: on the Hub, under "
+                             f"Settings, Access Tokens, edit the token and add {owner} with write access to its "
+                             "repositories and collections, or make a token of type Write.") from None
+        raise
     print(f"done: https://huggingface.co/{HF_REPO}")
     make_collection(api)
 

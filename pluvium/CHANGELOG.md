@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1 (November 2026)
+
+Found by running the Hub steps against a real account.
+
+- A token the Hub refuses now gives one plain line in place of a traceback, in `pluvium blend publish`,
+  `pluvium upstream mirror` and `hub/upload_to_hub.py`. The common case is a fine-grained token that was not given
+  the organisation it is asked to write to, and the message says how to add it.
+- `pluvium blend publish` no longer prints the Hub library's warning about card metadata for the note it uploads
+  beside a blend.
+
 ## 0.4.0 (November 2026)
 
 One command from nothing to a forecast, copies of the upstream AI models' weights, and three faults found by

@@ -10,7 +10,7 @@ import pytest
 from pluvium import upstream
 from pluvium.upstream import fetch as F
 from pluvium.upstream.registry import CC0, CC_BY, MODELS, Upstream
-from pluvium.util import FetchError
+from pluvium.util import FetchError, PluviumError, hub_refusal
 
 
 def bucket(tmp_path, files):
@@ -127,3 +127,15 @@ def test_mirror_copies_once_skips_what_is_there_and_survives_a_failure(tmp_path,
     with pytest.raises(SystemExit):                                                 # no token, no upload
         monkeypatch.delenv("HF_TOKEN", raising=False)
         upstream.mirror("org/repo", cache=tmp_path / "cache")
+
+    class Refused(Exception):
+        response = SimpleNamespace(status_code=403)
+
+    def refuse(*args, **kwargs):
+        raise Refused("403 Forbidden")
+
+    monkeypatch.setattr(api, "create_repo", refuse)                                 # a token that may not write there
+    with pytest.raises(PluviumError, match="needs write access to org"):
+        upstream.mirror("org/repo", cache=tmp_path / "cache", api=api)
+    assert "pasted whole" in str(hub_refusal(SimpleNamespace(response=SimpleNamespace(status_code=401)), "org/repo"))
+    assert hub_refusal(ValueError("something else"), "org/repo") is None

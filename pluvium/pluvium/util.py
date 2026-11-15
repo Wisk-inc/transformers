@@ -65,6 +65,21 @@ class PluviumError(RuntimeError):
     and stops, without a traceback."""
 
 
+def hub_refusal(error: Exception, repo: str) -> PluviumError | None:
+    """If ``error`` is the Hugging Face Hub refusing a token, the same thing in plain words; otherwise None."""
+    code = getattr(getattr(error, "response", None), "status_code", None)
+    owner = repo.split("/")[0]
+    if code == 401:
+        return PluviumError("The Hugging Face Hub did not accept the token (HTTP 401). Check that it was pasted "
+                            "whole and has not been revoked.")
+    if code == 403:
+        return PluviumError(f"The token is valid but may not write to {repo} (HTTP 403). It needs write access to "
+                            f"{owner}. A fine-grained token only reaches the accounts it was given: on the Hub, under "
+                            f"Settings, Access Tokens, edit the token and add {owner} with write access to its "
+                            "repositories and collections, or make a token of type Write.")
+    return None
+
+
 def fetch(url: str, start: int | None = None, end: int | None = None, timeout: float = 120.0, attempts: int = 5,
           missing_ok: bool = False) -> bytes | None:
     """
@@ -145,5 +160,5 @@ def great_circle_km(lat1, lon1, lat2, lon2) -> np.ndarray:
     return 2 * 6371.0 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
 
 
-__all__ = ["EPOCH", "FetchError", "atomic_save", "calendar", "fetch", "great_circle_km", "hour_of", "hour_to_datetime64",
-           "hour_to_iso", "log", "parallel_map", "year_hours"]
+__all__ = ["EPOCH", "FetchError", "PluviumError", "atomic_save", "calendar", "fetch", "great_circle_km", "hour_of",
+           "hour_to_datetime64", "hour_to_iso", "hub_refusal", "log", "parallel_map", "year_hours"]

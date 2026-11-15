@@ -17,7 +17,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..util import log
+from ..util import hub_refusal, log
 from .fetch import DEFAULT_CACHE, fetch_model, plan
 from .registry import Upstream, select
 
@@ -74,8 +74,14 @@ def mirror(repo: str, token: str | None = None, names=None, cache=DEFAULT_CACHE,
         from huggingface_hub import HfApi
 
         api = HfApi(token=token)
-    api.create_repo(repo, repo_type="model", exist_ok=True, private=private)
-    have = repo_files(api, repo)
+    try:
+        api.create_repo(repo, repo_type="model", exist_ok=True, private=private)
+        have = repo_files(api, repo)
+    except Exception as error:
+        refusal = hub_refusal(error, repo)
+        if refusal is None:
+            raise
+        raise refusal from None
     models = select(names)
     results = {}
     for model in models:

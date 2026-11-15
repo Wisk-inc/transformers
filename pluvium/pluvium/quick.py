@@ -245,9 +245,21 @@ def publish_blend(repo: str, root, token: str | None = None, private: bool = Fal
 
             api = HfApi(token=token)
         name = model.area_json["name"]
-        api.create_repo(repo, repo_type="model", exist_ok=True, private=private)
-        api.upload_folder(folder_path=str(stage), path_in_repo=f"{FOLDER}/{name}", repo_id=repo, repo_type="model",
-                          commit_message=f"Pluvium Blend for {name}")
+        try:
+            import warnings
+
+            api.create_repo(repo, repo_type="model", exist_ok=True, private=private)
+            with warnings.catch_warnings():                     # the note beside the blend is not a model card, and the
+                warnings.simplefilter("ignore", UserWarning)    # Hub library warns that it has no card metadata
+                api.upload_folder(folder_path=str(stage), path_in_repo=f"{FOLDER}/{name}", repo_id=repo,
+                                  repo_type="model", commit_message=f"Pluvium Blend for {name}")
+        except Exception as error:
+            from .util import hub_refusal
+
+            refusal = hub_refusal(error, repo)
+            if refusal is None:
+                raise
+            raise refusal from None
         where = f"{HUB}/{repo}/tree/main/{FOLDER}/{name}"
         say(f"blend for {name}: published to {where}")
         return where
