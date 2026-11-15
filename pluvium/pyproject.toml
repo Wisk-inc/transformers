@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pluvium"
-version = "0.4.2"
+version = "0.4.3"
 description = "Rain forecasts for every town, in any country: hour by hour for three days and daily for 14, blending ECMWF, NOAA and AI weather models, with hurricane tracks from the same systems, on the NatureV1 / iHELIX engine"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -23,6 +23,8 @@ TRAIN_NETWORK = "auto"                      # the hourly network: "auto" trains 
 GPU_HOURS = 24                              # wall-clock budget for the network
 NETWORK_ROOT = "/workspace/pluvium"         # its working folder; about 150 GB for six years of data
 SIZE = "pluvium-500"                        # or "pluvium-base" for a smaller, faster network
+VRAM = "fill"                               # "fill": every training step is sized to the GPU's memory; "fastest": the old rule
+VRAM_SHARE = 0.95                           # how much of the GPU's memory a step may need; the rest is the safety margin
 
 import importlib.util
 import json
@@ -87,7 +89,7 @@ def step(what: str, action, skip: str = "") -> bool:
 # 1. the package: from PyPI, or from the source tree when PyPI cannot be reached
 def install() -> None:
     try:
-        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.4.2"])
+        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.4.3"])
     except RuntimeError:
         run([sys.executable, "-m", "pip", "install", "-q", "git+https://github.com/Wisk-inc/transformers.git"
              "@claude/linear-context-architecture-a35c6h#subdirectory=pluvium"])
@@ -165,10 +167,16 @@ def network() -> None:
         subprocess.run([sys.executable, "-c", probe], check=True)
     if not TOKEN:
         print("No Hub token: nothing is mirrored, so a stopped session cannot resume and nothing is published.")
-    run([sys.executable, "-u", "-m", "pluvium.program"],
+    home = Path(os.path.expanduser(NETWORK_ROOT))
+    run(PLUVIUM + ["program"],
         env={"GPU_HOURS": str(GPU_HOURS), "HF_REPO": HF_REPO, "PLUVIUM_ROOT": NETWORK_ROOT, "PLUVIUM_SIZE": SIZE,
+             "PLUVIUM_VRAM": VRAM, "PLUVIUM_VRAM_SHARE": str(VRAM_SHARE),
              "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True", "TOKENIZERS_PARALLELISM": "false"})
-    print(f"the network's own forecast is in {NETWORK_ROOT}/forecast/report.txt")
+    if not (home / "program.json").exists():        # the program records each stage it finishes there
+        raise RuntimeError("the training program ended without doing anything")
+    report = home / "forecast" / "report.txt"
+    print(f"the network's own forecast is in {report}" if report.exists() else
+          f"the network is trained; no forecast was written (the lines above say why). Its files are in {home}")
 
 
 gpu = gpu_gb()
@@ -209,8 +217,10 @@ for what, outcome in steps:
     print(f"{what}: {outcome}")
 tables = sorted(root.glob("blend_*.csv"))
 print(f"\nforecast table: {tables[-1] if tables else 'none written'}")
-print("its columns: the chance of 1, 10, 25 and 50 mm; median, 90th percentile and expected rain; how many raw systems "
-      "call for 50 mm; the alert tier; whether the forecast is beyond the training record; how rare the amount is")
+print("its columns: the place and its parish; the chance of 1, 10, 25 and 50 mm; median, 90th percentile and expected "
+      "rain; how many raw systems call for 50 mm; the alert tier; whether the forecast is beyond the training record; "
+      "how rare the amount is")
+print(f"by parish: pluvium now --country {COUNTRY} --root {root} --parishes")
 if HURRICANES:
     print(f"hurricane bulletins and data: {root / 'cyclone'}")
 if TOKEN:

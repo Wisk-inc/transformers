@@ -329,22 +329,89 @@ def places_of(root, model) -> tuple:
     return lat, lon, [f"{a:.2f},{b:.2f}" for a, b in zip(lat, lon)], np.zeros(lat.size, np.int64)
 
 
-def brief(result: dict, names: list, population: np.ndarray, top: int = 5, days: int = 5, place: str | None = None) -> str:
-    """A few lines a person can read: the next ``days`` days at the ``top`` largest places (or at the places whose
-    name contains ``place``)."""
+def areas_of(root) -> list | None:
+    """The first-level area each place is in (a parish in Jamaica, a province or state elsewhere), in the order of
+    :func:`places_of`; None when the folder has no town list. The names are GeoNames', e.g. ``Saint Ann``."""
+    from .domain import PointSet
+
+    path = Path(root) / "towns.npz"
+    if not path.exists():
+        return None
+    extra = PointSet.load(path).extra
+    return [_tidy(str(x)) for x in extra["unit"]] if "unit" in extra else None
+
+
+def _tidy(name: str) -> str:
+    """One spelling for an area's name. GeoNames writes Jamaica's parishes three ways (``Portland Parish``,
+    ``St. Elizabeth``, ``Clarendon``): the word Parish is dropped and St. is written out."""
+    name = name.strip()
+    if name.endswith(" Parish"):
+        name = name[: -len(" Parish")]
+    if name.startswith(("St. ", "St ")):
+        name = "Saint " + name.split(" ", 1)[1]
+    return name
+
+
+def _plain(name: str) -> str:
+    """A name as people type it, for matching: lower case, and ``St`` or ``St.`` read as ``Saint``."""
+    words = name.strip().lower().replace(".", " ").split()
+    return " ".join("saint" if w in ("st", "ste") else w for w in words)
+
+
+def by_area(result: dict, areas: list, days: int = 5, area: str | None = None) -> str:
+    """The next ``days`` days for every first-level area (parish, province, state), or for those whose name
+    contains ``area``. Each line gives the typical place in the area (the median of its places) and, in brackets,
+    the range across its places: an area is not one number, and its wettest corner is what a warning is about."""
     from .blendlive import ALERT_NAMES
 
+    names = sorted({a for a in areas if a})
+    if area:
+        names = [a for a in names if _plain(area) in _plain(a)]
+        if not names:
+            return f"no area called {area!r}: this country has " + ", ".join(sorted({a for a in areas if a}))
+    where = np.asarray(areas, dtype=object)
+    lines = ["each line: the typical place in the area, and in brackets the range across its places"]
+    for name in names:
+        idx = np.flatnonzero(where == name)
+        lines.append(f"{name} ({idx.size:,} places)")
+        for d in result["days"][:days]:
+            date = np.datetime64(d["date"]).astype(datetime)
+            rain, heavy, amount = (np.asarray(d[k])[idx] for k in ("p_ge_1", "p_ge_25", "mean_mm"))
+            worst = int(np.asarray(d["alert"])[idx].max()) if "alert" in d and len(d["alert"]) else 0
+            flag = f"   [{ALERT_NAMES[worst]} for part of it]" if worst else ""
+            lines.append(f"  {date:%a %d %b}   rain {100 * np.median(rain):3.0f}% ({100 * rain.min():.0f} to "
+                         f"{100 * rain.max():.0f})   25 mm or more {100 * np.median(heavy):3.0f}% (up to "
+                         f"{100 * heavy.max():.0f})   expected {np.median(amount):5.1f} mm (up to {amount.max():.1f})"
+                         + flag)
+    return "\n".join(lines)
+
+
+def brief(result: dict, names: list, population: np.ndarray, top: int = 5, days: int = 5, place: str | None = None,
+          areas: list | None = None, area: str | None = None) -> str:
+    """A few lines a person can read: the next ``days`` days at the ``top`` largest places, or at the places whose
+    name contains ``place``, or at the largest places of the areas whose name contains ``area`` (with ``areas``,
+    each place's area, from :func:`areas_of`)."""
+    from .blendlive import ALERT_NAMES
+
+    inside = np.ones(len(names), bool)
+    if area:
+        if areas is None:
+            return "this folder has no town list, so its places have no areas"
+        inside = np.array([_plain(area) in _plain(a) for a in areas])
+        if not inside.any():
+            return f"no area called {area!r}: this country has " + ", ".join(sorted({a for a in areas if a}))
     if place:
         q = place.strip().lower()
-        idx = [k for k, n in enumerate(names) if q in n.lower()]
+        idx = [k for k, n in enumerate(names) if q in n.lower() and inside[k]]
         idx = sorted(idx, key=lambda k: (names[k].lower() != q, -int(population[k])))[:top]
         if not idx:
             return f"no place called {place!r} in this area"
     else:
-        idx = list(np.argsort(-population, kind="stable")[:top])
+        order = np.argsort(-np.asarray(population), kind="stable")
+        idx = [int(k) for k in order if inside[k]][:top]
     lines = []
     for k in idx:
-        lines.append(names[k])
+        lines.append(names[k] + (f", {areas[k]}" if areas is not None and areas[k] else ""))
         for d in result["days"][:days]:
             date = np.datetime64(d["date"]).astype(datetime)
             alert = ALERT_NAMES[int(d["alert"][k])] if "alert" in d else ""
@@ -359,8 +426,9 @@ def forecast(country, root=None, repo: str | None = DEFAULT_REPO, time=None, lea
              handover: str | None = None, token: str | None = None, say=log) -> dict:
     """The 14-day rain forecast for every town of ``country`` (ISO codes), from nothing if need be.
 
-    Returns ``{"root", "table", "result", "names", "population", "model", "how"}``: the folder, the CSV written, the
-    forecast as :meth:`pluvium.blendlive.BlendModel.forecast` returns it, the places, the model and how it was
+    Returns ``{"root", "table", "result", "names", "population", "areas", "model", "how"}``: the folder, the CSV
+    written, the forecast as :meth:`pluvium.blendlive.BlendModel.forecast` returns it, the places, each place's
+    parish or province (None without a town list), the model and how it was
     obtained (``"local"``, ``"downloaded"`` or ``"trained"``). ``learn=True`` first updates the online weights from
     the days whose rain is now known (slow the first time: it reads two weeks of past runs). ``time`` forecasts as
     of another UTC hour, ``handover`` overrules the staged storms' verdict for this run.
@@ -375,11 +443,13 @@ def forecast(country, root=None, repo: str | None = DEFAULT_REPO, time=None, lea
     if handover and isinstance(model, FrontierBlend):          # after saving: the overrule is for this run only
         model.set_handover(handover)
     lat, lon, names, population = places_of(root, model)
+    areas = areas_of(root)
     result = model.forecast(lat, lon, root / "live_archive", now=now)
-    table = write_table(result, names, root / f"blend_{result['day0']}.csv")
-    return {"root": root, "table": table, "result": result, "names": names, "population": population, "model": model,
-            "how": how}
+    table = write_table(result, names, root / f"blend_{result['day0']}.csv", areas=areas)
+    return {"root": root, "table": table, "result": result, "names": names, "population": population, "areas": areas,
+            "model": model, "how": how}
 
 
-__all__ = ["DEFAULT_REPO", "blend_card", "blend_url", "brief", "catch_up", "codes_of", "default_root", "fetch_blend",
-           "forecast", "places_of", "publish_blend", "ready", "recent_year", "same_area", "setup"]
+__all__ = ["DEFAULT_REPO", "areas_of", "blend_card", "blend_url", "brief", "by_area", "catch_up", "codes_of",
+           "default_root", "fetch_blend", "forecast", "places_of", "publish_blend", "ready", "recent_year", "same_area",
+           "setup"]

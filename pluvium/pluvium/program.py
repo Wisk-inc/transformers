@@ -48,11 +48,13 @@ class ProgramConfig:
     private: bool = False
     size: str = "pluvium-500"
     train_years: tuple | None = None     # None: chosen from the budget
-    holdout_year: int = 2022             # the hourly ERA5 archive ends with 2022
+    holdout_year: int = 2021             # the last whole year in the hourly ERA5 archive (checked when a run starts)
     stage_b: bool | None = None          # None: on when the budget allows
     stage_b_period: tuple = ("2025-01-01T00", "2025-07-01T00")
     stage_b_cycles: int = 240
     batch_size: int = 0                  # 0: measure
+    vram: str = "fill"                   # "fill": size each step to the GPU's memory; "fastest": the fastest batch
+    vram_share: float = 0.95             # how much of the GPU's memory a training step may need when filling
     workers: int = -1                    # -1: every core but two
     checkpointing: bool = True
     lr: float = 3e-4
@@ -79,10 +81,16 @@ class ProgramConfig:
             cfg.countries = tuple(c.strip() for c in env["PLUVIUM_COUNTRIES"].split(",") if c.strip())
         if env.get("PLUVIUM_BOX"):
             cfg.box = tuple(float(x) for x in env["PLUVIUM_BOX"].split(","))
+        if env.get("PLUVIUM_VRAM"):
+            cfg.vram = env["PLUVIUM_VRAM"]
+        if env.get("PLUVIUM_VRAM_SHARE"):
+            cfg.vram_share = float(env["PLUVIUM_VRAM_SHARE"])
+        if env.get("PLUVIUM_BATCH"):
+            cfg.batch_size = int(env["PLUVIUM_BATCH"])
         return cfg
 
 
-def choose_years(gpu_hours: float, holdout: int = 2022) -> tuple:
+def choose_years(gpu_hours: float, holdout: int = 2021) -> tuple:
     """More training years when the budget can use them (each year is ~8,760 issue times)."""
     n = 6 if gpu_hours >= 20 else 4 if gpu_hours >= 10 else 2
     return tuple(range(holdout - n, holdout))
@@ -112,6 +120,28 @@ class Program:
     def mark(self, stage: str, **info) -> None:
         self.state[stage] = {"done": time.strftime("%Y-%m-%d %H:%M"), **info}
         self.state_path.write_text(json.dumps(self.state, indent=1))
+
+    def check_years(self) -> None:
+        """Make sure the years asked for are in the hourly ERA5 archive, whose first and last year are read from the
+        archive itself. Before 0.4.3 the program held out 2022 by default, a year the archive does not have, and
+        stopped while staging it, after every training year had been downloaded."""
+        from .sources.era5 import hourly_years
+
+        first, last = hourly_years()
+        cfg = self.cfg
+        if not first <= cfg.holdout_year <= last:
+            log(f"the hourly ERA5 archive holds {first} to {last}: holding out {last}, not {cfg.holdout_year}")
+            cfg.holdout_year = last
+            if cfg.train_years is None:
+                self.years = choose_years(cfg.gpu_hours, last)
+        kept = tuple(y for y in self.years if first <= y <= last and y != cfg.holdout_year)
+        if kept != tuple(self.years):
+            log(f"training years {sorted(set(self.years) - set(kept))} are held out or not in the archive "
+                f"({first} to {last}); training on {list(kept)}")
+            self.years = kept
+        if not self.years:
+            raise ValueError(f"no training year is left: the hourly ERA5 archive holds {first} to {last} and "
+                             f"{cfg.holdout_year} is held out. Use --years with years before {cfg.holdout_year}.")
 
     def pull(self, local: Path, repo_path: str, what: str | None = None) -> bool:
         return bool(self.mirror and self.mirror.pull(local, repo_path, what))
@@ -262,9 +292,14 @@ class Program:
 
         v3 = not self.cfg.size.endswith(("-v1", "-v2"))
         kw = {"ema_decay": 0.999 if v3 else 0.0, "curriculum": v3, **kw}
+        if self.cfg.vram not in ("fill", "fastest"):
+            raise ValueError(f"vram must be 'fill' or 'fastest', not {self.cfg.vram!r}")
+        if not 0.3 <= self.cfg.vram_share <= 0.99:
+            raise ValueError(f"vram_share must be between 0.3 and 0.99, not {self.cfg.vram_share}: the last per cent "
+                             "of a GPU's memory cannot be promised to a training step")
         return TrainConfig(size=self.cfg.size, batch_size=self.cfg.batch_size, workers=self.cfg.workers,
                            checkpointing=self.cfg.checkpointing, lr=self.cfg.lr, hours=hours,
-                           overrides=self.cfg.overrides, **kw)
+                           overrides=self.cfg.overrides, memory=self.cfg.vram, memory_share=self.cfg.vram_share, **kw)
 
     def run(self) -> dict:
         import torch
@@ -286,12 +321,15 @@ class Program:
         from .verify import format_report
 
         cfg = self.cfg
+        self.check_years()
         log(f"Pluvium program: {cfg.size}, budget {cfg.gpu_hours:.1f} h, training years {self.years[0]}-"
             f"{self.years[-1]}, held out {cfg.holdout_year}, stage B {'on' if self.stage_b else 'off'}; "
             + (self.mirror.describe() if self.mirror else "mirror: off"))
         if torch.cuda.is_available():
             props = torch.cuda.get_device_properties(0)
-            log(f"GPU: {props.name}, {props.total_memory / 2**30:.0f} GB; {os.cpu_count()} CPU cores")
+            how = (f"each training step is sized to {cfg.vram_share:.0%} of it" if cfg.vram == "fill" and not cfg.batch_size
+                   else f"batch {cfg.batch_size} as given" if cfg.batch_size else "the fastest batch is kept")
+            log(f"GPU: {props.name}, {props.total_memory / 2**30:.0f} GB ({how}); {os.cpu_count()} CPU cores")
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
         geo, towns = self.geography()
@@ -332,12 +370,18 @@ class Program:
             self.pull(best / "model.pt", "checkpoint/stage_a/best/model.pt", "best stage A weights")
             self.pull(best / "pluvium.json", "checkpoint/stage_a/best/pluvium.json", "best stage A metadata")
         final_dir = best if (best / "model.pt").exists() else self.root / "stage_a"
-        model, loss, _, _ = load_model(final_dir, geo, trainer.device)
+        model_device = trainer.device
+        model, loss, _, _ = load_model(final_dir, geo, model_device)
         batch_a = trainer.cfg.batch_size
         del trainer
         live_builder, live_starts = None, None
         if self.stage_b:
-            got = self.finish_stage_b(model, loss, geo, grids, clim, stations, st_points, st_clim, batch_a)
+            try:
+                got = self.finish_stage_b(model, loss, geo, grids, clim, stations, st_points, st_clim, batch_a)
+            except Exception as error:                 # stage B is an extra: stage A's model must still be released
+                log(f"stage B stopped ({type(error).__name__}: {error}); the model trained in stage A is kept")
+                model, loss, _, _ = load_model(final_dir, geo, model_device)
+                got = None
             if got is not None:
                 model, loss, live_builder, live_starts = got
         # calibration and scores
@@ -481,7 +525,9 @@ class Program:
         hours_b = max(0.2, self.left() - (0.9 + 0.1 * self.cfg.gpu_hours / 24))
         cfg_b = self.train_cfg(hours_b, warmup_steps=50)
         cfg_b.lr = self.cfg.lr / 3
-        cfg_b.batch_size = batch_size
+        # stage B's forecasts are built differently, so its step is sized afresh, unless a batch was given by hand
+        # or the fastest batch is wanted, in which case stage A's is kept
+        cfg_b.batch_size = 0 if (self.cfg.vram == "fill" and not self.cfg.batch_size) else batch_size
         if st is None:
             model.link_stations = None                 # airports of stage B differ: train without them
         trainer = Trainer(model, loss, builder, train_b, held_b[:16], self.root / "stage_b", cfg_b, self.mirror,
@@ -598,10 +644,19 @@ def main(argv=None) -> None:
     parser.add_argument("--years", default=None, help="training years, e.g. 2016-2021")
     parser.add_argument("--no-stage-b", action="store_true")
     parser.add_argument("--no-forecast", action="store_true")
-    parser.add_argument("--batch", type=int, default=0)
+    parser.add_argument("--batch", type=int, default=None, help="forecasts per training step (default: found by measuring)")
+    parser.add_argument("--vram", default=None, choices=("fill", "fastest"),
+                        help="fill: size each training step to the GPU's memory (default). fastest: keep the fastest "
+                             "batch per forecast, which leaves most of a large GPU's memory unused")
+    parser.add_argument("--vram-share", type=float, default=None,
+                        help="how much of the GPU's memory a training step may need when filling (default 0.95)")
     parser.add_argument("--country", default=None, help="ISO codes of the area to serve, e.g. TT or DO,HT (default: the Caribbean)")
     parser.add_argument("--box", default=None, help="south,north,west,east instead of the countries' own extent")
     args = parser.parse_args(argv)
+    # segments that can grow keep the allocator's footprint close to what the tensors need, which matters when a
+    # step is sized to fill the card. Left alone when the allocator has been configured by hand.
+    if not any(os.environ.get(k) for k in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF")):
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     cfg = ProgramConfig.from_env()
     if args.hours is not None:
         cfg.gpu_hours = args.hours
@@ -617,7 +672,12 @@ def main(argv=None) -> None:
     if args.no_stage_b:
         cfg.stage_b = False
     cfg.forecast = not args.no_forecast
-    cfg.batch_size = args.batch
+    if args.batch is not None:
+        cfg.batch_size = args.batch
+    if args.vram:
+        cfg.vram = args.vram
+    if args.vram_share is not None:
+        cfg.vram_share = args.vram_share
     if args.country:
         cfg.countries = tuple(c.strip() for c in args.country.split(",") if c.strip())
     if args.box:
@@ -626,3 +686,8 @@ def main(argv=None) -> None:
 
 
 __all__ = ["DEFAULT_REPO", "Program", "ProgramConfig", "choose_years", "main"]
+
+# ``python -m pluvium.program`` is how the notebook cells start a training run. Until 0.4.3 these two lines were
+# missing: the command imported this module and ended at once with exit code 0, having trained nothing.
+if __name__ == "__main__":
+    main()

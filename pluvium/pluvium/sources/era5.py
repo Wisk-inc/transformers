@@ -29,8 +29,26 @@ HOURLY_STORE = ("https://storage.googleapis.com/gcp-public-data-arco-era5/ar/"
                 "1959-2022-1h-360x181_equiangular_with_poles_conservative.zarr")
 UPPER_STORE = ("https://storage.googleapis.com/weatherbench2/datasets/era5/"
                "1959-2023_01_10-6h-240x121_equiangular_with_poles_conservative.zarr")
-#: Last hour the hourly store holds (2022-12-31T23).
-HOURLY_LAST = hour_of("2022-12-31T23")
+#: Last hour the hourly store holds. Its name says 1959-2022, and its time axis ends on 31 December 2021 (read from
+#: the store on 15 November 2026). Until 0.4.3 this said 2022-12-31T23, and staging 2022 failed with an IndexError.
+#: :func:`stage_era5` and :func:`hourly_years` ask the store itself; this is what they fall back on.
+HOURLY_LAST = hour_of("2021-12-31T23")
+
+
+def hourly_years(store: ZarrStore | None = None) -> tuple[int, int]:
+    """``(first, last)`` whole calendar years the hourly store holds, read from its time axis (from
+    :data:`HOURLY_LAST` when the store cannot be reached). The last year is the newest one training can hold out."""
+    try:
+        hours = (store or ZarrStore(HOURLY_STORE)).hours()
+        first, last = int(hours[0]), int(hours[-1])
+    except Exception:
+        first, last = hour_of("1959-01-01T00"), HOURLY_LAST
+    year_a, year_b = int(str(np.datetime64(first, "h"))[:4]), int(str(np.datetime64(last, "h"))[:4])
+    if first > year_hours(year_a)[0]:
+        year_a += 1
+    if last < year_hours(year_b)[1] - 1:
+        year_b -= 1
+    return year_a, year_b
 
 
 def _box_slices(store: ZarrStore, box, pad: float) -> tuple[slice, slice, np.ndarray, np.ndarray]:
@@ -158,12 +176,13 @@ def stage_era5(root, years=None, box=DOMAIN, workers: int = 32, include_upper: b
     else:
         lat2, lon2 = np.zeros(0), np.zeros(0)
     staged = []
+    last = int(hours1[-1])                                      # the store's own last hour, not a date kept in code
     for year, a, b in spans:
         first, end = year_hours(year)
-        if a > HOURLY_LAST:
-            log(f"  ERA5 {year}: past the hourly store's end (2022); skipped")
+        if a > last:
+            log(f"  ERA5 {year}: past the hourly store's end ({str(np.datetime64(last, 'h'))[:10]}); skipped")
             continue
-        b = min(b, HOURLY_LAST + 1)
+        b = min(b, last + 1)
         for var, short in zip(HOURLY_VARS, HOURLY_SHORT):
             path = root / "era5_1h" / f"{short}_{year}.npy"
             gap = _missing(path, a - first, b - first)
@@ -215,4 +234,4 @@ def stage_era5(root, years=None, box=DOMAIN, workers: int = 32, include_upper: b
     return ERA5Cache(root)
 
 
-__all__ = ["ERA5Cache", "HOURLY_LAST", "HOURLY_STORE", "UPPER_STORE", "stage_era5"]
+__all__ = ["ERA5Cache", "HOURLY_LAST", "HOURLY_STORE", "UPPER_STORE", "hourly_years", "stage_era5"]

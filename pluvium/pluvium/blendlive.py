@@ -292,19 +292,21 @@ def raw_signal(raw: dict, threshold: float = RAW_ALERT_MM) -> dict:
 ALERT_NAMES = ("", "watch", "warning", "extreme")
 
 
-def write_table(result: dict, names, path) -> Path:
+def write_table(result: dict, names, path, areas=None) -> Path:
     """One row per place and day: chances of 1/10/25/50 mm, median, 90th percentile and expected rain, and how many
     raw systems call for 50 mm or more (with the wettest one's mean), for the record storms calibration shrinks.
     Then the alert tier for heavy rain, whether the forecast is beyond anything in the training period, and how
-    rare the expected amount is at the place (the last two for models that carry them)."""
+    rare the expected amount is at the place (the last two for models that carry them). With ``areas`` (each
+    place's parish, province or state) the table has an ``area`` column after the place."""
     import csv
 
     path = Path(path)
+    where = [] if areas is None else ["area"]
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["place", "date", "p_ge_1mm", "p_ge_10mm", "p_ge_25mm", "p_ge_50mm", "median_mm", "p90_mm", "mean_mm",
-                    f"raw_systems_ge_{int(RAW_ALERT_MM)}mm", "raw_wettest_mm", "systems", "alert", "beyond_record",
-                    "expected_amount_is"])
+        w.writerow(["place", *where, "date", "p_ge_1mm", "p_ge_10mm", "p_ge_25mm", "p_ge_50mm", "median_mm", "p90_mm",
+                    "mean_mm", f"raw_systems_ge_{int(RAW_ALERT_MM)}mm", "raw_wettest_mm", "systems", "alert",
+                    "beyond_record", "expected_amount_is"])
         for d in result["days"]:
             for k, name in enumerate(names):
                 agree = f"{int(d['raw_agree'][k])}/{d['raw_systems']}" if "raw_agree" in d and d["raw_systems"] else ""
@@ -312,7 +314,8 @@ def write_table(result: dict, names, path) -> Path:
                 alert = ALERT_NAMES[int(d["alert"][k])] if "alert" in d else ""
                 beyond = "yes" if "beyond_record" in d and d["beyond_record"][k] else ""
                 rarity = d["rarity"][k] if "rarity" in d else ""
-                w.writerow([name, d["date"], *(f"{d[f'p_ge_{int(t)}'][k]:.2f}" for t in B.SCORED),
+                w.writerow([name, *([areas[k]] if areas is not None else []), d["date"],
+                            *(f"{d[f'p_ge_{int(t)}'][k]:.2f}" for t in B.SCORED),
                             f"{d['median_mm'][k]:.1f}", f"{d['p90_mm'][k]:.1f}", f"{d['mean_mm'][k]:.1f}",
                             agree, wettest, "+".join(d["systems"]), alert, beyond, rarity])
     return path

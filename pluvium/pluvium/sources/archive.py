@@ -98,6 +98,33 @@ class ArchiveReader:
         self._save(system, init, cut, steps)
         return True
 
+    def read_steps(self, system: str, init: int, steps, tag: str = "6h") -> bool:
+        """Fetch rain accumulated from the start of a run to each of ``steps`` (hours from the run's start, multiples
+        of 6) for every region, and cache it under ``<system>_<tag>``; True when it is cached. :meth:`read` keeps to
+        whole days; this is for rain by part of the day."""
+        steps = sorted({int(s) for s in steps if int(s) > 0})
+        if not steps or any(s % 6 for s in steps):
+            raise ValueError(f"steps must be multiples of 6 hours, not {steps}")
+        name = f"{system}_{tag}"
+        have = []
+        for region in self.regions:
+            p = self.path(region, name, init)
+            if not p.exists():
+                have = None
+                break
+            with np.load(p) as z:
+                have.append(set(int(s) for s in z["steps"]))
+        if have is not None and all(set(steps) <= got for got in have):
+            return True
+        try:
+            cut = getattr(self, "_" + system)(init, steps, 31)
+        except Exception as error:
+            log(f"{system} {str(hour_to_datetime64(init))[:13]}Z, six-hour steps: not read "
+                f"({type(error).__name__}: {str(error)[:160]})")
+            return False
+        self._save(name, init, cut, steps)
+        return True
+
     def _cut(self, item) -> dict:
         values, lat, lon = item
         out = {}
@@ -210,10 +237,15 @@ class ArchiveReader:
         def one(item):
             k, step = item
             url = template.format(day=day, hour=hour, step=step, lead=step)
-            want = f"0-{step // 24} day acc"
+            # the total since the start of the run: "0-2 day acc" at whole days, "0-30 hour acc" between them. Between
+            # days the file also holds the last bucket ("24-30 hour acc"), which ends with the same words, so there
+            # the label is matched from its first character
+            whole = step % 24 == 0
+            want = f"0-{step // 24} day acc" if whole else f"0-{step} hour acc"
             try:
                 rows = [r for r in _index_ncep(fetch(url + ".idx", timeout=60.0, attempts=6).decode())
-                        if r["var"] == "APCP" and r["level"] == "surface" and want in r["desc"]]
+                        if r["var"] == "APCP" and r["level"] == "surface"
+                        and (want in r["desc"] if whole else r["desc"].strip().startswith(want))]
                 return 0, k, self._decode_cut(fetch(url, rows[0]["start"], rows[0]["end"], attempts=6), False)
             except Exception as error:
                 log(f"  +{step} h lost ({type(error).__name__}); left as missing")

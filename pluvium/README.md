@@ -44,6 +44,8 @@ The second call takes about a minute.
 
 ```bash
 pluvium now --country JM --place "Port Antonio"    # the places whose name contains this
+pluvium now --country JM --parishes                # every parish: its typical place and the range across it
+pluvium now --country JM --parish "St Ann"         # the largest towns of one parish
 pluvium now --country JM --learn                   # first learn from the days whose rain has been published since
 pluvium now --country DO,HT --storms               # two countries, and every tropical cyclone alive now
 pluvium blend publish --root ~/pluvium-JM --repo you/your-repo   # share the blend you trained

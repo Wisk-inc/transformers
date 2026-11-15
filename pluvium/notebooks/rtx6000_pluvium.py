@@ -7,6 +7,7 @@ HF_TOKEN = "PASTE_YOUR_ORG_TOKEN_HERE"      # a write token for the Hub organisa
 HF_REPO = "CorxLabs/Pluvium-500"            # where data, checkpoints and the finished model are kept
 ROOT = "/workspace/pluvium"                 # local working folder (needs ~150 GB free for six years of data)
 SIZE = "pluvium-500"                        # or pluvium-base for a faster, smaller model
+VRAM_SHARE = 0.95                           # how much of the GPU's memory a training step may need (the rest is margin)
 
 import os
 import subprocess
@@ -35,10 +36,13 @@ if subprocess.run([sys.executable, "-c", probe]).returncode != 0:
 if HF_TOKEN.startswith("PASTE"):
     print("No Hub token: nothing will be mirrored, so a stopped session cannot resume. Paste a token above.")
 env = dict(os.environ, GPU_HOURS=str(GPU_HOURS), HF_REPO=HF_REPO, PLUVIUM_ROOT=ROOT, PLUVIUM_SIZE=SIZE,
-           PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True", TOKENIZERS_PARALLELISM="false")
+           PLUVIUM_VRAM_SHARE=str(VRAM_SHARE), PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True",
+           TOKENIZERS_PARALLELISM="false")
 if not HF_TOKEN.startswith("PASTE"):
     env["HF_TOKEN"] = HF_TOKEN
-proc = subprocess.Popen([sys.executable, "-u", "-m", "pluvium.program"], env=env, stdout=subprocess.PIPE,
+# started through the command line's entry. `python -m pluvium.program` did nothing before 0.4.3: it ended at once
+# with exit code 0, and this cell reported a finished program that had trained nothing.
+proc = subprocess.Popen([sys.executable, "-u", "-m", "pluvium.cli", "program"], env=env, stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT, text=True, bufsize=1)
 try:
     for line in proc.stdout:
@@ -46,4 +50,9 @@ try:
 finally:
     if proc.poll() is None:
         proc.terminate()
-print(f"program finished with exit code {proc.wait()}; the forecast is in {ROOT}/forecast/report.txt")
+code = proc.wait()
+home = os.path.expanduser(ROOT)
+if not os.path.exists(f"{home}/program.json"):          # the program records each stage it finishes there
+    raise SystemExit(f"the training program ended with exit code {code} without doing anything")
+print(f"program finished with exit code {code}; " + (f"the forecast is in {home}/forecast/report.txt"
+      if os.path.exists(f"{home}/forecast/report.txt") else f"no forecast was written; its files are in {home}"))

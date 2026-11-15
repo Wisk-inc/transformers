@@ -218,6 +218,42 @@ def test_brief_shows_the_largest_places_or_the_one_asked_for():
     assert "no place called" in quick.brief(result, names, population, place="atlantis")
 
 
+def test_parishes_are_named_one_way_summarised_and_can_be_asked_for(tmp_path):
+    from pluvium.blendlive import write_table
+
+    # GeoNames spells Jamaica's parishes three ways; people type a fourth
+    assert [quick._tidy(n) for n in ("Portland Parish", "St. Elizabeth", "Clarendon", "St Ann")] == [
+        "Portland", "Saint Elizabeth", "Clarendon", "Saint Ann"]
+    assert quick._plain("St. Ann") == quick._plain("saint ann") == quick._plain("ST ANN") == "saint ann"
+    names = ["Hamlet", "Capital", "Port Town", "Capital Heights"]
+    areas = ["Saint Ann", "Kingston", "Saint Ann", "Kingston"]
+    population = np.array([120, 900_000, 40_000, 3_000])
+    day = {"date": "2026-11-15", "p_ge_1": np.array([0.2, 0.71, 0.5, 0.6]), "p_ge_25": np.array([0.0, 0.12, 0.3, 0.1]),
+           "mean_mm": np.array([0.4, 6.2, 14.0, 5.0]), "alert": np.array([0, 0, 2, 0]),
+           "beyond_record": np.array([False, False, True, False])}
+    result = {"days": [day, dict(day, date="2026-11-16")]}
+    text = quick.by_area(result, areas, days=1)
+    lines = text.splitlines()
+    assert lines[0].startswith("each line: the typical place") and lines[1] == "Kingston (2 places)"
+    # the median of Kingston's two places, and the range across them
+    assert lines[2] == "  Sun 15 Nov   rain  66% (60 to 71)   25 mm or more  11% (up to 12)   expected   5.6 mm (up to 6.2)"
+    assert lines[3] == "Saint Ann (2 places)" and lines[4].endswith("[warning for part of it]") and "16 Nov" not in text
+    one = quick.by_area(result, areas, days=2, area="St Ann")
+    assert "Saint Ann (2 places)" in one and "Kingston" not in one and "16 Nov" in one
+    assert quick.by_area(result, areas, area="Atlantis").startswith("no area called 'Atlantis': this country has Kingston")
+    # the largest towns of one parish, each labelled with its parish
+    towns = quick.brief(result, names, population, top=5, days=1, areas=areas, area="st. ann")
+    assert towns.splitlines()[0] == "Port Town, Saint Ann" and "Hamlet, Saint Ann" in towns and "Capital" not in towns
+    assert quick.brief(result, names, population, areas=areas, area="nowhere").startswith("no area called")
+    assert "no town list" in quick.brief(result, names, population, area="Saint Ann")
+    # ... and the table says which parish every row is in
+    full = {"days": [dict(day, **{f"p_ge_{t}": day["p_ge_1"] for t in (10, 50)}, median_mm=day["mean_mm"],
+                          p90_mm=day["mean_mm"], systems=["ens"])]}
+    rows = write_table(full, names, tmp_path / "t.csv", areas=areas).read_text().splitlines()
+    assert rows[0].startswith("place,area,date,p_ge_1mm") and rows[2].startswith("Capital,Kingston,2026-11-15,0.71")
+    assert write_table(full, names, tmp_path / "u.csv").read_text().splitlines()[0].startswith("place,date,")
+
+
 def test_now_command_prints_what_it_used_and_the_forecast(model, tmp_path, monkeypatch, capsys):
     from pluvium import cli
 

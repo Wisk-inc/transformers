@@ -40,6 +40,29 @@ def test_commands_in_the_documents_exist():
     assert scripts and all((ROOT / s).exists() for s in scripts), sorted(s for s in scripts if not (ROOT / s).exists())
 
 
+def test_every_module_started_with_dash_m_really_starts():
+    """``python -m pluvium.program`` imported the module and ended with exit code 0 in every release before 0.4.3:
+    the file had no ``if __name__ == "__main__"``. Every notebook cell started the GPU training that way, so none
+    of them trained anything. A module that exists is not a module that runs: both are checked here."""
+    import subprocess
+
+    sources = [ROOT / "README.md", ROOT / "CHANGELOG.md", *ROOT.glob("docs/*.md"), *ROOT.glob("hub/*.md"),
+               *ROOT.glob("hub/*.py"), *ROOT.glob("notebooks/*.py")]
+    started = set()
+    for path in sources:
+        started |= set(re.findall(r"-m[\"', ]+(pluvium(?:\.\w+)+)", path.read_text()))
+    assert "pluvium.cli" in started
+    for name in sorted(started | {"pluvium.program"}):
+        source = Path(importlib.util.find_spec(name).origin).read_text()
+        assert 'if __name__ == "__main__":' in source, f"python -m {name} would do nothing: {name} has no main guard"
+    ran = subprocess.run([sys.executable, "-m", "pluvium.program", "--help"], capture_output=True, text=True, cwd=ROOT,
+                         timeout=300)
+    assert ran.returncode == 0 and "--hours" in ran.stdout and "--vram-share" in ran.stdout, ran.stdout[-400:] + ran.stderr[-400:]
+    wrong = subprocess.run([sys.executable, "-m", "pluvium.program", "--no-such-flag"], capture_output=True, text=True,
+                           cwd=ROOT, timeout=300)
+    assert wrong.returncode == 2                                           # it parsed its arguments: it ran
+
+
 def test_cells_compile_and_call_commands_that_exist():
     from pluvium import cli
 

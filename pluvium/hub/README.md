@@ -61,8 +61,11 @@ trains one on the most recent year whose rain has been published. That took 86 m
 machine, nearly all of it downloads, and left 41 MB on disk. Then it reads the newest run of each of the six systems for the country and prints the forecast for the
 largest towns. The second time it takes about a minute.
 
-`--country` takes any ISO codes (`TT`, `DO,HT`, `PH`, `KE`). The table it writes has one row per place and day: the
-chance of 1, 10, 25 and 50 mm; the median, 90th percentile and expected rain; how many raw systems call for 50 mm;
+`--parishes` prints one block per parish (province or state in other countries): the typical place in it and the
+range across its places. `--parish "St Ann"` prints the largest towns of one parish.
+
+`--country` takes any ISO codes (`TT`, `DO,HT`, `PH`, `KE`). The table it writes has one row per place and day,
+with the place's parish: the chance of 1, 10, 25 and 50 mm; the median, 90th percentile and expected rain; how many raw systems call for 50 mm;
 an alert tier (watch, warning, extreme); whether the forecast is beyond the training record; and how rare the
 expected amount is at that place. `pluvium cyclone --root ~/storms` writes a bulletin for every storm alive now.
 

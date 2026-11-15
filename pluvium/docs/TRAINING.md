@@ -65,7 +65,7 @@ def sh(cmd, check=True):
     print(f"$ {cmd}", flush=True)
     return subprocess.run(cmd, shell=True, check=check).returncode
 
-sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.4.2'")
+sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.4.3'")
 root = os.path.expanduser(ROOT)
 pluvium = f"{sys.executable} -m pluvium.cli"
 if not os.path.exists(f"{root}/area.json"):
@@ -110,7 +110,7 @@ if not HF_TOKEN.startswith("PASTE"):
     env["HF_TOKEN"] = HF_TOKEN
 else:
     print("No Hub token: nothing is mirrored, so a stopped session cannot resume and nothing is published.")
-cmd = [sys.executable, "-u", "-m", "pluvium.program"] + (["--country", COUNTRY] if COUNTRY else [])
+cmd = [sys.executable, "-u", "-m", "pluvium.cli", "program"] + (["--country", COUNTRY] if COUNTRY else [])
 proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 try:
     for line in proc.stdout:
@@ -118,8 +118,15 @@ try:
 finally:
     if proc.poll() is None:
         proc.terminate()
-print(f"finished with exit code {proc.wait()}; the forecast is in {ROOT}/forecast/report.txt")
+code = proc.wait()
+if not os.path.exists(f"{ROOT}/program.json"):
+    raise SystemExit(f"the training program ended with exit code {code} without doing anything")
+print(f"finished with exit code {code}; the forecast, if one was made, is in {ROOT}/forecast/report.txt")
 ```
+
+Before 0.4.3 these cells started the training with `python -m pluvium.program`. That command did nothing: the module
+had no entry point, so it ended at once with exit code 0 and the cell reported a finished program that had trained
+nothing. The cells now start it through `pluvium program` and stop with an error if no stage was recorded.
 
 The same thing as one shell line:
 
@@ -135,6 +142,34 @@ if the repository has none yet.
 
 The file [notebooks/rtx6000_pluvium.py](../notebooks/rtx6000_pluvium.py) is the same cell with a fallback that
 installs from source.
+
+### How much of the GPU's memory training uses
+
+Each training step is sized to the card. Before training, the program runs a few steps at several sizes and reads
+back the memory they needed. It then keeps the largest step that stays within 95% of the card. Three things are set:
+
+1. Gradient checkpointing, on or off. It saves memory by computing parts of the network twice. Both ways are sized,
+   and the one that trains more forecasts per second is kept.
+2. The batch: as many forecasts per step as fit.
+3. Target cells per forecast. A whole extra forecast often does not fit in what is left, and scoring each forecast
+   at more of the area's cells does.
+
+The log shows every measurement, then the size kept, then `VRAM used/total` on each progress line. The learning rate
+is unchanged up to a batch of 8 and grows with the square root of the batch above that, to at most twice.
+
+| Setting | What it does |
+|---|---|
+| `PLUVIUM_VRAM_SHARE=0.95` | The share of the card a step may need. The rest is a margin. |
+| `PLUVIUM_VRAM=fastest` | The rule used before 0.4.3: keep the batch that is fastest per forecast. On a 90 GB card that can leave most of the memory unused. |
+| `PLUVIUM_BATCH=6` | A batch given by hand. Nothing is measured. |
+
+A fuller card is not a faster one by itself. Forecasts per second stay about the same; each step holds more
+forecasts and more cells, so there are fewer and steadier steps in the same time. If a step ever needs more than the
+card has, the program makes the step smaller and carries on. A session that resumes on the same card keeps the size
+it found, and a checkpoint from before 0.4.3 is sized again.
+
+This sizing was checked on simulated cards and on a CPU training run with a stand-in memory meter
+(`tests/test_fit.py`). It has not been run on a GPU by the people who wrote it, so read the first lines of the log.
 
 ## 3. Pluvium Cyclone (CPU)
 

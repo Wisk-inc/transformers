@@ -1,8 +1,9 @@
 # Copyright 2026 Nathan. Apache-2.0.
 """
-Training on one GPU: batches built on every CPU core, bf16 on the GPU, the fastest batch size found by measuring,
-a learning-rate schedule that ends when the time budget does, checkpoints that resume exactly, and (optionally) a
-mirror of every checkpoint on the Hugging Face Hub so a rented machine that stops loses nothing.
+Training on one GPU: batches built on every CPU core, bf16 on the GPU, a step sized by measuring to fill the GPU's
+memory (:mod:`pluvium.training.fit`), a learning-rate schedule that ends when the time budget does, checkpoints that
+resume exactly, and (optionally) a mirror of every checkpoint on the Hugging Face Hub so a rented machine that stops
+loses nothing.
 
 Stage A trains on ERA5 (perfect prognosis, with forecast-error emulation); stage B continues on real GFS runs
 (model output statistics). Both use :class:`Trainer`; only the examples' driving fields differ.
@@ -57,6 +58,47 @@ class TrainConfig:
     curriculum: bool = False             # draw issue times favouring heavy rain and thunder (pluvium.training)
     expert_balance: float = 0.01         # weight of the mixture-of-experts load-balancing term
     overrides: dict = field(default_factory=dict)   # PluviumConfig overrides (ablations)
+    memory: str = "fill"                 # "fill": size the step to the GPU's memory; "fastest": the fastest batch
+    memory_share: float = 0.95           # how much of the GPU's memory a step may need when filling
+    lr_reference_batch: int = 8          # the learning rate is as given up to this batch and grows above it
+    lr_scale_cap: float = 2.0            # ... with the square root of the batch, to at most this many times
+    probe_steps: int = 2                 # timed steps per measurement when sizing
+
+
+class CudaMeter:
+    """How much of a CUDA device's memory training needs, read from PyTorch's allocator. The trainer sizes its
+    steps with one of these; the tests pass a made-up one, so the sizing is checked without a GPU."""
+
+    def __init__(self, device) -> None:
+        self.device = device
+
+    def usable(self) -> float:
+        """Bytes this process can have: what is free on the card now, and what it already holds."""
+        torch.cuda.empty_cache()
+        free, _ = torch.cuda.mem_get_info(self.device)
+        return float(free + torch.cuda.memory_reserved(self.device))
+
+    def start(self, batch: int = 0, scale: float = 1.0, checkpointing: bool = False) -> None:
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(self.device)
+        torch.cuda.synchronize(self.device)
+
+    def sync(self) -> None:
+        torch.cuda.synchronize(self.device)
+
+    def peak(self) -> float:
+        """The most the allocator held since :meth:`start`: what ``nvidia-smi`` shows for this process, less the
+        CUDA context."""
+        torch.cuda.synchronize(self.device)
+        return float(torch.cuda.max_memory_reserved(self.device))
+
+    def used(self) -> tuple:
+        """``(bytes in use on the card by everything, the card's size)``, as ``nvidia-smi`` reports them."""
+        free, total = torch.cuda.mem_get_info(self.device)
+        return float(total - free), float(total)
+
+    def release(self) -> None:
+        torch.cuda.empty_cache()
 
 
 # ------------------------------------------------------------------------------------------- batches --
@@ -231,7 +273,7 @@ class Trainer:
 
     def __init__(self, model: PluviumModel, loss: PluviumLoss, builder: SampleBuilder, train_starts, val_starts,
                  out_dir, cfg: TrainConfig, mirror=None, mirror_prefix: str = "checkpoint", stage: str = "A",
-                 device=None) -> None:
+                 device=None, meter=None) -> None:
         self.model, self.loss_fn, self.builder = model, loss, builder
         self.train_starts, self.val_starts = np.asarray(train_starts), np.asarray(val_starts)
         self.out, self.cfg, self.mirror, self.mirror_prefix, self.stage = Path(out_dir), cfg, mirror, mirror_prefix, stage
@@ -240,6 +282,12 @@ class Trainer:
         self.loss_fn.to(self.device)
         if cfg.checkpointing:
             self.model.gradient_checkpointing_enable()
+        #: reads the GPU's memory (``meter`` is for tests: an object with :class:`CudaMeter`'s methods)
+        self.meter = meter if meter is not None else (CudaMeter(self.device) if self.device.type == "cuda" else None)
+        #: target cells per forecast as the builder was given them; sizing may raise them, evaluation never uses more
+        self._usual_cells = (int(builder.max_land), int(builder.ocean_targets))
+        self.scale, self.lr_scale, self.fit = 1.0, 1.0, None
+        self._probe_examples: dict = {}
         self.elev = torch.tensor(model.geo.targets.statics[:, 0], dtype=torch.float32, device=self.device)
         self.optimizer = torch.optim.AdamW(_param_groups([self.model, self.loss_fn], cfg.weight_decay), lr=cfg.lr,
                                            betas=(0.9, 0.95), fused=self.device.type == "cuda")
@@ -272,15 +320,32 @@ class Trainer:
             self.elapsed = float(state.get("elapsed", 0.0))
             self.best = float(state.get("best", float("inf")))
             self.history = list(state.get("history", []))
-            if state.get("batch_size"):
-                self.cfg.batch_size = int(state["batch_size"])
+            self._resume_size(state)
             log(f"stage {self.stage}: continuing from step {self.step:,} ({self.elapsed / 3600:.2f} h trained)")
         else:
             log(f"stage {self.stage}: starting from the stage {state.get('stage', '?')} weights")
 
+    def _resume_size(self, state: dict) -> None:
+        """Take the step's size from a checkpoint when it still applies. A size found by filling is kept only on a
+        card of the same size with the same share asked for; a batch from before sizing-to-memory existed is not
+        kept when this run fills, since it left most of a large card empty. Otherwise :meth:`run` measures again."""
+        if self.cfg.batch_size > 0:                               # a batch given by hand overrules everything
+            return
+        fit = state.get("fit")
+        filling = self.cfg.memory == "fill" and self.meter is not None
+        if fit and filling:
+            usable = self.meter.usable()
+            same_card = abs(float(fit.get("usable", 0.0)) - usable) <= 0.03 * usable
+            if same_card and abs(float(fit.get("share", 0.0)) - self.cfg.memory_share) < 0.005:
+                self._adopt(int(fit["batch"]), float(fit["scale"]), bool(fit["checkpointing"]), fit)
+                log(f"stage {self.stage}: keeping the step size found before (batch {fit['batch']}, "
+                    f"{fit['scale']:.2f} times the usual target cells)")
+        elif state.get("batch_size") and not filling:
+            self.cfg.batch_size = int(state["batch_size"])
+
     def _state(self) -> dict:
         return {"stage": self.stage, "step": self.step, "elapsed": self.elapsed, "best": self.best,
-                "batch_size": self.cfg.batch_size, "history": self.history[-200:], "saved": time.time()}
+                "batch_size": self.cfg.batch_size, "fit": self.fit, "history": self.history[-200:], "saved": time.time()}
 
     def save(self, push: bool = True) -> None:
         save_checkpoint(self.out, self.model, self.loss_fn, self.optimizer, self._state(),
@@ -291,13 +356,111 @@ class Trainer:
 
     # ------------------------------------------------------------------------------ batch size --
     def pick_batch_size(self, candidates=(1, 2, 3, 4, 6, 8, 12, 16, 24, 32)) -> int:
-        """Run two training steps at each size on one repeated example; keep the fastest per forecast that fits
-        in 90% of the GPU's memory."""
+        """The batch for this run: the one given, or one found by measuring. With ``cfg.memory == "fill"`` the step
+        is sized to the GPU's memory (:meth:`_fill_memory`); with ``"fastest"`` the fastest batch per forecast is
+        kept, which is what every run did before 0.4.3 and leaves most of a large card empty."""
         if self.cfg.batch_size > 0:
             return self.cfg.batch_size
+        if self.meter is None:
+            self.cfg.batch_size = 2
+            return 2
+        if self.cfg.memory == "fill":
+            try:
+                return self._fill_memory()
+            except Exception as error:                        # sizing must never be what stops a run
+                log(f"sizing to the GPU's memory did not work ({type(error).__name__}: {error}); "
+                    "keeping the fastest batch instead")
+                self._apply(1.0, self.cfg.checkpointing)
         if self.device.type != "cuda":
             self.cfg.batch_size = 2
             return 2
+        return self._fastest_batch(candidates)
+
+    def _apply(self, scale: float, checkpointing: bool) -> None:
+        """Set how many target cells each training forecast is scored at (``scale`` times the usual number, as far
+        as the area has them) and whether activations are recomputed to save memory."""
+        land, sea = self._usual_cells
+        if scale > 1.0:
+            land = int(min(max(self.builder.land_idx.size, land), round(land * scale)))
+            sea = int(round(sea * scale))
+        self.builder.max_land, self.builder.ocean_targets = land, sea
+        self.model.gradient_checkpointing_enable(bool(checkpointing))
+        self.scale = float(scale)
+
+    def _adopt(self, batch: int, scale: float, checkpointing: bool, fit: dict | None = None) -> None:
+        """Train at this size from now on. The learning rate follows the batch (:func:`pluvium.training.fit.lr_scale`)."""
+        from .training.fit import lr_scale
+
+        self._apply(scale, checkpointing)
+        self.cfg.batch_size = int(batch)
+        self.lr_scale = lr_scale(int(batch), self.cfg.lr_reference_batch, self.cfg.lr_scale_cap)
+        self.fit = None if fit is None else {**fit, "batch": int(batch), "scale": float(scale),
+                                             "checkpointing": bool(checkpointing)}
+
+    def _optimizer_bytes(self) -> float:
+        """Memory AdamW will take at its first step and has not taken yet: two moments for every parameter."""
+        if len(self.optimizer.state) > 0:
+            return 0.0
+        return 2.0 * sum(p.numel() * p.element_size() for g in self.optimizer.param_groups for p in g["params"])
+
+    def _measure(self, batch: int, scale: float, checkpointing: bool):
+        """A few training steps at one setting, on one forecast repeated: the memory they needed and the forecasts
+        per second (:class:`pluvium.training.fit.Probe`). Running out of memory is an answer, not an error."""
+        from .training.fit import Probe
+
+        self._apply(scale, checkpointing)
+        key = round(float(scale), 3)
+        if key not in self._probe_examples:
+            targets = self.builder.choose_targets(True)
+            self._probe_examples[key] = self.builder.example(int(self.train_starts[0]), True, targets)
+        example = self._probe_examples[key]
+        moved = None
+        try:
+            self.meter.start(batch, scale, checkpointing)
+            moved = to_device(collate([example] * batch), self.device)
+            began = time.time()
+            for k in range(self.cfg.probe_steps + 1):
+                if k == 1:                                    # the first step warms up and is not timed
+                    self.meter.sync()
+                    began = time.time()
+                self._forward_backward(moved)
+                self.optimizer.zero_grad(set_to_none=True)
+            self.meter.sync()
+            rate = self.cfg.probe_steps * batch / max(time.time() - began, 1e-9)
+            return Probe(batch, scale, checkpointing, self.meter.peak() + self._optimizer_bytes(), rate)
+        except torch.OutOfMemoryError:
+            return Probe(batch, scale, checkpointing, None)
+        finally:
+            del moved
+            self.optimizer.zero_grad(set_to_none=True)
+            self.meter.release()
+
+    def _fill_memory(self) -> int:
+        """Size the step to ``cfg.memory_share`` of the GPU's memory: gradient checkpointing on or off, the largest
+        batch, and more target cells per forecast with what is left (:func:`pluvium.training.fit.fill`)."""
+        from .training.fit import fill
+
+        usable = self.meter.usable()
+        budget = self.cfg.memory_share * usable
+        max_scale = max(1.0, self.builder.land_idx.size / max(self._usual_cells[0], 1))
+        log(f"sizing the training step to {self.cfg.memory_share:.0%} of the GPU's {usable / 2**30:.0f} GB "
+            "(a few steps at each setting) ...")
+        weights = {k: v.detach().clone() for k, v in self.model.state_dict().items()}
+        try:
+            fit = fill(self._measure, budget, max_scale=max_scale, say=log)
+        finally:
+            self.model.load_state_dict(weights)
+            self._probe_examples.clear()
+            self.optimizer.zero_grad(set_to_none=True)
+            self.meter.release()
+        self._adopt(fit.batch, fit.scale, fit.checkpointing,
+                    {**fit.to_json(), "usable": usable, "share": self.cfg.memory_share, "policy": "fill"})
+        log(f"step size: {fit.describe()}; learning rate x{self.lr_scale:.2f}")
+        return fit.batch
+
+    def _fastest_batch(self, candidates=(1, 2, 3, 4, 6, 8, 12, 16, 24, 32)) -> int:
+        """Run two training steps at each size on one repeated example; keep the fastest per forecast that fits
+        in 90% of the GPU's memory."""
         example = self.builder.example(int(self.train_starts[0]), True, self.builder.choose_targets(True))
         total = torch.cuda.get_device_properties(self.device).total_memory
         best, best_rate = 1, 0.0
@@ -350,7 +513,7 @@ class Trainer:
         return metrics
 
     def train_step(self, batch: dict) -> dict:
-        factor = lr_factor(self.step, self.elapsed, self.cfg)
+        factor = lr_factor(self.step, self.elapsed, self.cfg) * self.lr_scale
         for group in self.optimizer.param_groups:
             group["lr"] = self.cfg.lr * factor
         metrics = self._forward_backward(batch)
@@ -368,6 +531,16 @@ class Trainer:
         return metrics
 
     # ---------------------------------------------------------------------------------- evaluate --
+    def _yardstick_targets(self) -> np.ndarray:
+        """The cells held-out forecasts are scored at: the usual number, whatever training is sized to, so that
+        scores from runs of different sizes can be compared."""
+        land, sea = self.builder.max_land, self.builder.ocean_targets
+        self.builder.max_land, self.builder.ocean_targets = self._usual_cells
+        try:
+            return self.builder.choose_targets(train=False)
+        finally:
+            self.builder.max_land, self.builder.ocean_targets = land, sea
+
     @torch.no_grad()
     def evaluate(self, starts=None, batch_size: int | None = None) -> dict:
         """Mean loss terms and Brier score over held-out forecasts (no emulated errors: a fixed yardstick)."""
@@ -376,21 +549,84 @@ class Trainer:
             return {}
         self.model.eval()
         b = batch_size or max(1, self.cfg.batch_size)
-        targets = self.builder.choose_targets(train=False)
+        targets = self._yardstick_targets()
+        while True:
+            try:
+                return self._evaluate(starts, targets, b)
+            except torch.OutOfMemoryError:
+                if b == 1:
+                    raise
+                b = max(1, b // 2)
+                if self.meter is not None:
+                    self.meter.release()
+                log(f"held out: out of memory; scoring {b} forecasts at a time")
+
+    def _evaluate(self, starts: np.ndarray, targets: np.ndarray, b: int) -> dict:
         sums, n = {}, 0
         for k in range(0, starts.size, b):
-            batch = to_device(collate([self.builder.example(int(t), False, targets, emulate=False)
-                                       for t in starts[k: k + b]]), self.device)
+            chunk = starts[k: k + b]
+            batch = to_device(collate([self.builder.example(int(t), False, targets, emulate=False) for t in chunk]),
+                              self.device)
             with torch.autocast(self.device.type, dtype=torch.bfloat16,
                                 enabled=self.cfg.bf16 and self.device.type == "cuda"):
                 out = self.model(batch)
             _, metrics = self.loss_fn(out, batch, self.elev[batch["targets"][0]])
-            for key, value in metrics.items():
-                sums[key] = sums.get(key, 0.0) + value
-            n += 1
+            for key, value in metrics.items():                # weighed by forecasts, so the mean does not depend
+                sums[key] = sums.get(key, 0.0) + value * chunk.size        # on how many are scored at a time
+            n += chunk.size
         return {k: v / n for k, v in sums.items()}
 
     # ---------------------------------------------------------------------------------------- run --
+    def _batch_bytes(self) -> float:
+        """Bytes of one batch as the loader hands it over."""
+        example = self.builder.example(int(self.train_starts[0]), True, self.builder.choose_targets(True))
+        return float(self.cfg.batch_size * sum(np.asarray(v).nbytes for v in example.values()))
+
+    def _loader(self, sampler) -> tuple:
+        """The batches, built on the CPU cores: ``(loader, workers, batches each worker keeps ready)``. How many
+        batches wait in memory is kept within the machine's RAM (:func:`pluvium.training.fit.loader_plan`): a batch
+        sized to a large GPU is large in RAM too."""
+        from .training.fit import loader_plan, ram_bytes
+
+        cfg = self.cfg
+        workers, ready = _workers(cfg.workers), 4
+        if workers:
+            workers, ready = loader_plan(workers, self._batch_bytes(), ram_bytes())
+        data = BatchSet(self.builder, self.train_starts, cfg.batch_size, cfg.seed, sampler)
+        loader = torch.utils.data.DataLoader(
+            data, batch_size=None, sampler=range(self.step, cfg.max_steps), num_workers=workers,
+            pin_memory=self.device.type == "cuda", prefetch_factor=ready if workers else None,
+            persistent_workers=False, multiprocessing_context="fork" if workers else None)
+        return loader, workers, ready
+
+    def _memory_text(self) -> str:
+        """``VRAM used/total`` for the log, as ``nvidia-smi`` would show it; empty without a GPU."""
+        if self.meter is None:
+            return ""
+        try:
+            used, total = self.meter.used()
+        except Exception:
+            return ""
+        return f"  VRAM {used / 2**30:.1f}/{total / 2**30:.1f} GB"
+
+    def _shrink(self, times: int) -> bool:
+        """A training step ran out of memory: make the step smaller, so that the run carries on. The extra target
+        cells go first, then forecasts from the batch. False when there is nothing left to give up."""
+        self.optimizer.zero_grad(set_to_none=True)
+        if self.meter is not None:
+            self.meter.release()
+        batch, scale = self.cfg.batch_size, self.scale
+        if times > 8 or (batch <= 1 and scale <= 1.0):
+            return False
+        if scale > 1.0:
+            scale = 1.0 + 0.6 * (scale - 1.0) if scale > 1.1 else 1.0
+        else:
+            batch = max(1, min(batch - 1, int(batch * 0.9)))
+        log(f"stage {self.stage}: a step ran out of memory at batch {self.cfg.batch_size} and {self.scale:.2f} times "
+            f"the usual target cells; carrying on at batch {batch} and {scale:.2f} times")
+        self._adopt(batch, scale, bool(self.model.gradient_checkpointing), self.fit)
+        return True
+
     def run(self) -> dict:
         cfg = self.cfg
         budget = cfg.hours * 3600.0
@@ -401,23 +637,47 @@ class Trainer:
                     k: v.to(self.model.state_dict()[k].dtype) for k, v in self.ema.shadow.items()}})
             return {"step": self.step, "elapsed": self.elapsed, "history": self.history}
         self.pick_batch_size()
-        workers = _workers(cfg.workers)
         sampler = None
         if cfg.curriculum:
             from .training import RareEventSampler
 
             sampler = RareEventSampler.from_truth(self.train_starts, lambda h: self.builder.cmorph.targets(h))
-        data = BatchSet(self.builder, self.train_starts, cfg.batch_size, cfg.seed, sampler)
-        loader = torch.utils.data.DataLoader(
-            data, batch_size=None, sampler=range(self.step, cfg.max_steps), num_workers=workers,
-            pin_memory=self.device.type == "cuda", prefetch_factor=4 if workers else None,
-            persistent_workers=False, multiprocessing_context="fork" if workers else None)
+        ran_out = 0
+        try:
+            while True:
+                try:
+                    self._train(sampler, budget)
+                    break
+                except torch.OutOfMemoryError:
+                    ran_out += 1
+                    if not self._shrink(ran_out):
+                        raise
+        finally:                                       # whoever uses the builder next gets its usual target cells
+            self.builder.max_land, self.builder.ocean_targets = self._usual_cells
+        self._eval_and_keep()
+        self.save()
+        if self.ema is not None:                       # the averaged weights are the ones released and scored
+            self.model.load_state_dict({**self.model.state_dict(),
+                                        **{k: v.to(self.model.state_dict()[k].dtype) for k, v in self.ema.shadow.items()}})
+        if self.mirror is not None:
+            self.mirror.wait()
+        return {"step": self.step, "elapsed": self.elapsed, "best": self.best, "history": self.history}
+
+    def _train(self, sampler, budget: float) -> None:
+        """Train until the time budget or the step limit is reached. A step that runs out of memory raises, and
+        :meth:`run` starts this again at a smaller size."""
+        cfg = self.cfg
+        if self.meter is not None:                     # after a step ran out of memory, what it held is free by now
+            self.meter.release()
+        loader, workers, ready = self._loader(sampler)
         log(f"stage {self.stage}: {self.model.config.name} ({self.model.num_parameters() / 1e6:.1f}M parameters), "
-            f"batch {cfg.batch_size}, {workers} data workers, {len(self.train_starts):,} issue times, "
-            f"{cfg.hours - self.elapsed / 3600:.2f} h left of {cfg.hours:.2f} h")
-        last_save = last_eval = time.time()
+            f"batch {cfg.batch_size}, {self.builder.max_land:,} land and {self.builder.ocean_targets:,} sea cells a "
+            f"forecast at most, gradient checkpointing {'on' if self.model.gradient_checkpointing else 'off'}, "
+            f"learning rate x{self.lr_scale:.2f}, {workers} data workers each keeping {ready} batches ready, "
+            f"{len(self.train_starts):,} issue times, {cfg.hours - self.elapsed / 3600:.2f} h left of {cfg.hours:.2f} h")
+        last_save = last_eval = last_log = time.time()
         window, waited, began = [], 0.0, time.time()
-        t_prev = time.time()
+        t_prev, first = time.time(), True
         for batch in loader:
             got = time.time()
             waited += got - t_prev
@@ -428,13 +688,16 @@ class Trainer:
             t_prev = now
             self.step += 1
             window.append(metrics)
-            if self.step % cfg.log_every == 0:
+            # every ``log_every`` steps, and also after the first step and at least every five minutes: a step sized
+            # to a large GPU can take a while, and a silent log looks like a program that has stopped
+            if self.step % cfg.log_every == 0 or first or now - last_log > 300:
+                first, last_log = False, now
                 mean = {k: float(np.mean([m.get(k, np.nan) for m in window])) for k in window[-1]}
                 rate = len(window) * cfg.batch_size / max(now - began, 1e-6)
                 log(f"step {self.step:,}  loss {mean['loss']:.4f}  timing {mean['timing_nll']:.4f}  "
                     f"amount {mean.get('amount_nll', float('nan')):.3f}  brier {mean['brier']:.4f}  "
                     f"lr {mean['lr']:.2e}  {rate:.2f} forecasts/s  waiting for data {waited / max(now - began, 1e-6):.0%}"
-                    f"  {self.elapsed / 3600:.2f}/{cfg.hours:.2f} h")
+                    f"{self._memory_text()}  {self.elapsed / 3600:.2f}/{cfg.hours:.2f} h")
                 self.history.append({"step": self.step, "elapsed": self.elapsed, **{k: mean[k] for k in
                                      ("loss", "timing_nll", "brier") if k in mean}})
                 window, waited, began = [], 0.0, time.time()
@@ -446,14 +709,6 @@ class Trainer:
                 last_save = time.time()
             if self.elapsed >= budget or self.step >= cfg.max_steps:
                 break
-        self._eval_and_keep()
-        self.save()
-        if self.ema is not None:                       # the averaged weights are the ones released and scored
-            self.model.load_state_dict({**self.model.state_dict(),
-                                        **{k: v.to(self.model.state_dict()[k].dtype) for k, v in self.ema.shadow.items()}})
-        if self.mirror is not None:
-            self.mirror.wait()
-        return {"step": self.step, "elapsed": self.elapsed, "best": self.best, "history": self.history}
 
     def _eval_and_keep(self) -> None:
         if self.val_starts.size == 0:
@@ -566,6 +821,6 @@ def fit_calibration(data: dict) -> Calibrator:
     return Calibrator.fit(data["p"], data["wet"], data["known"], data["win_p"], data["win_y"], exceed_p, exceed_y)
 
 
-__all__ = ["BatchSet", "TrainConfig", "Trainer", "borrowed_climatology", "build_model", "fit_calibration",
+__all__ = ["BatchSet", "CudaMeter", "TrainConfig", "Trainer", "borrowed_climatology", "build_model", "fit_calibration",
            "grids_of", "hindcast", "load_model", "lr_factor", "nearest_target", "read_meta", "save_checkpoint",
            "station_points", "to_device"]

@@ -118,7 +118,7 @@ def cmd_now(args) -> None:
     """From nothing to the 14-day rain forecast for a country, in one command (:mod:`pluvium.quick`)."""
     from .blendlive import alert_summary
     from .frontier.model import FrontierBlend
-    from .quick import brief, forecast
+    from .quick import brief, by_area, forecast
 
     got = forecast(args.country, args.root, args.repo or None, time=args.time, learn=args.learn,
                    train=not args.no_train, handover=args.handover)
@@ -134,7 +134,14 @@ def cmd_now(args) -> None:
     if isinstance(model, FrontierBlend):
         print(handover_line(model))
     print()
-    print(brief(result, got["names"], got["population"], top=args.top, days=args.days, place=args.place))
+    areas = got.get("areas")                                    # each place's parish or province, if there is a town list
+    if args.parishes and areas is None:
+        print("this folder has no town list, so there are no parishes or provinces to group by")
+    elif args.parishes:                                         # every parish, or the ones named with --parish
+        print(by_area(result, areas, days=args.days, area=args.parish))
+    else:                                                       # the largest towns: of the country, or of --parish
+        print(brief(result, got["names"], got["population"], top=args.top, days=args.days, place=args.place,
+                    areas=areas, area=args.parish))
     print()
     alerts = alert_summary(result)
     if alerts:
@@ -267,8 +274,10 @@ def cmd_blend(args) -> None:
         la, lo = np.meshgrid(lat_g, lon_g, indexing="ij")
         lat, lon = la.ravel(), lo.ravel()
         names = [f"{a:.2f},{b:.2f}" for a, b in zip(lat, lon)]
+    from .quick import areas_of
+
     result = model.forecast(lat, lon, root / "live_archive", now=now)
-    out = write_table(result, names, root / f"blend_{result['day0']}.csv")
+    out = write_table(result, names, root / f"blend_{result['day0']}.csv", areas=areas_of(root))
     print(f"14-day blended forecast from {result['day0']} for {len(names):,} places -> {out}")
     print("runs used: " + ", ".join(f"{k} {v}Z" for k, v in result["runs"].items()))
     alerts = alert_summary(result)
@@ -335,6 +344,11 @@ def main(argv=None) -> None:
     p.add_argument("--root", default=None, help="folder for the country's files (default: ~/pluvium-<codes>)")
     p.add_argument("--repo", default=DEFAULT_REPO, help="Hub repository to look in for a trained blend ('' for none)")
     p.add_argument("--place", default=None, help="show the places whose name contains this, not the largest towns")
+    p.add_argument("--parishes", "--areas", action="store_true", dest="parishes",
+                   help="one block per parish (province, state): its typical place and the range across it")
+    p.add_argument("--parish", "--area", default=None, dest="parish",
+                   help="only this parish (province, state): its largest towns, or with --parishes its summary. "
+                        "'St Ann' and 'Saint Ann' both work")
     p.add_argument("--top", type=int, default=5, help="how many places to print")
     p.add_argument("--days", type=int, default=5, help="how many days to print (the table always has 14)")
     p.add_argument("--learn", action="store_true",

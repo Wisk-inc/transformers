@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.4.3 (November 2026)
+
+The GPU training starts, and fills the card.
+
+- The GPU training never started from a notebook cell. Every cell ran `python -m pluvium.program`, and
+  `pluvium/program.py` had no entry point, so in every release up to 0.4.2 that command ended at once with exit code
+  0. The cell then reported a finished program. Nothing was trained and the GPU stayed idle. `pluvium program` on
+  the command line always worked. The module now has its entry point, the cells start the program through
+  `pluvium program`, and they stop with an error if no stage was recorded. A test starts every module the cells and
+  documents start, in a real process.
+- The program held out 2022 by default, and the hourly ERA5 archive it reads ends on 31 December 2021. Staging 2022
+  stopped the run with an IndexError, after every training year had been downloaded. It now trains on 2015 to 2020
+  and holds out 2021, and reads the archive's first and last year when it starts. Found by running the program end
+  to end for the first time, on a CPU at its smallest size.
+- Before, training kept the batch that was fastest per forecast, tried no batch above 32, and always used gradient
+  checkpointing. Speed per forecast stops rising at a small batch, so on a large GPU most of the memory stayed
+  empty. Now each step is sized to 95% of the card by measuring (`pluvium.training.fit`): gradient checkpointing on
+  or off, whichever trains more forecasts per second; as many forecasts per step as fit; and, with what is left,
+  more of the area's cells scored per forecast.
+- The learning rate is unchanged up to a batch of 8 and grows with the square root of the batch above it, to at
+  most twice.
+- A step that runs out of memory no longer stops the run: the step is made smaller and training carries on.
+- The batches waiting in the machine's RAM are kept within 30% of it. A batch sized to a large GPU is large in RAM
+  too, and every loader worker holds several.
+- Held-out forecasts are scored at the usual cells whatever training is sized to, and their mean no longer depends
+  on how many are scored at a time.
+- Every progress line shows `VRAM used/total`. `PLUVIUM_VRAM_SHARE`, `PLUVIUM_VRAM=fastest` and `PLUVIUM_BATCH`
+  (or `--vram-share`, `--vram`, `--batch`) change the rule. A checkpoint from an earlier version is sized again
+  when it resumes.
+- Checked on simulated cards and on a CPU training run with a stand-in memory meter. Not yet run on a GPU by its
+  authors.
+- A failure in stage B no longer stops the program: the model trained in stage A is calibrated, scored and
+  released. A progress line is printed after the first step and at least every five minutes.
+
+Parishes.
+
+- `pluvium now --country JM --parishes` prints one block per parish (province or state elsewhere): the typical place
+  in it, and the range across its places. `--parish "St Ann"` prints the largest towns of one parish, or with
+  `--parishes` its summary alone. `St`, `St.` and `Saint` are read alike.
+- The forecast table has an `area` column after the place, holding its parish. GeoNames spells Jamaica's parishes
+  three ways (`Portland Parish`, `St. Elizabeth`, `Clarendon`); they are written one way.
+
 ## 0.4.2 (November 2026)
 
 Found by training a full year for Jamaica from an empty folder and publishing the result.
