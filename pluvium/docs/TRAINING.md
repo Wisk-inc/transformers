@@ -25,8 +25,39 @@ pluvium blend forecast --root ~/pluvium-JM
 ```
 
 `blend train` fits the design benchmarked in [FRONTIER_BENCHMARK.md](FRONTIER_BENCHMARK.md): components trained on
-every heavy day, the pool, the online weights, and the record-storm hand-over. `--classic` trains the first Blend
-instead. `--start` and `--end` change the training period.
+every heavy day, the pool, the online weights, and the record-storm hand-over. At the end it audits the hand-over on
+the training period's own forecasts and prints the verdict: kept, or switched off because the raw systems overcall
+heavy rain in this area. `--classic` trains the first Blend instead. `--start` and `--end` change the training
+period.
+
+The forecast table has one row per place and day: the chance of 1, 10, 25 and 50 mm, the median, 90th percentile and
+expected rain, how many raw systems call for 50 mm, the alert tier (watch, warning, extreme), whether the forecast is
+beyond the training record, and how rare the expected amount is at that place.
+
+The same steps as one cell for a notebook, with hurricanes included:
+[notebooks/pluvium_blend_cell.py](../notebooks/pluvium_blend_cell.py).
+
+```python
+COUNTRY = "JM"                              # ISO codes: "JM", "TT", "DO,HT", "PH", "KE" ...
+ROOT = "~/pluvium-JM"                       # working folder; needs about 5 GB
+
+import os, subprocess, sys
+
+def sh(cmd, check=True):
+    print(f"$ {cmd}", flush=True)
+    return subprocess.run(cmd, shell=True, check=check).returncode
+
+sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.3.0'")
+root = os.path.expanduser(ROOT)
+pluvium = f"{sys.executable} -m pluvium.cli"
+if not os.path.exists(f"{root}/area.json"):
+    sh(f"{pluvium} setup --country {COUNTRY} --root {root}")
+if not os.path.exists(f"{root}/blend/blend.json"):
+    sh(f"{pluvium} blend train --root {root}")              # about two hours the first time, mostly downloads
+sh(f"{pluvium} blend learn --root {root}", check=False)     # nothing to learn on the first day: that is fine
+sh(f"{pluvium} blend forecast --root {root}")
+sh(f"{pluvium} cyclone --root {root}", check=False)         # every tropical cyclone alive now
+```
 
 ## 2. Pluvium-500, the network (GPU)
 
@@ -108,8 +139,19 @@ built from, the tests, the papers and the benchmarks, in one commit.
 
 ```bash
 python -m pluvium.benchmarks.fullyear --archive ARCHIVE --truth TRUTH --out OUT        # the first full-year benchmark
+python -m pluvium.benchmarks.frontier_bench --archive ARCHIVE --truth TRUTH --out OUT  # the second
 python -m pluvium.benchmarks.cyclone_bench --decks DECKS --fields PRESSURE --out OUT   # hurricanes
 ```
 
-The frontier benchmark builds a store per place (`pluvium.frontier.store.build_store`), scores designs on it
-(`pluvium.frontier.evaluate.evaluate`), and writes its page with `scripts/doc_frontier.py`.
+The frontier benchmark builds a store per place (`pluvium.frontier.store.build_store`, about an hour per place on
+four cores, resumable) and scores every design on it (`pluvium.frontier.evaluate.evaluate`). Its page, the papers
+and the charts are then written from the result files, so every number in them is the data's:
+
+```bash
+python scripts/doc_frontier.py OUT/results FIRST EXPERIMENTS docs/FRONTIER_BENCHMARK.md
+python scripts/doc_papers.py OUT/results FIRST EXPERIMENTS docs/papers
+python scripts/chart_frontier.py OUT/results FIRST docs/img
+```
+
+`FIRST` is the folder of the first benchmark's results and `EXPERIMENTS` the folder of withheld-storm results
+(`pluvium.tails.withheld.withheld_experiment`, one JSON file per place).

@@ -10,7 +10,12 @@ Pluvium Blend as benchmarked on the frontier, for any country, every day.
 * **online weights**: the components and the pool are re-weighed after every verified day
   (:mod:`pluvium.pool.online`). The weights are part of the saved model and move on with :meth:`FrontierBlend.learn`;
 * **record storms**: a forecast outside anything the training period held is handed back, in part, to what the raw
-  systems say (:mod:`pluvium.tails.override`).
+  systems say (:mod:`pluvium.tails.override`), but only where an audit at training time finds that this does no
+  harm (:mod:`pluvium.tails.audit`). Where the raw systems overcall heavy rain, the calibration keeps the forecast.
+
+Its forecast table also says, for every place and day, which alert tier applies (:mod:`pluvium.tails.alerts`),
+whether the forecast is beyond the training record, and how rare the expected amount is at that place
+(:mod:`pluvium.tails.returns`).
 
 A model saved by :class:`pluvium.blendlive.BlendModel` loads as before; :func:`load_blend` returns whichever kind the
 folder holds.
@@ -30,11 +35,13 @@ from ..blendlive import BlendModel
 from ..pool import OnlineAggregator, fit_pool, predict_pool, run_online
 from ..pool.gated import GatedPool
 from ..sources.archive import ARCHIVE_SYSTEMS, DAYS, LIMIT, ArchiveReader
+from ..tails.audit import audit_handover
 from ..tails.consensus import raw_consensus
 from ..tails.override import agree_share_from, blend_raw, handover
+from ..tails.returns import ReturnLevels
 from ..tails.stratify import table_order
 from ..tails.support import Support
-from ..util import hour_to_datetime64, log
+from ..util import hour_of, hour_to_datetime64, log
 from .oof import components_for, fit_component, oof_rows, row_arrays, usable
 
 BANDS = (0, 5, 11)
@@ -49,14 +56,21 @@ def sigmoid(z: np.ndarray) -> np.ndarray:
 class FrontierBlend(BlendModel):
     def __init__(self, nets: dict, pool, systems: list, area_json: dict, clim: dict, grid: tuple, meta: dict,
                  models: dict, online: OnlineAggregator | None = None, support: Support | None = None,
-                 cells: tuple | None = None) -> None:
+                 cells: tuple | None = None, returns: ReturnLevels | None = None) -> None:
         super().__init__(nets, pool, systems, area_json, clim, grid, meta)
         self.models = models                # component -> the systems it reads, in the pool's order
         self.online, self.support = online, support
         self.cells = cells                  # (lat, lon) of the places it was trained at, where it keeps learning
+        self.returns = returns              # how rare an amount is at each grid cell (the grid flattened)
 
     def components(self) -> dict:
         return {k: v for k, v in self.models.items() if k in self.nets}
+
+    @property
+    def hands_over(self) -> bool:
+        """Whether record storms are handed to the raw systems: only where the audit at training found no harm in it
+        (:mod:`pluvium.tails.audit`). A model saved before the audit existed hands over."""
+        return self.support is not None and bool(self.meta.get("handover", {}).get("keep", True))
 
     # ------------------------------------------------------------------------------------- train --
     @classmethod
@@ -89,8 +103,12 @@ class FrontierBlend(BlendModel):
         run_online(online, p_exp, pres, rows["lead"], rows["y"], issued, rows["valid"] + 24 + latency_hours, weights)
         raw_mean = np.concatenate([table["raw_mean"][i][c] for i, c in order])
         support = Support.from_rows(raw_mean, weights, record_quantile)
+        # is the hand-over worth having here? asked of the training period's own out-of-fold forecasts
+        raw_p = np.concatenate([table["raw_p"][i][c] for i, c in order]).astype(np.float32)
+        verdict = audit_handover(p_exp[:, -1], raw_p, raw_mean, rows["y"], support, weights, rows["valid"] // 24)
+        log(f"blend: {verdict.line()}")
         info = {"components": list(models), "cells": int(n), "kind": "frontier", "latency_hours": latency_hours,
-                "learned_days": [], **(meta or {})}
+                "learned_days": [], "handover": verdict.to_json(), **(meta or {})}
         return cls(nets, pool, list(systems), area_json, clim, grid, info, models, online, support, cells)
 
     @classmethod
@@ -102,6 +120,8 @@ class FrontierBlend(BlendModel):
         clim = cls.grid_climatology(area, data["truth"], lat, lon, start, end)
         model = cls.from_table(table, len(cells), list(ARCHIVE_SYSTEMS), area.to_json(), clim, (lat, lon),
                                (cells.lat, cells.lon), max_rows, meta={"trained": [start, end], "runs": int(len(data["runs"]))})
+        days = np.arange(hour_of(start), hour_of(end), 24)              # how rare an amount is, from the same record
+        model.returns = ReturnLevels.fit(data["truth"].days(area.name, days).reshape(days.size, -1))
         model.save(root / "blend")
         return model
 
@@ -123,6 +143,8 @@ class FrontierBlend(BlendModel):
             "thresholds": B.THRESHOLDS.tolist(), "bands": list(BANDS), "online": online,
             "support": None if self.support is None else {"edge_mm": self.support.edge_mm, "width": self.support.width}},
             indent=1))
+        if self.returns is not None:
+            self.returns.save(d / "returns.npz")
         return d
 
     @classmethod
@@ -154,8 +176,9 @@ class FrontierBlend(BlendModel):
             name, m = key.rsplit("_", 1)
             clim.setdefault(int(m), {})[name] = z[key]
         models = {k: v for k, v in meta["models"].items() if k in nets}
+        returns = ReturnLevels.load(d / "returns.npz") if (d / "returns.npz").exists() else None
         return cls(nets, pool, meta["systems"], meta["area"], clim, (z["lat"], z["lon"]), meta["meta"], models, online,
-                   support, cells)
+                   support, cells, returns)
 
     # ---------------------------------------------------------------------------------- forecast --
     def experts(self, per: dict, clim: dict, lead: float, n: int) -> tuple:
@@ -178,12 +201,26 @@ class FrontierBlend(BlendModel):
         """P(rain >= THRESHOLDS) at ``n`` places: the pool, re-weighed online, with record storms handed over."""
         p_exp, present = self.experts(per, clim, lead, n)
         p = p_exp[:, -1] if self.online is None else self.online.combine(p_exp, present, np.full(n, int(round(lead))))
-        if self.support is not None and raw:
+        if self.hands_over and raw:
             p_raw, raw_mean = raw_consensus(raw, n)
             g = handover(self.support, raw_mean, agree_share_from(p_raw, HEAVY_INDEX))
             if g.max() > 1e-4:
                 p = blend_raw(p, p_raw, g)
         return p
+
+    def extras(self, p: np.ndarray, q: np.ndarray, raw: dict, lat: np.ndarray, lon: np.ndarray) -> dict:
+        """The alert tier, and two more: whether the raw systems call for more than anything in the training period
+        (``beyond_record``), and how rare the expected amount is at each place (``rarity_years`` and, in words,
+        ``rarity``)."""
+        out = super().extras(p, q, raw, lat, lon)
+        if self.support is not None and raw:
+            out["beyond_record"] = self.support.outside(raw_consensus(raw, lat.size)[1])
+        if self.returns is not None:
+            i, j = self._grid_index(lat, lon)
+            years = self.returns.period(q.mean(1), index=i * self.grid[1].size + j)
+            out["rarity_years"] = years
+            out["rarity"] = [self.returns.wording(x) for x in years]
+        return out
 
     # ------------------------------------------------------------------------------------- learn --
     def learn_rows(self, p_exp: np.ndarray, present: np.ndarray, lead: np.ndarray, y: np.ndarray) -> None:

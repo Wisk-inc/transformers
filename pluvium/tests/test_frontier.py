@@ -96,6 +96,27 @@ def test_evaluate_scores_designs_and_the_pool_beats_its_components(tmp_path):
     versus = res["versus"]["days 1-3"]["1"]
     assert versus["poor"]["delta_bs"] < 0 and versus["poor"]["ci95"][1] < 0   # better than it with confidence
     assert res["region"] == "place" and res["leads"]["2"]["stack"]["n"] > 0
+    assert res["audits"] == {}                                            # no design asked for one
+
+
+def test_an_audited_design_is_the_declared_one_or_the_one_without_handover(tmp_path):
+    from pluvium.frontier import report as R
+
+    store = make_store(tmp_path / "place")
+    common = dict(bands=(0, 5, 11), smooth=0.0, rows=4000, iters=40)
+    designs = [PoolDesign(name="stack", record=True, audit=True, record_quantile=0.99, **common),
+               PoolDesign(name="declared", record=True, record_quantile=0.99, **common), PoolDesign(name="pool", **common)]
+    res = evaluate(store, designs, components=False)
+    (verdict,) = res["audits"]["stack"]                                   # one refit, one verdict, from training rows
+    assert verdict["rows"] > 10 and verdict["days"] > 3 and verdict["edge_mm"] >= 20.0
+    row = res["groups"]["days 1-3"]
+    twin = "declared" if verdict["keep"] else "pool"                      # audited = one or the other, exactly
+    other = "pool" if verdict["keep"] else "declared"
+    assert row["stack"]["50"]["bss"] == row[twin]["50"]["bss"] and row["stack"]["crps"] == row[twin]["crps"]
+    assert row["stack"]["50"]["bss"] != row[other]["50"]["bss"]           # and the hand-over does change the forecast
+    table = R.audits({"place": res})
+    assert len(table) == 3 and ("yes" if verdict["keep"] else "no") in table[2]
+    assert R.audits({"place": {"audits": {}}}) == [] and "declared" in R.ABLATIONS
 
 
 def test_frontier_bench_writes_results_and_resumes(tmp_path):
@@ -113,8 +134,10 @@ def test_frontier_bench_writes_results_and_resumes(tmp_path):
     again = FB.evaluate_place(store.folder, out, designs=designs)              # everything is there: nothing is redone
     assert (out / "place.json").stat().st_mtime_ns == stamp and again["cells"] == res["cells"]
     top = FB.DESIGNS[0]
-    assert top.name == "stack" and top.online and top.record and top.bands == (0, 5, 11) and top.eta == 1.0
-    assert [d.name for d in FB.DESIGNS[1:]] == ["pool", "pool_online", "pool_record"]
+    assert top.name == "stack" and top.online and top.record and top.audit and top.bands == (0, 5, 11) and top.eta == 1.0
+    assert [d.name for d in FB.DESIGNS[1:]] == ["declared", "pool", "pool_online", "pool_record"]
+    declared = FB.DESIGNS[1]                                                   # the same, with the hand-over always on
+    assert declared.record and not declared.audit and (declared.online, declared.eta, declared.bands) == (True, 1.0, (0, 5, 11))
 
 
 def test_a_half_written_quarter_is_not_taken_for_a_quarter(tmp_path):

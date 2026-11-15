@@ -40,6 +40,14 @@ Pluvium. For each it gives how the failure is detected and what the system does,
 | Overconfident long range | Lead-time scores | Learned shrinkage of transitions towards climatology with lead | `engine/lead_film.py` |
 | One network over many systems learns combinations that do not carry over to a new season | Validation inside the training year: it lost to the best single system | Pluvium Blend pools each system's own post-processed forecast with about 70 weights fitted on weeks the components did not train on; it falls back towards its best component | `blend.py` (`StackPool`), `benchmarks/fullyear.py` |
 | An operational run is late or missing in daily use | No archive file for the newest run | The previous run is used at the matching lead; a system missing altogether drops out of the pool and the others are re-weighted | `blendlive.py` |
+| A storm larger than anything in the training period: calibration shrinks it (Hurricane Melissa: 66% against 83 to 100% from every raw system) | The raw consensus amount lies beyond the 99.9th percentile of the training forecasts | The forecast is handed back, in part, to what the raw systems say, in proportion to how far outside it lies and how many systems agree. The table flags it as beyond the record | `tails/support.py`, `tails/override.py`, `frontier/model.py` |
+| The raw systems overcall heavy rain in a place (mountains against a satellite truth), so handing over to them does harm | An audit at every training: the hand-over is applied to the training period's out-of-fold forecasts and its effect on the 50 mm Brier score is measured | Where it raised the score the hand-over is switched off for that place, and the verdict is printed and saved with the model | `tails/audit.py` |
+| A system gets better or worse during the year (an upgrade, a season it handles badly) | Each expert's Brier score on every verified day | Online weights move towards whoever has been right, per lead group and band of thresholds; a small share always returns to the prior so nobody is written off | `pool/online.py`, `pluvium blend learn` |
+| The truth for a day arrives late | A fixed delay | A day is learned from 48 hours after it ends, never earlier | `frontier/model.py` |
+| Heavy rain is rare, so a uniform sample learns it from noise | Counts of 50 mm rows | Every heavy row is kept in training and the rest thinned, with weights that keep the chances unbiased | `tails/stratify.py` |
+| A tropical cyclone is lost by a model's member (it weakens, merges, or leaves the grid) | No closed low near the expected position | That member's track stops there; an ensemble's mean position is used only where 40% of members still carry the storm | `cyclone/tracker.py`, `cyclone/consensus.py` |
+| One system's pressure fields arrive after the others | Systems missing from a cached case | The case is re-tracked for the systems that have since arrived | `cyclone/tracks.py` |
+| Hurricane consensus weights from past seasons age as models are upgraded | Errors of every forecast that has verified | Weights are learned through the season from the running error covariance, starting from a shipped prior and replaying the last ten days | `cyclone/learner.py`, `cyclone/minvar.py`, `cyclone/live.py` |
 | The network cannot run (bad checkpoint, no GPU, broken inputs) | Any exception in the forecast | A statistical fallback forecast is issued, labelled as such | `guard/fallback.py`, `forecast.py` |
 | Satellite truth under-reports downpours | Learned confusion matrices | Training never takes an instrument's word as truth | `losses.py`, `chain.py` |
 
@@ -53,6 +61,9 @@ Pluvium. For each it gives how the failure is detected and what the system does,
 | A model that drifts as seasons change | Online verification against airports | Corrections pulled back towards none unless errors repeat | `online.py` |
 | A half-written forecast read by a user | Atomic publish | A new folder becomes `latest` only when complete | `ops/loop.py` |
 | Flood risk taken as a warning | Explicit labelling | Flood levels are a rule, not verified against flood reports. CAP alerts have status "Exercise" | `flood.py`, `render/alerts.py` |
+| A smooth long-range map taken for a picture of the day | Sharpness of the expected amount falls with lead | Scenarios: calibrated amounts arranged like the ECMWF ensemble's members, each as varied as weather | `scenarios/ecc.py` |
+| A return period quoted far beyond what the record can support | The record's length | Beyond four times the record the wording is only "rarer than once in N years" | `tails/returns.py` |
+| A hurricane track read as a line | The spread of the systems and their members | A circle sized to hold the centre two times in three, and the chance of the centre passing within 150 km of each place | `cyclone/cone.py`, `cyclone/approach.py` |
 
 ## Known limits that are not handled
 
@@ -61,3 +72,7 @@ Pluvium. For each it gives how the failure is detected and what the system does,
 * The flood rule and its thresholds are not verified against flood reports.
 * Driving models' own biases in a new season are only corrected as fast as airport reports reveal them.
 * Live "rain now" outside radar coverage comes from GOES infrared, which is cruder than the CMORPH used in training.
+* Where the audit switches the record-storm hand-over off, a storm beyond the training record is forecast by the
+  calibration alone, which shrinks it. The table still flags it and counts the raw systems that call for 50 mm.
+* Pluvium Cyclone forecasts the track only: no intensity, size, wind, surge or rain. It follows storms that already
+  exist and are named in the National Hurricane Center's decks; it does not forecast formation.

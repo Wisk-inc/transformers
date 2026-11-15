@@ -6,22 +6,48 @@ The results come from :func:`pluvium.frontier.evaluate.evaluate` (one per place)
 benchmark's, so its scoreboard reads them too. Three things are added here:
 
 * **before and after**: the first benchmark's Blend against the new one, place by place, for any score;
-* **ablation**: the pool alone, with the online layer, with the record-storm hand-over, and with both, so the worth of
-  each part is on the page, losses included;
-* **the online weights**: where the weight went over the year.
+* **ablation**: the pool alone, with the online layer, with the record-storm hand-over, with both as first declared,
+  and with the hand-over audited, so the worth of each part is on the page, losses included;
+* **the online weights**: where the weight went over the year;
+* **the audits**: where the hand-over was kept and where it was switched off, and on what evidence.
 """
 
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 
 import numpy as np
 
 from ..benchmarks import fullyear as F
 
-ABLATIONS = ("pool", "pool_online", "pool_record")
-PARTS = (("pool", "Pool alone"), ("pool_online", "Pool + online weights"), ("pool_record", "Pool + record-storm hand-over"),
-         ("stack", "All three (Pluvium Blend)"))
+#: the benchmark's places, in the order the pages show them, with short names
+PLACE_ORDER = ("jamaica", "caribbean", "maritime", "alps", "pacific_nw", "great_plains", "andes_south")
+PLACE_NAMES = {"jamaica": "Jamaica", "caribbean": "Caribbean", "maritime": "Maritime Continent", "alps": "Alps",
+               "pacific_nw": "US Pacific Northwest", "great_plains": "US Great Plains", "andes_south": "Southern Andes"}
+#: scored before the hand-over audit existed, and scored after it was fixed
+SEEN_FIRST = ("caribbean", "maritime", "alps", "pacific_nw")
+SCORED_AFTER = ("great_plains", "andes_south", "jamaica")
+ABLATIONS = ("declared", "pool", "pool_online", "pool_record")
+PARTS = (("pool", "Pool alone"), ("pool_online", "Pool + online weights"),
+         ("pool_record", "Pool + hand-over, always on"),
+         ("declared", "Pool + online weights + hand-over, always on (as first declared)"),
+         ("stack", "Pool + online weights + audited hand-over (Pluvium Blend)"))
+
+
+def load_results(folder, suffix: str = "", places=PLACE_ORDER) -> dict:
+    """``{place: result}`` for every place whose ``{place}{suffix}.json`` is in ``folder``, in the pages' order."""
+    folder = Path(folder)
+    return {k: json.loads((folder / f"{k}{suffix}.json").read_text()) for k in places if (folder / f"{k}{suffix}.json").exists()}
+
+
+def join_names(places, titles: dict = PLACE_NAMES) -> str:
+    """"A", "A and B" or "A, B and C" from place keys."""
+    words = [titles.get(p, p) for p in places]
+    if not words:
+        return "none"
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
 
 
 def without(results: dict, drop=ABLATIONS) -> dict:
@@ -137,4 +163,87 @@ def online_weights(res: dict, design: str = "stack") -> list:
     return lines
 
 
-__all__ = ["ABLATIONS", "PARTS", "ablation", "before_after", "best_rival", "online_weights", "tally", "without"]
+def kept(res: dict, design: str = "stack") -> list:
+    """The hand-over audit's verdict at each refit of a place's result: ``[True, False, ...]``."""
+    return [bool(a["keep"]) for a in res.get("audits", {}).get(design, [])]
+
+
+def handover_three_ways(results: dict, group: str, titles: dict | None = None, t: str = "50") -> list:
+    """Brier skill at ``t`` mm with no hand-over, with it always on, and audited, place by place, with the mean.
+    Bold is the best of the three in a row."""
+    names = ("pool_online", "declared", "stack")
+    lines = ["| Place | No hand-over | Always on (as first declared) | Audited (Pluvium Blend) | Kept at the refits |",
+             "|---|---|---|---|---|"]
+    cols = {m: [] for m in names}
+    for place, res in results.items():
+        vals = {m: _cell(res["groups"][group].get(m), "bss", t) for m in names}
+        if any(v != v for v in vals.values()):
+            continue
+        for m, v in vals.items():
+            cols[m].append(v)
+        best = max(vals.values())
+        cells = [f"**{vals[m]:+.4f}**" if vals[m] == best else f"{vals[m]:+.4f}" for m in names]
+        verdicts = kept(res)
+        lines.append(f"| {(titles or F.REGION_TITLES).get(place, place)} | " + " | ".join(cells)
+                     + f" | {sum(verdicts)} of {len(verdicts)} |")
+    if cols["stack"]:
+        lines.append("| **Mean** | " + " | ".join(f"{np.mean(cols[m]):+.4f}" for m in names) + " | |")
+    return lines
+
+
+def audit_agreement(results: dict, group: str = "days 1-3", places=None, t: str = "50") -> tuple:
+    """In how many places the audit's first verdict had the sign of what the hand-over then did in the test year
+    (Brier skill at ``t`` mm: always on against none). Returns ``(agree, places counted)``."""
+    agree = n = 0
+    for place, res in results.items():
+        if places is not None and place not in places:
+            continue
+        verdicts = kept(res)
+        did = _cell(res["groups"][group].get("declared"), "bss", t) - _cell(res["groups"][group].get("pool_online"), "bss", t)
+        if not verdicts or did != did:
+            continue
+        n += 1
+        agree += int(verdicts[0] == (did >= 0))
+    return agree, n
+
+
+def rarity_lines(path, day: str = "2025-10-28", place: str = "Jamaica") -> list:
+    """A paragraph on how rare a day's rain was, from a return-period file: ``{"span", "years", "horizon", "places",
+    "level_mm": {years: mm}, "days": {day: {"share_ge_1y", "share_ge_5y", "share_beyond_horizon", "median_period_y"}}}``
+    (:class:`pluvium.tails.returns.ReturnLevels` fitted on the record before the test year). Empty if there is none."""
+    path = Path(path)
+    if not path.exists():
+        return []
+    r = json.loads(path.read_text())
+    d = r["days"].get(day)
+    if not d:
+        return []
+    return [f"**How rare was it?** A generalised Pareto fit to {place}'s CMORPH record from {r['span'][0][:7]} to "
+            f"{r['span'][1][:7]} ({r['years']:.1f} years, {r['places']} places, all before the test year) puts the daily "
+            f"amount reached once a year at {r['level_mm']['1']:.0f} mm on average over the places, and once in five years "
+            f"at {r['level_mm']['5']:.0f} mm. On {day}, {100 * d['share_ge_1y']:.0f}% of places had more than their "
+            f"once-a-year amount, {100 * d['share_ge_5y']:.0f}% more than their once-in-five-years amount, and "
+            f"{100 * d['share_beyond_horizon']:.0f}% an amount rarer than once in {r['horizon']:.0f} years, which is as far "
+            f"as a record of that length can say. The median place had a day expected about once in "
+            f"{d['median_period_y']:.0f} years. These are rough figures from five years of satellite estimates.", ""]
+
+
+def audits(results: dict, design: str = "stack", titles: dict | None = None) -> list:
+    """One row per place: what the hand-over audit found on the training period at the first refit, and in how many
+    of the refits the hand-over was kept."""
+    lines = ["| Place | Training rows beyond the edge (days) | Edge, mm | Brier at 50 mm on them: calibrated -> handed over | "
+             "Resamples in which it did harm | Hand-over kept at refits |", "|---|---|---|---|---|---|"]
+    for place, res in results.items():
+        rows = res.get("audits", {}).get(design)
+        if not rows:
+            continue
+        a = rows[0]
+        kept = "".join("yes " if r["keep"] else "no " for r in rows).strip().replace(" ", ", ")
+        lines.append(f"| {(titles or F.REGION_TITLES).get(place, place)} | {a['rows']:,} ({a['days']}) | {a['edge_mm']:.0f} | "
+                     f"{a['without']:.5f} -> {a['handed']:.5f} | {100 * a['chance_of_harm']:.0f}% | {kept} |")
+    return lines if len(lines) > 2 else []
+
+
+__all__ = ["ABLATIONS", "PARTS", "PLACE_NAMES", "PLACE_ORDER", "SCORED_AFTER", "SEEN_FIRST", "ablation", "audit_agreement",
+           "audits", "before_after", "best_rival", "handover_three_ways", "join_names", "kept", "load_results",
+           "online_weights", "rarity_lines", "tally", "without"]

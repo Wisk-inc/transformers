@@ -3,42 +3,43 @@
 
     python scripts/doc_frontier.py RESULTS FIRST EXPERIMENTS docs/FRONTIER_BENCHMARK.md
 
-``RESULTS`` holds, per place, ``{place}.json`` (from :func:`pluvium.frontier.evaluate.evaluate`), ``{place}_tail.json``
-and ``{place}_scenarios.json``. ``FIRST`` holds the first benchmark's ``{place}.json``. ``EXPERIMENTS`` holds the
-withheld-storm results ``{place}.json`` (optional).
+``RESULTS`` holds, per place, ``{place}.json`` (from :func:`pluvium.frontier.evaluate.evaluate`), ``{place}_tail.json``,
+``{place}_scenarios.json`` and, for the US places, ``{place}_winter_DJF.json``. ``FIRST`` holds the first benchmark's
+``{place}.json``. ``EXPERIMENTS`` holds the withheld-storm results ``{place}.json`` (optional).
 """
-import json
 import sys
 from pathlib import Path
 
 import numpy as np
 
 from pluvium.benchmarks import fullyear as F
-from pluvium.benchmarks import scenario_bench, tail_bench
+from pluvium.benchmarks import scenario_bench, tail_bench, winter_bench
 from pluvium.frontier import report as R
 
 results_dir, first_dir, experiments_dir, out = (Path(p) for p in sys.argv[1:5])
-ORDER = ("jamaica", "caribbean", "maritime", "alps", "pacific_nw", "great_plains", "andes_south")
-SHORT = {"jamaica": "Jamaica", "caribbean": "Caribbean", "maritime": "Maritime Continent", "alps": "Alps",
-         "pacific_nw": "US Pacific Northwest", "great_plains": "US Great Plains", "andes_south": "Southern Andes"}
+ORDER, SHORT = R.PLACE_ORDER, R.PLACE_NAMES
 WINTER = {"alps": "DJF", "pacific_nw": "DJF", "great_plains": "DJF", "andes_south": "JJA"}
-
-
-def load(folder: Path, suffix: str = "") -> dict:
-    return {k: json.loads((folder / f"{k}{suffix}.json").read_text()) for k in ORDER if (folder / f"{k}{suffix}.json").exists()}
-
+#: the places scored before the hand-over audit existed, and the places scored after it was fixed
+SEEN, AFTER = R.SEEN_FIRST, R.SCORED_AFTER
+load, names = R.load_results, R.join_names
 
 new, old = load(results_dir), load(first_dir)
 tails, scenarios = load(results_dir, "_tail"), load(results_dir, "_scenarios")
+winters = load(results_dir, "_winter_DJF")
 withheld = load(experiments_dir) if experiments_dir.exists() else {}
 old = {k: v for k, v in old.items() if k in new}
-rivals_only = R.without(new)
 G = list(F.LEAD_GROUPS)
+seen = [p for p in ORDER if p in new and p in SEEN]
+after = [p for p in ORDER if p in new and p in AFTER]
 
 
 def count(key, t, higher=True, groups=None, season=None, places=None):
     use_new = {k: v for k, v in new.items() if places is None or k in places}
     return R.tally(old, use_new, key, t, higher, groups, season)
+
+
+def value(place, model, key, t, g):
+    return F._value(new[place]["groups"][g].get(model), key, t)
 
 
 def mean_of(results, model, key, t, g, season=None):
@@ -121,6 +122,61 @@ def melissa_rows() -> list:
     return lines
 
 
+def kept(place: str) -> list:
+    """The audit's verdict at each refit."""
+    return R.kept(new[place])
+
+
+def weak_rows() -> list:
+    """Where the new Blend is still behind something, from the data."""
+    lines = []
+    behind = []
+    for place in new:
+        for g in G:
+            row = new[place]["groups"][g]
+            mine = F._value(row.get("stack"), "bss", "50")
+            rival, who = R.best_rival(row, "bss", "50", True)
+            if mine == mine and rival == rival and mine < rival:
+                behind.append((rival - mine, place, g, who))
+    behind.sort(reverse=True)
+    total = sum(1 for p in new for g in G if value(p, "stack", "bss", "50", g) == value(p, "stack", "bss", "50", g))
+    if behind:
+        worst = "; ".join(f"{SHORT[p]} {g} ({gap:.3f} behind {F.LABELS.get(str(w).replace('_raw', ''), w)})" for gap, p, g, w in behind[:4])
+        lines.append(f"- **Heavy rain is not won everywhere.** At 50 mm the Blend is behind some other system in "
+                     f"{len(behind)} of {total} place and lead-group cells. The largest gaps: {worst}.")
+    acc = []
+    for place in new:
+        row = new[place]["groups"][G[-1]]
+        mine = F._value(row.get("stack"), "acc", None)
+        rival, who = R.best_rival(row, "acc", None, True)
+        if mine == mine and rival == rival and mine < rival:
+            acc.append((rival - mine, place, mine, rival, who))
+    acc.sort(reverse=True)
+    if acc:
+        text = "; ".join(f"{SHORT[p]} {m:+.2f} against {r:+.2f} ({F.LABELS.get(str(w).replace('_raw', ''), w)}"
+                         f"{' raw' if str(w).endswith('_raw') else ''})" for _, p, m, r, w in acc[:4])
+        lines.append(f"- **The pattern of the expected amount at long range.** On days 11-14 the anomaly correlation of "
+                     f"the Blend's expected amount is behind another system in {len(acc)} of {len(new)} places: {text}. A "
+                     "calibrated expected amount is smooth by construction, and a raw model's field keeps its pattern "
+                     "even when the pattern is in the wrong place. A correction that traded RMSE for this score was "
+                     "tested and not adopted ([WHAT_DID_NOT_WORK.md](WHAT_DID_NOT_WORK.md)).")
+    far = [(SHORT[p], value(p, "stack", "bss", "1", G[-1])) for p in new]
+    far = [(n, v) for n, v in far if v == v]
+    if far:
+        lines.append("- **Days 11-14 carry little skill for anyone.** Brier skill at 1 mm on days 11-14: "
+                     + ", ".join(f"{n} {v:+.3f}" for n, v in far) + ". Zero is the climatology.")
+    off = [p for p in new if kept(p) and not all(kept(p))]
+    if off:
+        lines.append(f"- **The hand-over is not universal.** In {names(off)} the audit switched it off for at least "
+                     "part of the year: there the raw systems overcall heavy rain against this truth, and a record "
+                     "storm will be forecast by the calibration alone, which shrinks it.")
+    lines.append("- **The truth is one satellite product.** CMORPH underestimates frozen and orographic precipitation "
+                 "and the heaviest rain. Winter was scored against radar and gauges for the two US places only.")
+    lines.append("- **A year already seen.** The test year is the one on which the weak spots were found. A fresh year "
+                 "is the test that counts, and it does not exist yet.")
+    return lines
+
+
 def place_table(place: str) -> list:
     res = new[place]
     lines = [f"### {F.REGION_TITLES.get(place, place)}", "", f"{res['cells']:,} places.", "",
@@ -149,6 +205,7 @@ def place_table(place: str) -> list:
 n_places = len(new)
 c50 = count("bss", "50")
 c50_short = count("bss", "50", groups=["days 1-3"])
+c50_after = count("bss", "50", places=after)
 c1 = count("bss", "1")
 n_conf, better_conf, worse_conf = confident("50", G)
 n1, better1, worse1 = confident("1", G[:2])
@@ -156,6 +213,11 @@ m50 = {g: (mean_of(old, "top", "bss", "50", g), mean_of(new, "stack", "bss", "50
 rmse = count("rmse", None, False)
 acc = count("acc", None, True)
 crps = count("crps", None, False)
+always = [p for p in new if kept(p) and all(kept(p))]
+never = [p for p in new if kept(p) and not any(kept(p))]
+mixed = [p for p in new if kept(p) and any(kept(p)) and not all(kept(p))]
+agree_all, n_all = R.audit_agreement(new, G[0])
+agree_after, n_after = R.audit_agreement(new, G[0], after)
 
 lines = [
     "# Pluvium Blend on the frontier: the second full-year benchmark", "",
@@ -167,8 +229,12 @@ lines = [
     "this is a second look at a year already seen, not a fresh test.",
     "- **To keep it honest**, every design choice was made inside the training year (April 2024 to March 2025), by "
     "cross-validation or by forecasting its later months from its earlier ones. The design was written down before "
-    "the test year was scored, and scored once. The parts are shown separately below, including where they cost "
-    "something.",
+    "the test year was scored. The parts are shown separately below, including where they cost something.",
+    f"- **One thing was changed after scoring began.** The design as written down handed every record storm to the raw "
+    f"systems. The first four places scored ({names(seen) if seen else 'none'}) showed that this hurts where the raw "
+    "systems overcall heavy rain. An audit was then added that decides, from training data only, whether a place uses "
+    f"the hand-over. The other places ({names(after) if after else 'none'}) were scored after the audit was fixed. "
+    "Both designs are scored everywhere and shown side by side.",
     "- **Truth is CMORPH**, a satellite estimate. It is weak on frozen precipitation and on the heaviest rain.", "",
     "## What changed", "",
     "1. **Components see every heavy day.** Each post-processing network is trained on all rows with observed or "
@@ -178,13 +244,21 @@ lines = [
     "delay for the truth to arrive. One learning rate, chosen on the training year.",
     "4. **Record storms.** A forecast outside anything in the training period is handed back, in part, to what the "
     "raw systems say.",
-    "5. **Scenarios.** Calibrated amounts are arranged in space like the ECMWF ensemble's members, so each scenario "
+    "5. **The hand-over is audited.** At every refit the hand-over is applied to the training period's own "
+    "out-of-fold forecasts. It is used only if it did not raise the Brier score at 50 mm there.",
+    "6. **Scenarios.** Calibrated amounts are arranged in space like the ECMWF ensemble's members, so each scenario "
     "is as varied as real weather.", "",
     "## The short version", "",
-    f"- **Heavy rain (50 mm).** Brier skill improved in {c50['improved']} of {c50['cells']} place and lead-group cells, "
-    f"and in {c50_short['improved']} of {c50_short['cells']} on days 1-3. Mean skill over the places on days 1-3 went "
-    f"from {m50[G[0]][0]:+.4f} to {m50[G[0]][1]:+.4f}. The new Blend leads every other system at 50 mm in "
-    f"{c50['new_leads']} of {c50['cells']} cells (the first led in {c50['old_leads']}).",
+    f"- **Heavy rain (50 mm).** Brier skill improved on the first Blend in {c50['improved']} of {c50['cells']} place and "
+    f"lead-group cells, and in {c50_short['improved']} of {c50_short['cells']} on days 1-3. Mean skill over the places "
+    f"on days 1-3 went from {m50[G[0]][0]:+.4f} to {m50[G[0]][1]:+.4f}. The new Blend leads every other system at "
+    f"50 mm in {c50['new_leads']} of {c50['cells']} cells (the first led in {c50['old_leads']}).",
+]
+if after:
+    lines.append(f"- **In the places scored after the design was final** ({names(after)}), 50 mm skill improved on the "
+                 f"first Blend in {c50_after['improved']} of {c50_after['cells']} cells, and the new Blend leads every "
+                 f"other system in {c50_after['new_leads']} (the first: {c50_after['old_leads']}).")
+lines += [
     f"- **Against each post-processed system at 50 mm**, {better_conf} of {n_conf} comparisons are better with 95% "
     f"confidence and {worse_conf} worse.",
     f"- **Rain or no rain (1 mm).** The new Blend leads in {c1['new_leads']} of {c1['cells']} cells (the first: "
@@ -194,6 +268,17 @@ lines = [
     f"{rmse['new_leads']} of {rmse['cells']} (was {rmse['old_leads']}); **ACC** in {acc['new_leads']} of {acc['cells']} "
     f"(was {acc['old_leads']}).",
 ]
+if n_all:
+    verdicts = []
+    if always:
+        verdicts.append(f"kept it all year in {names(always)}")
+    if never:
+        verdicts.append(f"switched it off all year in {names(never)}")
+    if mixed:
+        verdicts.append(f"changed its verdict during the year in {names(mixed)}")
+    lines.append(f"- **The hand-over audit** {'; '.join(verdicts)}. Its first verdict had the sign of what the hand-over "
+                 f"then did in the test year in {agree_all} of {n_all} places"
+                 + (f", and in {agree_after} of the {n_after} scored after it was fixed." if n_after else "."))
 if scenarios:
     def sc(kind, key, g):
         vals = [r["groups"][g][kind][key] for r in scenarios.values() if r["groups"].get(g, {}).get(kind)]
@@ -206,6 +291,7 @@ if scenarios:
         f"averaged over two-degree boxes is {sc('coupled', 'areal_crps', last):.2f} mm against "
         f"{sc('uncoupled', 'areal_crps', last):.2f} for uncoupled draws and {sc('raw', 'areal_crps', last):.2f} for the "
         f"raw ensemble (means over {len(scenarios)} places).")
+lines.append("- **What is still weak** is listed [near the end](#what-is-still-weak).")
 lines += ["", "## Scoreboard", "",
           f"In how many of the {n_places} places the new Blend beat every other system, raw and post-processed, on each "
           "score. In brackets: the first Blend's count. Pluvium's own variants are not counted as rivals.", ""]
@@ -216,22 +302,43 @@ lines += ["", "## Weak spot 1: the heavy tail", "",
 lines += R.before_after(old, new, "bss", "50")
 if tails:
     lines += [""] + tail_bench.markdown([tails[k] for k in ORDER if k in tails]).splitlines()
+lines += ["", "### The hand-over: staged, audited, and scored both ways", ""]
 if withheld:
-    lines += ["", "**Storms withheld from training** (training year only). The wettest days were taken out of training, "
-              "then forecast. The calibrated forecast shrinks them; the hand-over gives some of it back and leaves "
-              "ordinary days alone.", "",
+    lines += ["**Storms withheld from training** (training year only). The wettest days were taken out of training, "
+              "then forecast. The calibrated forecast shrinks them. The hand-over gives some of that back where the raw "
+              "systems are the better guide, and does harm where they are not. Ordinary days are left alone.", "",
               "| Place | Withheld days | Observed mean, mm | Calibrated amount, mm | Brier at 50 mm: calibrated -> with hand-over | "
-              "Brier at 100 mm | Ordinary days handed over |", "|---|---|---|---|---|---|---|"]
+              "Raw systems alone | Ordinary days handed over |", "|---|---|---|---|---|---|---|"]
     for place, w in withheld.items():
         label = "q0.999 w0.69"
         s, c = w["storm"], w["control"]
+        better = s[label]["brier"]["50"] < s["calibrated"]["brier"]["50"]
         lines.append(f"| {SHORT.get(place, place)} | {', '.join(w['storms'])} | {s['observed_mean_mm']:.1f} | "
-                     f"{s['calibrated']['amount_mm']:.1f} | {s['calibrated']['brier']['50']:.4f} -> {s[label]['brier']['50']:.4f} | "
-                     f"{s['calibrated']['brier']['100']:.4f} -> {s[label]['brier']['100']:.4f} | "
-                     f"{100 * c[label]['rows_handed_over']:.2f}% |")
-lines += ["", "## Weak spot 2: winter in mid-latitude climates", "",
+                     f"{s['calibrated']['amount_mm']:.1f} | {s['calibrated']['brier']['50']:.4f} -> "
+                     f"{'**' if better else ''}{s[label]['brier']['50']:.4f}{'**' if better else ''} | "
+                     f"{s['raw']['brier']['50']:.4f} | {100 * c[label]['rows_handed_over']:.2f}% |")
+    lines.append("")
+audit_table = R.audits(new, titles=SHORT)
+if audit_table:
+    lines += ["**The audit** (training data only, at the first refit). The hand-over is applied to the training "
+              "period's out-of-fold forecasts and kept unless it raised the Brier score at 50 mm. The last column is the "
+              "verdict at each of the four quarterly refits.", ""] + audit_table + [""]
+    for g in G[:2]:
+        lines += [f"**Brier skill at 50 mm in the test year, {g}**, three ways. Bold is the best of the three.", ""]
+        lines += R.handover_three_ways(new, g, SHORT) + [""]
+lines += ["## Weak spot 2: winter in mid-latitude climates", "",
           "Brier skill score for 1 mm or more in each place's winter: first Blend -> new Blend (best other system and "
           "which). Bold where the new Blend is ahead.", ""] + winter_rows()
+if winters:
+    lines += ["", "### Winter against a second truth", "",
+              "CMORPH is weak on frozen precipitation, so a winter loss could be the forecast's or the truth's. The two "
+              "US places were scored again for December to February against MRMS, the US radar and gauge analysis, on "
+              "the same rows. Everything was trained on CMORPH, so every system carries the same handicap against "
+              "MRMS. What matters is whether the order between systems changes.", ""]
+    labels = {k: v + ", post-processed" for k, v in F.LABELS.items()}
+    for place in ORDER:
+        if place in winters:
+            lines += winter_bench.markdown(winters[place], labels).splitlines() + [""]
 if scenarios:
     lines += ["", "## Weak spot 3: structure at long range", "",
               "The map of expected amounts is smooth at long range, and should be: nobody knows where the rain band will "
@@ -242,6 +349,8 @@ lines += ["", "## What each part added", ""] + R.ablation(new)
 mel = melissa_rows()
 if mel:
     lines += ["## Hurricane Melissa over Jamaica", ""] + mel + [""]
+    lines += R.rarity_lines(experiments_dir / "jamaica_returns.json")
+lines += ["## What is still weak", ""] + weak_rows() + [""]
 lines += ["## Every place", "",
           "Each cell: the new Blend (best other system and which). Bold where the Blend is ahead.", ""]
 for place in ORDER:

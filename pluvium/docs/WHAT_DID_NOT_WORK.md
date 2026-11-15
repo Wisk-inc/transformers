@@ -40,8 +40,24 @@ was not adopted. The long-range anomaly correlation in mid-latitudes remains a w
 **A smooth gate for record storms.** The first hand-over used a sigmoid, which is never exactly zero: it touched
 16% of ordinary training rows. It is now a hinge that is exactly zero inside the range of the training forecasts.
 
-**The hand-over is not free.** Its effect on the test year is shown part by part in the benchmark ("What each part
-added"), including the places and scores where it cost something (test data).
+**Handing every record storm to the raw systems (test data).** The design written down before the test year handed
+over everywhere. In the two mountain regions that was wrong. On days 1-3 at 50 mm the Alps scored 0.080 with the
+hand-over and 0.091 without, and the US Pacific Northwest 0.288 against 0.307. The raw systems overcall heavy rain
+over mountains against a satellite truth, so the calibration was right to discount them. The staged-storm experiment
+had been run on two regions before the test, and both were regions where the hand-over helps. Run on all seven, it
+shows the problem in training data: with the Alps' four largest storms withheld, the hand-over made the 50 mm score
+worse (0.0781 against 0.0770). The remedy is the audit described in the benchmark: the hand-over is applied to the
+training period's own out-of-fold forecasts and used only where it does no harm there.
+
+**Discounting the raw systems before handing over.** A gentler remedy was tried first: scale the raw chances by how
+often they verified at the top of the training forecasts, and never let the hand-over lower a chance. On the withheld
+storms it still did harm in the Alps (0.0776 against 0.0770 calibrated) and gave away most of the gain in the
+Southern Andes (0.0819 against 0.0782 for the plain hand-over) and part of it in the Great Plains, the Caribbean
+and Jamaica. A switch decided by an audit is simpler and did better. The code stays in `pluvium.tails.override`
+(`tail_trust`) and is not used.
+
+**The hand-over is not free even where it is kept.** Its effect on the test year is shown part by part in the
+benchmark ("What each part added"), including the scores where it cost something (test data).
 
 ## Pluvium Cyclone
 
@@ -72,6 +88,7 @@ lead on the East Pacific 2025 test season (test data).
 
 ## The lesson that repeats
 
-Three times a choice that looked right on a small or already-seen sample did not hold on new data: season gates,
-bias correction, and the Atlantic win over the official forecast. In each case the fix was the same. Decide on data
-kept apart, write the decision down, then look once.
+Four times a choice that looked right on a small or already-seen sample did not hold on new data: season gates,
+bias correction, the Atlantic win over the official forecast, and a hand-over tested on two regions that both
+happened to like it. In each case the fix was the same. Decide on data kept apart, write the decision down, then
+look once. And where a rule can be checked on every place's own training data, let each place check it.

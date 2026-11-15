@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pluvium"
-version = "0.2.0"
-description = "Rain forecasts for every town, in any country: hour by hour for three days and daily for 14, blending ECMWF, NOAA and AI weather models, on the NatureV1 / iHELIX engine"
+version = "0.3.0"
+description = "Rain forecasts for every town, in any country: hour by hour for three days and daily for 14, blending ECMWF, NOAA and AI weather models, with hurricane tracks from the same systems, on the NatureV1 / iHELIX engine"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -13,7 +13,8 @@ license-files = ["LICENSE"]
 authors = [{ name = "Nathan" }]
 keywords = ["weather", "rain", "precipitation", "forecasting", "caribbean", "nowcasting", "probabilistic-forecasting",
             "multi-model-ensemble", "post-processing", "hidden-markov-model", "orographic-precipitation",
-            "geometric-deep-learning", "pytorch"]
+            "geometric-deep-learning", "pytorch", "tropical-cyclone", "hurricane", "extreme-rainfall",
+            "online-learning", "ensemble-copula-coupling"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -48,7 +49,8 @@ Source = "https://github.com/Wisk-inc/transformers/tree/main/pluvium"
 packages = ["pluvium"]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["pluvium", "tests", "docs", "notebooks", "pyproject.toml", "pytest.ini", "README.md", "LICENSE"]
+only-include = ["pluvium", "tests", "docs", "notebooks", "scripts", "hub", "pyproject.toml", "pytest.ini", "README.md",
+                "CHANGELOG.md", "LICENSE"]
 
 [tool.ruff]
 line-length = 125

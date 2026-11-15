@@ -143,7 +143,7 @@ def cmd_cyclone(args) -> None:
 def cmd_blend(args) -> None:
     """Pluvium Blend for any country: train it on a year of archived runs, or forecast 14 days for every town."""
     from .area import Area
-    from .blendlive import BlendModel, write_table
+    from .blendlive import BlendModel, alert_summary, write_table
     from .domain import Gazetteer, PointSet
     from .frontier.model import FrontierBlend, load_blend
 
@@ -195,6 +195,9 @@ def cmd_blend(args) -> None:
     out = write_table(result, names, root / f"blend_{result['day0']}.csv")
     print(f"14-day blended forecast from {result['day0']} for {len(names):,} places -> {out}")
     print("runs used: " + ", ".join(f"{k} {v}Z" for k, v in result["runs"].items()))
+    alerts = alert_summary(result)
+    if alerts:
+        print(alerts)
 
 
 def main(argv=None) -> None:

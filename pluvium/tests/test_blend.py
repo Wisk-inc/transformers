@@ -120,3 +120,23 @@ def test_the_table_says_when_raw_systems_agree_on_extreme_rain(tmp_path):
     path = write_table({"days": [day]}, ["Kingston", "Mandeville"], tmp_path / "t.csv")
     rows = path.read_text().splitlines()
     assert "raw_systems_ge_50mm" in rows[0] and ",2/3,300," in rows[1] and ",0/3," in rows[2]
+    assert rows[0].endswith("systems,alert,beyond_record,expected_amount_is") and rows[1].endswith("ens+gfs+ifs,,,")
+
+
+def test_the_table_carries_alerts_and_rarity_and_the_summary_counts_them(tmp_path):
+    from pluvium.blendlive import alert_summary, write_table
+
+    def day(date, alert, beyond=(False, False)):
+        return {"date": date, "systems": ["ens"], "median_mm": np.zeros(2), "p90_mm": np.zeros(2), "mean_mm": np.zeros(2),
+                **{f"p_ge_{t}": np.zeros(2) for t in (1, 10, 25, 50)}, "alert": np.array(alert, np.int8),
+                "beyond_record": np.array(beyond), "rarity": ["about once in 6 years", ""]}
+
+    result = {"days": [day("2025-10-27", [1, 0]), day("2025-10-28", [3, 0], (True, False))]}
+    rows = write_table(result, ["Kingston", "Mandeville"], tmp_path / "t.csv").read_text().splitlines()
+    assert rows[1].endswith(",ens,watch,,about once in 6 years") and rows[2].endswith(",ens,,,")
+    assert rows[3].endswith(",ens,extreme,yes,about once in 6 years")
+    text = alert_summary(result)
+    assert "1 places reach extreme (first on 2025-10-28)" in text and "beyond the training record" in text
+    assert "watch" not in text                                            # Kingston's worst tier is what is counted
+    calm = {"days": [day("2025-10-27", [0, 0])]}
+    assert alert_summary(calm) == "no heavy-rain alerts in the next 1 days" and alert_summary({"days": []}) == ""

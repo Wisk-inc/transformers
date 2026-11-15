@@ -12,9 +12,13 @@ For each place:
 3. **tail** and **scenarios**: the heavy end and the coupled scenarios are scored from the chances kept in step 2
    (:mod:`.tail_bench`, :mod:`.scenario_bench`).
 
-The designs are fixed here, in :data:`DESIGNS`. ``stack`` is the design that carries the name Pluvium Blend; it was
-written down, with its settings, before the test year was scored. The others take parts away so that each part's
-worth can be read off.
+The designs are fixed here, in :data:`DESIGNS`. ``stack`` is the design that carries the name Pluvium Blend.
+``declared`` is the design exactly as it was written down, with its settings, before the test year was scored: the
+same, with the record-storm hand-over always on. The first four places scored showed that the hand-over hurts where
+the raw systems overcall heavy rain (the two mountain regions), so an audit on training data was added that decides,
+place by place and refit by refit, whether to use it (:mod:`pluvium.tails.audit`). The other three places were scored
+after that. Both designs are scored everywhere, so the difference is on the page. The remaining designs take parts
+away so that each part's worth can be read off.
 
     python -m pluvium.benchmarks.frontier_bench --archive ARCHIVE --truth TRUTH --out OUT --places alps,caribbean
 """
@@ -32,8 +36,9 @@ from ..util import log
 from . import scenario_bench, tail_bench
 
 POOL = dict(bands=(0, 5, 11), smooth=0.0)
-#: the declared design first, then the same with parts taken away
-DESIGNS = (PoolDesign(name="stack", online=True, eta=1.0, record=True, **POOL),
+#: Pluvium Blend first, then the design as first declared, then the same with parts taken away
+DESIGNS = (PoolDesign(name="stack", online=True, eta=1.0, record=True, audit=True, **POOL),
+           PoolDesign(name="declared", online=True, eta=1.0, record=True, **POOL),
            PoolDesign(name="pool", **POOL),
            PoolDesign(name="pool_online", online=True, eta=1.0, **POOL),
            PoolDesign(name="pool_record", record=True, **POOL))

@@ -168,6 +168,47 @@ own. Pluvium Blend has to beat each system after equal treatment, not just its r
 Training a blend for a new country needs a year of archived runs and satellite truth: about two hours of downloads
 and under an hour of CPU (`pluvium blend train`).
 
+### The second generation (version 0.3)
+
+The first full-year benchmark found three weak spots: the heavy tail, winter in mid-latitude climates, and
+structure at long range. `pluvium blend train` now fits a design aimed at them (`pluvium.frontier.FrontierBlend`).
+Each part was chosen inside the training year and is scored on its own in
+[FRONTIER_BENCHMARK.md](FRONTIER_BENCHMARK.md).
+
+1. **Components see every heavy day** (`pluvium.tails.stratify`). A network trained on a uniform sample of rows sees
+   few days with 50 mm. Each component is now trained on every row with observed or forecast rain of 25 mm or more,
+   with the remaining rows thinned. Each row carries a weight equal to one over its chance of being kept, so the
+   chances the network learns are still right for an ordinary day.
+2. **The pool is fitted on the same rows** (`pluvium.pool.gated`). It keeps its form: weights per component and band
+   of thresholds, changing with lead.
+3. **Online weights** (`pluvium.pool.online`). The components and the pool are treated as experts. After every day
+   whose rain is known (48 hours later), each expert's weight moves by how much better or worse it did than the
+   mixture, separately for four lead groups and three bands of thresholds. A small share of weight always returns to
+   the starting weights, so no expert is written off for good. This is how the forecast follows a model upgrade or a
+   season in which one system pulls ahead. The weights are part of the saved model and move with
+   `pluvium blend learn`.
+4. **Record storms** (`pluvium.tails.support`, `pluvium.tails.override`). Calibration learned on ordinary years pulls
+   a record forecast towards normal. The model keeps the edge of what it was trained on: the 99.9th percentile of the
+   raw systems' consensus amount. Inside that edge nothing changes. Beyond it, trust moves from the calibrated chances
+   to the raw systems' own, in proportion to how far outside the forecast is and how many systems agree.
+5. **The hand-over is audited** (`pluvium.tails.audit`). Handing over helps where calibration shrinks a storm the raw
+   systems had right. It hurts where the raw systems call for heavy rain far more often than it falls, as they do
+   over mountains against a satellite truth. Which case holds is measured at every training: the hand-over is applied
+   to the training period's own out-of-fold forecasts, and it is used only if it did not raise the Brier score at
+   50 mm there. The verdict is printed and saved with the model. This step was added after the first four places of
+   the benchmark showed the harm, and the benchmark says so.
+6. **Scenarios** (`pluvium.scenarios`). A calibrated chance per place is smooth at long range, as it should be. For
+   maps and area totals, the calibrated amounts at each place are arranged across the scenarios in the same order as
+   the ECMWF ensemble's members (ensemble copula coupling). Each scenario then has the right amounts place by place
+   and the ensemble's arrangement in space.
+7. **Words for the heavy end** (`pluvium.tails.alerts`, `pluvium.tails.returns`). The forecast table gives an alert
+   tier for 50 mm (watch at a 10% chance, warning at 30%, extreme at 60%), flags a forecast that lies beyond the
+   training record, and says how rare the expected amount is at that place ("about once in 6 years"), from a
+   generalised Pareto fit to the area's daily record. Beyond four times the length of that record it says only
+   "rarer than once in that many years".
+
+What was tried and dropped is in [WHAT_DID_NOT_WORK.md](WHAT_DID_NOT_WORK.md).
+
 ## 3b. Any country
 
 An `Area` (`pluvium/area.py`) says where a deployment works:
@@ -190,6 +231,33 @@ longitude 0. `pluvium setup --country XX` builds everything for a country.
 | MRMS Caribbean radar (NOAA, 1 km every 2 minutes, Puerto Rico and the Virgin Islands) | Rain now where radar reaches, replacing the satellite estimate |
 | METAR from ~80 Caribbean airports (aviationweather.gov) | The last three hours of weather read into the mesh; the truth that online learning checks forecasts against |
 | GOES-East Geostationary Lightning Mapper | Lightning within 10 km of each town in the last 15 minutes |
+
+## 3d. Pluvium Cyclone: where a hurricane goes
+
+`pluvium cyclone` forecasts the track of every tropical cyclone in the North Atlantic and the eastern North Pacific
+from the same six operational systems. It forecasts track only.
+
+1. **Decks** (`pluvium.cyclone.atcf`, `storms`). The National Hurricane Center's public decks say which storms exist
+   and where each was at every hour, as known at the time.
+2. **Fields** (`fields`). Sea-level pressure every 12 hours to 120 hours, from every member of ECMWF ENS and NOAA
+   GEFS and from ECMWF HRES, ECMWF AIFS, NOAA GFS and NOAA GraphCast.
+3. **Tracker** (`detect`, `tracker`, `tracks`). From the real-time position, each member is followed: the nearest
+   closed low near where the storm should be, refined below the grid spacing. A member that loses the storm stops.
+4. **Consensus that learns** (`minvar`, `learner`, `online`, `consensus`). The six tracks are averaged with weights
+   that minimise the expected error given the systems' error covariance so far. The covariance is updated after
+   every forecast that has verified, against the position known in real time. A new system starts as an average
+   member. Within a storm, a system that has done badly on that storm counts for less.
+5. **Early guidance** (`interp`). The newest complete run is 12 hours old when an advisory is written. Its track is
+   read 12 hours further along and slid to the observed position.
+6. **Uncertainty** (`cone`, `cloud`, `approach`, `clusters`). A circle per lead that should hold the centre two times
+   in three, learned from verified errors and widened when the systems disagree. A cloud of tracks: every system's
+   track with the ensembles' perturbations, weighted, centred on the consensus and sized by verified errors. From
+   the cloud: the chance of the centre passing within 150 km of each listed place, and scenarios when the tracks
+   split.
+7. **Live** (`live`, `report`). Each call replays the last ten days of runs on top of what was learned in 2024 and
+   2025, which ships with the package, and writes a bulletin and a data file per storm.
+
+How it scored against the National Hurricane Center's guidance is in [CYCLONE_BENCHMARK.md](CYCLONE_BENCHMARK.md).
 
 ## 4. Products
 
@@ -238,6 +306,22 @@ and the version comparison is in [BENCHMARK.md](BENCHMARK.md).
 * **Uncertainty:** a block bootstrap over runs against each system.
 
 Results are in [FULL_YEAR_BENCHMARK.md](FULL_YEAR_BENCHMARK.md).
+
+`python -m pluvium.benchmarks.frontier_bench` scores the second generation on the same year, places and rules, and
+adds three tests of its own:
+* **the tail**: the threshold-weighted CRPS above 25 mm against the raw consensus, and what each alert tier meant
+  (how often it was issued, how often the rain came, what share of heavy days it caught);
+* **scenarios**: coupled scenarios against the raw ECMWF ensemble and against the same amounts with no arrangement,
+  by the CRPS of rain averaged over two-degree boxes, the energy score and the variogram score;
+* **winter against a second truth**: the two US places again for December to February against MRMS, the US radar
+  and gauge analysis.
+
+Every part of the design is scored with and without the others, and the design as first written down is scored
+beside the final one. Results are in [FRONTIER_BENCHMARK.md](FRONTIER_BENCHMARK.md).
+
+`python -m pluvium.benchmarks.cyclone_bench` scores hurricane tracks against the National Hurricane Center's best
+tracks, beside the Center's own official forecast and guidance, on the forecasts all of them made. Settings were
+chosen on three seasons and tested once on a fourth. Results are in [CYCLONE_BENCHMARK.md](CYCLONE_BENCHMARK.md).
 
 ## 7. Honest limits
 

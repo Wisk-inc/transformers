@@ -10,7 +10,8 @@ test blocks, exactly as the first benchmark did, but in minutes, because no comp
   verified day. It is warmed up on the training year's out-of-fold rows and then runs through the test year with a
   delay of ``latency_hours`` between a day and its verification;
 * the record-storm hand-over (:mod:`pluvium.tails.override`), which gives a forecast back to the raw consensus when
-  it leaves the range of the training forecasts.
+  it leaves the range of the training forecasts. With ``audit`` the hand-over is used in a quarter only if it did
+  no harm on that quarter's out-of-fold rows (:mod:`pluvium.tails.audit`): a decision made from training data.
 
 The result has the same form as the first benchmark's, with the design named ``stack`` as Pluvium Blend, so the same
 reports read both.
@@ -25,6 +26,7 @@ import numpy as np
 from .. import blend as B
 from ..benchmarks import fullyear as F
 from ..pool import OnlineAggregator, build_gates, fit_pool, predict_pool
+from ..tails.audit import Audit, audit_handover
 from ..tails.override import agree_share_from, blend_raw, handover
 from ..tails.support import Support
 from ..util import log
@@ -52,6 +54,8 @@ class PoolDesign:
     record: bool = False
     record_quantile: float = 0.999
     record_width: float = 0.6931
+    #: keep the hand-over only where it did no harm on the training period's out-of-fold forecasts
+    audit: bool = False
 
 
 def sigmoid(z: np.ndarray) -> np.ndarray:
@@ -95,6 +99,18 @@ def warm_start(agg: OnlineAggregator, design: PoolDesign, pool, d: dict, latency
     run_online(agg, p, pres, lead, y, issued, valid + 24 + latency, w)
 
 
+def audit_design(design: PoolDesign, pool, support: Support, d: dict, max_rows: int = 400_000) -> Audit:
+    """The hand-over audit (:mod:`pluvium.tails.audit`) for a design, on a quarter's out-of-fold rows: the pool's
+    chances for the training period, with and without the hand-over."""
+    step = max(1, d["oof_y"].size // max_rows)
+    rows = slice(None, None, step)
+    z = d["oof_z"][rows].astype(np.float32)
+    present, valid = d["oof_present"][rows], d["oof_valid"][rows]
+    p = predict_pool(pool, z, present, d["oof_lead"][rows].astype(np.float32), build_gates(design.gates, z, present, valid))
+    return audit_handover(p, d["oof_raw_p"][rows].astype(np.float32), d["oof_raw_mean"][rows], d["oof_y"][rows], support,
+                          d["oof_w"][rows], valid // 24)
+
+
 def evaluate(store: Store, designs: list, thresholds=B.SCORED, case_days=(), latency: int = 48,
              components: bool = True, top: str = "stack", keep: dict | None = None) -> dict:
     """Score every design (and the components) on the store's test blocks; returns the benchmark's result dict.
@@ -105,7 +121,7 @@ def evaluate(store: Store, designs: list, thresholds=B.SCORED, case_days=(), lat
     n, names = store.n, store.names
     scores = F.Scores(thresholds, case_days)
     rng = np.random.default_rng(0)
-    aggs, pending, weights_log = {}, {}, {}
+    aggs, pending, weights_log, audits = {}, {}, {}, {}
     for q in store.quarters():
         d = store.quarter(q)
         fitted, by_pool = {}, {}
@@ -116,6 +132,13 @@ def evaluate(store: Store, designs: list, thresholds=B.SCORED, case_days=(), lat
             fitted[design.name] = by_pool[key]
         supports = {design.name: Support.from_rows(d["oof_raw_mean"], d["oof_w"], design.record_quantile,
                                                    design.record_width) for design in designs if design.record}
+        handed = {design.name: True for design in designs if design.record}
+        for design in designs:
+            if design.record and design.audit:              # is the hand-over worth having here? asked of training rows
+                verdict = audit_design(design, fitted[design.name][0], supports[design.name], d)
+                handed[design.name] = verdict.keep
+                audits.setdefault(design.name, []).append(verdict.to_json())
+                log(f"  {store.folder.name}: quarter {q}: {design.name}: {verdict.line()}")
         for design in designs:
             if design.online and design.name not in aggs:
                 prior = np.concatenate([np.full(len(names), (1 - design.pool_prior) / len(names)), [design.pool_prior]])
@@ -155,7 +178,7 @@ def evaluate(store: Store, designs: list, thresholds=B.SCORED, case_days=(), lat
                     pres = np.concatenate([present, np.ones((n, 1), bool)], 1)
                     wait.append((run + 24 * lead + latency, p_exp.astype(np.float16), pres, np.full(n, lead), store.y[i]))
                     p = agg.combine(p_exp, pres, np.full(n, lead))
-                if design.record:
+                if design.record and handed[design.name]:
                     p_raw = store.raw_p(i)
                     g = handover(supports[design.name], store.raw_mean[i], agree_share_from(p_raw, HEAVY_INDEX))
                     if g.max() > 1e-4:
@@ -168,6 +191,7 @@ def evaluate(store: Store, designs: list, thresholds=B.SCORED, case_days=(), lat
     result = report(store, scores, list(names) if components else [], [d_.name for d_ in designs], top, thresholds)
     result["online_weights"] = {k: {"experts": list(names) + ["pool"], "by_quarter_days_1_3_light": [w[0] for w in v]}
                                 for k, v in weights_log.items()}
+    result["audits"] = audits
     return result
 
 
@@ -203,4 +227,4 @@ def report(store: Store, scores: F.Scores, components: list, designs: list, top:
     return out
 
 
-__all__ = ["HEAVY_INDEX", "PoolDesign", "evaluate", "fit_design", "report", "uniform_like", "warm_start"]
+__all__ = ["HEAVY_INDEX", "PoolDesign", "audit_design", "evaluate", "fit_design", "report", "uniform_like", "warm_start"]

@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 
 from .. import blend as B
-from .override import agree_share_from, blend_raw, handover
+from .override import agree_share_from, blend_raw, handover, tail_trust
 from .stratify import table_rows
 from .support import Support
 
@@ -83,12 +83,14 @@ def brier(p: np.ndarray, y: np.ndarray, t: float) -> float:
 
 
 def score_blocks(table: dict, blocks: np.ndarray, net, systems: list, n: int, supports: dict,
-                 thresholds=(25.0, 50.0, 100.0)) -> dict:
+                 thresholds=(25.0, 50.0, 100.0), trust: np.ndarray | None = None) -> dict:
     """Scores over ``blocks`` for the calibrated forecast, the raw consensus, and the hand-over under every support
-    in ``supports`` (``{label: Support}``)."""
+    in ``supports`` (``{label: Support}``). With ``trust`` (:func:`pluvium.tails.override.tail_trust`) the guarded
+    hand-over is scored too, under ``"<label> guarded"``."""
     from ..benchmarks.fullyear import ENSEMBLES
 
-    ps = {"calibrated": [], "raw": [], **{label: [] for label in supports}}
+    guarded = {f"{label} guarded": support for label, support in supports.items()} if trust is not None else {}
+    ps = {"calibrated": [], "raw": [], **{label: [] for label in supports}, **{label: [] for label in guarded}}
     ys, share = [], {label: [] for label in supports}
     for i in blocks:
         if not any(table["feats"][s][int(i)] is not None for s in systems):
@@ -104,6 +106,8 @@ def score_blocks(table: dict, blocks: np.ndarray, net, systems: list, n: int, su
             g = handover(support, raw_mean, agree_share_from(p_raw, HEAVY_INDEX))
             ps[label].append(blend_raw(p_cal, p_raw, g))
             share[label].append(g > 0)
+            if trust is not None:
+                ps[f"{label} guarded"].append(blend_raw(p_cal, p_raw, g, trust, only_raise=True))
         ys.append(table["y"][int(i)])
     if not ys:
         return {}
@@ -134,16 +138,20 @@ def withheld_experiment(table: dict, n: int, systems: list, top: int = 3, quanti
         log(f"withheld: {len(storms)} storms, {storm_blocks.size} storm blocks, {control_blocks.size} control blocks, "
             f"{x.shape[0]:,} training rows")
     net = B.fit(x, y, seed=seed, max_rows=max_rows, weights=w)
-    rng = np.random.default_rng(seed + 1)                         # a uniform sample of the training rows' raw means
+    rng = np.random.default_rng(seed + 1)                         # a uniform sample of the training rows
     share = min(1.0, 300_000 / max(train.size * n, 1))
-    raw_train = np.concatenate([table["raw_mean"][int(i)][rng.random(n) < share] for i in train])
+    picks = [(int(i), rng.random(n) < share) for i in train]
+    raw_train = np.concatenate([table["raw_mean"][i][m] for i, m in picks])
     supports = {f"q{q:g} w{wd:.2f}": Support.from_rows(raw_train, None, q, wd) for q in quantiles for wd in widths}
+    trust = tail_trust(np.concatenate([table["raw_p"][i][m] for i, m in picks]).astype(np.float32),
+                       np.concatenate([table["y"][i][m] for i, m in picks]), raw_train)
     largest = max(float(np.nanmean(table["y"][int(i)])) for i in train)
     return {"storms": [str(np.datetime64(int(d), "h"))[:10] for d in storms],
             "largest_training_day_mm": largest,
             "edges_mm": {label: s.edge_mm for label, s in supports.items()},
-            "storm": score_blocks(table, storm_blocks, net, systems, n, supports),
-            "control": score_blocks(table, control_blocks, net, systems, n, supports)}
+            "trust": {f"{t:g}": float(v) for t, v in zip(B.THRESHOLDS, trust)},
+            "storm": score_blocks(table, storm_blocks, net, systems, n, supports, trust=trust),
+            "control": score_blocks(table, control_blocks, net, systems, n, supports, trust=trust)}
 
 
 __all__ = ["HEAVY_INDEX", "brier", "control_days", "score_blocks", "split_blocks", "storm_days", "valid_days",

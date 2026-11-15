@@ -157,11 +157,23 @@ class BlendModel:
         return cls(nets, pool, meta["systems"], meta["area"], clim, (z["lat"], z["lon"]), meta["meta"])
 
     # ---------------------------------------------------------------------------------- forecast --
-    def _clim_at(self, lat: np.ndarray, lon: np.ndarray, month: int) -> dict:
+    def _grid_index(self, lat: np.ndarray, lon: np.ndarray) -> tuple:
+        """The grid cell ``(i, j)`` nearest each point."""
         glat, glon = self.grid
         i = np.clip(np.round((lat - glat[0]) / (glat[1] - glat[0])).astype(int), 0, glat.size - 1)
         j = np.clip(np.round((lon - glon[0]) / (glon[1] - glon[0])).astype(int), 0, glon.size - 1)
+        return i, j
+
+    def _clim_at(self, lat: np.ndarray, lon: np.ndarray, month: int) -> dict:
+        i, j = self._grid_index(lat, lon)
         return {k: v[i, j] for k, v in self.clim[month].items()}
+
+    def extras(self, p: np.ndarray, q: np.ndarray, raw: dict, lat: np.ndarray, lon: np.ndarray) -> dict:
+        """More columns for a day's forecast, from its chances ``p``, amounts ``q`` and the raw members. Here: the
+        alert tier for heavy rain, 0 (none) to 3 (extreme), as :mod:`pluvium.tails.alerts` defines them."""
+        from .tails.alerts import tier
+
+        return {"alert": tier(p, RAW_ALERT_MM)}
 
     def chances(self, per: dict, clim: dict, lead: float, n: int, raw: dict | None = None) -> np.ndarray:
         """P(rain >= THRESHOLDS) at ``n`` places from each system's features ``per`` (missing systems absent).
@@ -217,7 +229,8 @@ class BlendModel:
             q = B.quantiles(p)
             out["days"].append({"date": str(hour_to_datetime64(valid))[:10], "systems": sorted(per),
                                 **{f"p_ge_{int(t)}": B.exceed(p, t) for t in B.SCORED},
-                                "median_mm": q[:, 49], "p90_mm": q[:, 89], "mean_mm": q.mean(1), **raw_signal(raw)})
+                                "median_mm": q[:, 49], "p90_mm": q[:, 89], "mean_mm": q.mean(1), **raw_signal(raw),
+                                **self.extras(p, q, raw, lat, lon)})
         return out
 
 
@@ -233,24 +246,52 @@ def raw_signal(raw: dict, threshold: float = RAW_ALERT_MM) -> dict:
     return {"raw_agree": calls.sum(0), "raw_systems": len(raw), "raw_max_mm": means.max(0)}
 
 
+ALERT_NAMES = ("", "watch", "warning", "extreme")
+
+
 def write_table(result: dict, names, path) -> Path:
     """One row per place and day: chances of 1/10/25/50 mm, median, 90th percentile and expected rain, and how many
-    raw systems call for 50 mm or more (with the wettest one's mean), for the record storms calibration shrinks."""
+    raw systems call for 50 mm or more (with the wettest one's mean), for the record storms calibration shrinks.
+    Then the alert tier for heavy rain, whether the forecast is beyond anything in the training period, and how
+    rare the expected amount is at the place (the last two for models that carry them)."""
     import csv
 
     path = Path(path)
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["place", "date", "p_ge_1mm", "p_ge_10mm", "p_ge_25mm", "p_ge_50mm", "median_mm", "p90_mm", "mean_mm",
-                    f"raw_systems_ge_{int(RAW_ALERT_MM)}mm", "raw_wettest_mm", "systems"])
+                    f"raw_systems_ge_{int(RAW_ALERT_MM)}mm", "raw_wettest_mm", "systems", "alert", "beyond_record",
+                    "expected_amount_is"])
         for d in result["days"]:
             for k, name in enumerate(names):
                 agree = f"{int(d['raw_agree'][k])}/{d['raw_systems']}" if "raw_agree" in d and d["raw_systems"] else ""
                 wettest = f"{d['raw_max_mm'][k]:.0f}" if "raw_max_mm" in d and d["raw_systems"] else ""
+                alert = ALERT_NAMES[int(d["alert"][k])] if "alert" in d else ""
+                beyond = "yes" if "beyond_record" in d and d["beyond_record"][k] else ""
+                rarity = d["rarity"][k] if "rarity" in d else ""
                 w.writerow([name, d["date"], *(f"{d[f'p_ge_{int(t)}'][k]:.2f}" for t in B.SCORED),
                             f"{d['median_mm'][k]:.1f}", f"{d['p90_mm'][k]:.1f}", f"{d['mean_mm'][k]:.1f}",
-                            agree, wettest, "+".join(d["systems"])])
+                            agree, wettest, "+".join(d["systems"]), alert, beyond, rarity])
     return path
 
 
-__all__ = ["LATENCY", "RAW_ALERT_MM", "BlendModel", "raw_signal", "write_table"]
+def alert_summary(result: dict) -> str:
+    """One line on the alerts in a forecast: how many places are under each tier on at least one day, and when."""
+    days = [d for d in result["days"] if "alert" in d and len(d["alert"])]
+    if not days:
+        return ""
+    worst = np.max(np.stack([d["alert"] for d in days]), 0)
+    if worst.max() == 0:
+        return "no heavy-rain alerts in the next " + str(len(days)) + " days"
+    parts = []
+    for level in (3, 2, 1):
+        at = [d["date"] for d in days if (np.asarray(d["alert"]) >= level).any()]
+        if at and (worst == level).any():
+            parts.append(f"{int((worst == level).sum()):,} places reach {ALERT_NAMES[level]} (first on {at[0]})")
+    beyond = sum(int(np.any(d["beyond_record"])) for d in days if "beyond_record" in d)
+    if beyond:
+        parts.append(f"{beyond} day(s) with a forecast beyond the training record")
+    return "heavy-rain alerts: " + "; ".join(parts)
+
+
+__all__ = ["ALERT_NAMES", "LATENCY", "RAW_ALERT_MM", "BlendModel", "alert_summary", "raw_signal", "write_table"]
