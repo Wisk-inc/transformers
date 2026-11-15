@@ -75,3 +75,43 @@ def test_memory_settings_come_from_the_environment_and_are_checked(tmp_path, mon
             Program(ProgramConfig(root=str(tmp_path), hub_repo=None, **wrong)).train_cfg(1.0)
     source = open(program.__file__).read()                                                  # run as a module, it starts
     assert callable(program.main) and source.rstrip().endswith('if __name__ == "__main__":\n    main()')
+
+
+def test_staged_data_go_up_in_a_few_commits_and_only_what_the_hub_lacks(tmp_path):
+    """The Hub takes at most 128 commits an hour in a repository. One commit per staged file (until 0.5.2) used that
+    up with the data alone, and most of them were refused with HTTP 429."""
+    import hashlib
+    from types import SimpleNamespace
+
+    from pluvium.program import FILES_PER_COMMIT, mirror_files
+
+    files = []
+    for k in range(2 * FILES_PER_COMMIT + 5):
+        path = tmp_path / f"f{k}.npy"
+        path.write_bytes(bytes([k % 256]) * 100)
+        files.append((path, f"data/f{k}.npy"))
+    same = files[0][0].read_bytes()
+    old = tmp_path / "old.npy"
+    old.write_bytes(b"older content")
+
+    class Api:
+        def __init__(self, fail=False):
+            self.commits, self.fail = [], fail
+
+        def get_paths_info(self, repo, paths, repo_type="model"):
+            if self.fail:
+                raise RuntimeError("429 Too Many Requests")
+            return [SimpleNamespace(path="data/f0.npy", lfs={"sha256": hashlib.sha256(same).hexdigest()}),   # held
+                    SimpleNamespace(path="data/f1.npy", lfs={"sha256": hashlib.sha256(b"older").hexdigest()})]  # stale
+
+        def create_commit(self, repo, repo_type, commit_message, operations):
+            self.commits.append([op.path_in_repo for op in operations])
+
+    mirror = SimpleNamespace(can_push=True, repo_id="org/repo", token="t")
+    api = Api()
+    assert mirror_files(mirror, files + [(tmp_path / "missing.npy", "data/missing.npy")], "data", api=api) == len(files) - 1
+    assert [len(c) for c in api.commits] == [FILES_PER_COMMIT, FILES_PER_COMMIT, 4]        # three commits, not 125
+    pushed = [p for c in api.commits for p in c]
+    assert "data/f0.npy" not in pushed and "data/f1.npy" in pushed and "data/missing.npy" not in pushed
+    assert mirror_files(mirror, files, "data", api=Api(fail=True)) == 0                    # refused: said, not raised
+    assert mirror_files(SimpleNamespace(can_push=False), files, "data", api=Api()) == 0    # no token: nothing to do

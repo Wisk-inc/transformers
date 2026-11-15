@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.2 (November 2026)
+
+- The staged data went up to the Hub one commit per file, about 150 at once. The Hub takes at most 128 commits an
+  hour in a repository, so most were refused with `429 Too Many Requests`, the log filled with those refusals, and
+  the checkpoints of the following hour could be refused too. Training was not affected, but a new session could not
+  resume from the Hub's copy. The data now go up in commits of 60 files, and only the files the Hub does not hold
+  already.
+- The automatic restart of 0.5.1 also covers runs with the old batch rule (`VRAM = "fastest"`), and its last try is
+  one forecast per step (`--batch 1`). On the RTX PRO 6000 one Pluvium-500 forecast took 38.6 GB at its peak, so a
+  step holds two at most.
+
 ## 0.5.1 (November 2026)
 
 The GPU training starts itself again when it stops.

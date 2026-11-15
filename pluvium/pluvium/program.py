@@ -23,11 +23,13 @@ The time budget (``GPU_HOURS``) is wall clock from the program's start: training
 
 from __future__ import annotations
 
+import hashlib
 import json
 import multiprocessing
 import os
 import shutil
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -151,6 +153,14 @@ class Program:
         if self.mirror is not None:
             self.mirror.push(local, repo_path, what=what)
 
+    def push_many(self, files: list, what: str) -> None:
+        """Mirror many files in a few commits, in the background (:func:`mirror_files`)."""
+        if self.mirror is None or not self.mirror.can_push:
+            return
+        thread = threading.Thread(target=mirror_files, args=(self.mirror, files, what), name=f"mirror-{what}", daemon=True)
+        thread.start()
+        self.mirror._threads.append(thread)                 # waited for with the mirror's own uploads
+
     # ---------------------------------------------------------------------------------- geography --
     def area(self):
         """The countries this run serves (:class:`pluvium.area.Area`), or None for the Caribbean."""
@@ -232,19 +242,21 @@ class Program:
             if p.exitcode != 0:
                 raise RuntimeError(f"staging {name} failed (exit code {p.exitcode}); see the lines above")
         log(f"data: {len(years)} years staged in {(time.time() - began) / 60:.1f} min")
-        # mirror what was staged
+        # mirror what was staged, in a few commits (one commit per file ran into the Hub's limit, HTTP 429)
+        files = []
         for y in years:
             for s in HOURLY_SHORT:
-                self.push(era5_dir / "era5_1h" / f"{s}_{y}.npy", f"data/era5/era5_1h/{s}_{y}.npy")
+                files.append((era5_dir / "era5_1h" / f"{s}_{y}.npy", f"data/era5/era5_1h/{s}_{y}.npy"))
             for s in UPPER_SHORT:
                 for p in LEVELS:
-                    self.push(era5_dir / "era5_6h" / f"{s}{p}_{y}.npy", f"data/era5/era5_6h/{s}{p}_{y}.npy")
+                    files.append((era5_dir / "era5_6h" / f"{s}{p}_{y}.npy", f"data/era5/era5_6h/{s}{p}_{y}.npy"))
             for k in ("targets", "mesh"):
-                self.push(cm_dir / "cmorph" / f"{k}_{y}.npy", f"data/cmorph/{k}_{y}.npy")
-            self.push(st_dir / "stations" / f"{y}.npy", f"data/stations2/{y}.npy")
-        self.push(era5_dir / "era5.json", "data/era5/era5.json")
-        self.push(cm_dir / "cmorph" / "cmorph.json", "data/cmorph/cmorph.json")
-        self.push(st_dir / "stations" / "stations.json", "data/stations2/stations.json")
+                files.append((cm_dir / "cmorph" / f"{k}_{y}.npy", f"data/cmorph/{k}_{y}.npy"))
+            files.append((st_dir / "stations" / f"{y}.npy", f"data/stations2/{y}.npy"))
+        files += [(era5_dir / "era5.json", "data/era5/era5.json"),
+                  (cm_dir / "cmorph" / "cmorph.json", "data/cmorph/cmorph.json"),
+                  (st_dir / "stations" / "stations.json", "data/stations2/stations.json")]
+        self.push_many(files, "data")
         from .sources.cmorph import CMORPHCache
         from .sources.era5 import ERA5Cache
         from .sources.stations import StationCache
@@ -684,8 +696,66 @@ def main(argv=None) -> None:
     if args.box:
         cfg.box = tuple(float(x) for x in args.box.split(","))
     if _supervised(cfg):
-        raise SystemExit(supervise(sys.argv[1:] if argv is None else list(argv), cfg.vram_share))
+        raise SystemExit(supervise(sys.argv[1:] if argv is None else list(argv), cfg.vram_share, vram=cfg.vram))
     Program(cfg).run()
+
+
+#: files mirrored per commit. The Hub takes at most 128 commits an hour in a repository. Until 0.5.2 the staged
+#: data went up one commit per file, about 150 of them at once: most were refused (HTTP 429), and the checkpoints of
+#: the following hour could be refused too
+FILES_PER_COMMIT = 60
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _git_blob_id(path: Path) -> str:
+    """What the Hub reports for a small (non-LFS) file: git's blob id."""
+    data = Path(path).read_bytes()
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def mirror_files(mirror, files: list, what: str, api=None) -> int:
+    """Upload the files that the repository does not hold yet, or holds in another version, ``FILES_PER_COMMIT`` to
+    a commit. ``files`` is a list of ``(local path, path in the repository)``. Returns how many went up. A refusal is
+    reported and never raised: a mirror that fails must not stop a run."""
+    if mirror is None or not mirror.can_push:
+        return 0
+    files = [(Path(local), str(path)) for local, path in files if Path(local).exists()]
+    if not files:
+        return 0
+    try:
+        from huggingface_hub import CommitOperationAdd, HfApi
+
+        api = api or HfApi(token=mirror.token)
+        held = {entry.path: entry for entry in api.get_paths_info(mirror.repo_id, [p for _, p in files], repo_type="model")}
+
+        def same(local: Path, path: str) -> bool:
+            entry = held.get(path)
+            if entry is None:
+                return False
+            lfs = getattr(entry, "lfs", None)
+            if lfs is not None:
+                sha = lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)
+                return sha == _sha256(local)
+            return getattr(entry, "blob_id", None) == _git_blob_id(local)
+
+        todo = [(local, path) for local, path in files if not same(local, path)]
+        for k in range(0, len(todo), FILES_PER_COMMIT):
+            part = todo[k: k + FILES_PER_COMMIT]
+            api.create_commit(mirror.repo_id, repo_type="model", commit_message=f"mirror {what} ({len(part)} files)",
+                              operations=[CommitOperationAdd(path_in_repo=p, path_or_fileobj=str(f)) for f, p in part])
+        if todo:
+            log(f"[mirror] {what}: {len(todo)} files uploaded in {-(-len(todo) // FILES_PER_COMMIT)} commit(s)")
+        return len(todo)
+    except Exception as error:
+        log(f"[mirror] {what}: not mirrored ({type(error).__name__}: {str(error)[:200]}); the run goes on without it")
+        return 0
 
 
 #: how much less of the GPU's memory a training step is sized to when a run is started again after it stopped
@@ -693,9 +763,9 @@ RETRY_SHARE_DROP = 0.10
 
 
 def _supervised(cfg: ProgramConfig) -> bool:
-    """A run that fills a GPU is watched by a parent process (:func:`supervise`), unless it is that parent's child,
-    a batch was given by hand, or ``PLUVIUM_RETRIES=0``."""
-    if cfg.vram != "fill" or cfg.batch_size > 0 or os.environ.get("PLUVIUM_ATTEMPT") or os.environ.get("PLUVIUM_RETRIES") == "0":
+    """A run on a GPU is watched by a parent process (:func:`supervise`), unless it is that parent's child, a batch
+    was given by hand, or ``PLUVIUM_RETRIES=0``."""
+    if cfg.batch_size > 0 or os.environ.get("PLUVIUM_ATTEMPT") or os.environ.get("PLUVIUM_RETRIES") == "0":
         return False
     try:
         import torch
@@ -705,18 +775,26 @@ def _supervised(cfg: ProgramConfig) -> bool:
         return False
 
 
-def supervise(argv: list, share: float, command: list | None = None) -> int:
-    """Run the program in a child process; if it stops with an error, start it again from its last checkpoint, first
-    with each training step sized to ``RETRY_SHARE_DROP`` less of the GPU's memory, then with the batch rule of 0.4.2
-    (``--vram fastest``). The first GPU run of 0.5.0 stopped in its training after downloading for an hour, and the
-    cell only said that it had failed. A fresh process starts with a fresh CUDA context, which some GPU errors leave
-    unusable; the data and the checkpoints are on disk, so a second try is training again within minutes. Returns the
-    last child's exit code. A child stopped by a signal (the notebook's stop button) is not started again."""
+def retry_plan(vram: str, share: float) -> list:
+    """The settings a run is tried with, in order, as ``(vram, share, batch)``: a run that fills the card, then one
+    that fills ``RETRY_SHARE_DROP`` less of it, then the batch rule of 0.4.2, then one forecast per step. A run started
+    with the old rule begins at the third."""
+    tries = [("fill", share, 0), ("fill", round(max(0.5, share - RETRY_SHARE_DROP), 2), 0)] if vram == "fill" else []
+    return tries + [("fastest", share, 0), ("fastest", share, 1)]
+
+
+def supervise(argv: list, share: float, command: list | None = None, vram: str = "fill") -> int:
+    """Run the program in a child process; if it stops with an error, start it again from its last checkpoint with
+    a smaller step each time (:func:`retry_plan`). The first GPU run of 0.5.0 stopped in its training after
+    downloading for an hour, and the cell only said that it had failed. A fresh process starts with a fresh CUDA
+    context, which some GPU errors leave unusable; the data and the checkpoints are on disk, so a second try is
+    training again within minutes. Returns the last child's exit code. A child stopped by a signal (the notebook's
+    stop button) is not started again."""
     import signal
     import subprocess
 
     command = command or [sys.executable, "-u", "-m", "pluvium.program"]
-    tries = [("fill", share), ("fill", round(max(0.5, share - RETRY_SHARE_DROP), 2)), ("fastest", share)]
+    tries = retry_plan(vram, share)
     child = None
 
     def stop(signum, frame):                                  # stopping this process stops the training too
@@ -728,23 +806,30 @@ def supervise(argv: list, share: float, command: list | None = None) -> int:
     previous = signal.signal(signal.SIGTERM, stop)
     code = 1
     try:
-        for k, (vram, cut) in enumerate(tries):
-            env = dict(os.environ, PLUVIUM_ATTEMPT=str(k + 1), PLUVIUM_VRAM=vram, PLUVIUM_VRAM_SHARE=str(cut))
-            child = subprocess.Popen([*command, *argv, "--vram", vram, "--vram-share", str(cut)], env=env)
+        for k, (rule, cut, batch) in enumerate(tries):
+            env = dict(os.environ, PLUVIUM_ATTEMPT=str(k + 1), PLUVIUM_VRAM=rule, PLUVIUM_VRAM_SHARE=str(cut))
+            extra = ["--vram", rule, "--vram-share", str(cut)]
+            if batch:
+                env["PLUVIUM_BATCH"] = str(batch)
+                extra += ["--batch", str(batch)]
+            child = subprocess.Popen([*command, *argv, *extra], env=env)
             code = child.wait()
             if code == 0 or code < 0:
                 return code
             if k + 1 < len(tries):
-                then, then_cut = tries[k + 1]
+                then, then_cut, then_batch = tries[k + 1]
+                how = (f"with one forecast per step (--batch {then_batch})" if then_batch else
+                       f"with each training step sized to {then_cut:.0%} of the GPU's memory" if then == "fill" else
+                       "with the batch rule of 0.4.2 (--vram fastest)")
                 log(f"the program stopped (exit code {code}; the error is just above). Starting it again from its last "
-                    "checkpoint, " + (f"with each training step sized to {then_cut:.0%} of the GPU's memory"
-                                      if then == "fill" else "with the batch rule of 0.4.2 (--vram fastest)"))
+                    f"checkpoint, {how}")
         return code
     finally:
         signal.signal(signal.SIGTERM, previous)
 
 
-__all__ = ["DEFAULT_REPO", "Program", "ProgramConfig", "RETRY_SHARE_DROP", "choose_years", "main", "supervise"]
+__all__ = ["DEFAULT_REPO", "FILES_PER_COMMIT", "Program", "ProgramConfig", "RETRY_SHARE_DROP", "choose_years", "main",
+           "mirror_files", "retry_plan", "supervise"]
 
 # ``python -m pluvium.program`` is how the notebook cells start a training run. Until 0.4.3 these two lines were
 # missing: the command imported this module and ended at once with exit code 0, having trained nothing.

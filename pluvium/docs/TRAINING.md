@@ -65,7 +65,7 @@ def sh(cmd, check=True):
     print(f"$ {cmd}", flush=True)
     return subprocess.run(cmd, shell=True, check=check).returncode
 
-sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.5.1'")
+sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.5.2'")
 root = os.path.expanduser(ROOT)
 pluvium = f"{sys.executable} -m pluvium.cli"
 if not os.path.exists(f"{root}/area.json"):
@@ -172,8 +172,12 @@ Steps are sized on the rainiest issue time of the training years. A step needs m
 measured on a dry day can be too large for a storm. The log names the issue time it used.
 
 If the run stops on the GPU anyway, `pluvium program` starts it again by itself from its last checkpoint, first with
-steps sized to 85% of the card, then with the batch rule of 0.4.2. The data are on disk by then, so the second try
-is training again within minutes. `PLUVIUM_RETRIES=0` turns this off.
+steps sized to 85% of the card, then with the batch rule of 0.4.2, then with one forecast per step. A run started
+with the batch rule of 0.4.2 (`VRAM = "fastest"`) goes straight to the last two. The data are on disk by then, so
+the second try is training again within minutes. `PLUVIUM_RETRIES=0` turns this off.
+
+On an RTX PRO 6000 (96 GB), one Pluvium-500 forecast took 38.6 GB at its peak and trained at 0.24 forecasts a second,
+so a step holds two forecasts at most and the rest of the card goes to more target cells.
 
 This sizing was checked on simulated cards and on a CPU training run with a stand-in memory meter
 (`tests/test_fit.py`). It has not been run on a GPU by the people who wrote it, so read the first lines of the log.

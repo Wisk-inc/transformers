@@ -235,19 +235,27 @@ def test_a_run_that_stops_is_started_again_with_smaller_steps_then_the_old_rule(
     from pluvium.program import supervise
 
     log = tmp_path / "tries.txt"
-    child = [sys.executable, "-c",
-             "import os, sys; open(sys.argv[1], 'a').write(os.environ['PLUVIUM_VRAM'] + ' ' + "
-             "os.environ['PLUVIUM_VRAM_SHARE'] + ' ' + ' '.join(sys.argv[2:]) + '\\n');"
-             "sys.exit(0 if os.environ['PLUVIUM_ATTEMPT'] == '3' else 1)", str(log)]
-    assert supervise(["--hours", "1"], 0.95, command=child) == 0
-    tries = log.read_text().splitlines()
-    assert tries == ["fill 0.95 --hours 1 --vram fill --vram-share 0.95",
-                     "fill 0.85 --hours 1 --vram fill --vram-share 0.85",
-                     "fastest 0.95 --hours 1 --vram fastest --vram-share 0.95"]
+
+    def child(succeed_at: int) -> list:
+        return [sys.executable, "-c",
+                "import os, sys; open(sys.argv[1], 'a').write(os.environ['PLUVIUM_VRAM'] + ' ' + "
+                "os.environ['PLUVIUM_VRAM_SHARE'] + ' ' + os.environ.get('PLUVIUM_BATCH', '-') + ' ' + "
+                f"' '.join(sys.argv[2:]) + '\\n'); sys.exit(0 if os.environ['PLUVIUM_ATTEMPT'] == '{succeed_at}' else 1)",
+                str(log)]
+
+    assert supervise(["--hours", "1"], 0.95, command=child(3)) == 0
+    assert log.read_text().splitlines() == ["fill 0.95 - --hours 1 --vram fill --vram-share 0.95",
+                                            "fill 0.85 - --hours 1 --vram fill --vram-share 0.85",
+                                            "fastest 0.95 - --hours 1 --vram fastest --vram-share 0.95"]
+    log.unlink()
+    # a run started with the old rule is tried with it, then with one forecast per step
+    assert supervise(["--hours", "1"], 0.95, command=child(9), vram="fastest") == 1
+    assert log.read_text().splitlines() == ["fastest 0.95 - --hours 1 --vram fastest --vram-share 0.95",
+                                            "fastest 0.95 1 --hours 1 --vram fastest --vram-share 0.95 --batch 1"]
     once = [sys.executable, "-c", "import sys; sys.exit(0)"]
     assert supervise([], 0.95, command=once) == 0                              # a run that works is run once
     always = [sys.executable, "-c", "import sys; sys.exit(3)"]
-    assert supervise([], 0.95, command=always) == 3                            # three tries, then its error
+    assert supervise([], 0.95, command=always) == 3                            # four tries, then its error
 
 
 def test_a_batch_given_by_hand_and_the_old_rule_are_left_alone(world, tmp_path):

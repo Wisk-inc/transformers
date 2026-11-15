@@ -93,7 +93,7 @@ def step(what: str, action, skip: str = "") -> bool:
 # 1. the package: from PyPI, or from the source tree when PyPI cannot be reached
 def install() -> None:
     try:
-        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.5.1"])
+        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.5.2"])
     except RuntimeError:
         run([sys.executable, "-m", "pip", "install", "-q", "git+https://github.com/Wisk-inc/transformers.git"
              "@claude/linear-context-architecture-a35c6h#subdirectory=pluvium"])
@@ -173,7 +173,7 @@ def network() -> None:
         print("No Hub token: nothing is mirrored, so a stopped session cannot resume and nothing is published.")
     home = Path(os.path.expanduser(NETWORK_ROOT))
     # if the training stops on the GPU, the program starts it again by itself from its last checkpoint, with smaller
-    # steps (from 0.5.1)
+    # steps (from 0.5.1), or one forecast a step as a last resort (from 0.5.2)
     run(PLUVIUM + ["program"],
         env={"GPU_HOURS": str(GPU_HOURS), "HF_REPO": HF_REPO, "PLUVIUM_ROOT": NETWORK_ROOT, "PLUVIUM_SIZE": SIZE,
              "PLUVIUM_VRAM": VRAM, "PLUVIUM_VRAM_SHARE": str(VRAM_SHARE),
