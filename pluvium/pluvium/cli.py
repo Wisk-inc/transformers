@@ -120,11 +120,32 @@ def cmd_setup(args) -> None:
     print(f"next: pluvium program --root {root} --country {','.join(codes)}")
 
 
+def cmd_cyclone(args) -> None:
+    """Pluvium Cyclone: where every tropical cyclone alive now is expected to go, from six systems."""
+    from .cyclone import live
+    from .cyclone.report import bulletin
+
+    now = None
+    if args.time:
+        from .util import hour_of
+
+        now = hour_of(args.time)
+    basins = tuple(b.strip() for b in args.basins.split(",") if b.strip())
+    found = live.run(args.root, now=now, basins=basins, download=not args.offline, replay_days=args.replay_days)
+    if not found:
+        print("no tropical cyclone at the newest run in " + ", ".join(basins))
+        return
+    for storm, guidance in found:
+        print(bulletin(guidance, storm.name.title()))
+    print(f"{len(found)} storm(s); bulletins and data in {Path(args.root).expanduser() / 'cyclone'}")
+
+
 def cmd_blend(args) -> None:
     """Pluvium Blend for any country: train it on a year of archived runs, or forecast 14 days for every town."""
     from .area import Area
     from .blendlive import BlendModel, write_table
     from .domain import Gazetteer, PointSet
+    from .frontier.model import FrontierBlend, load_blend
 
     root = Path(args.root).expanduser()
     if args.action == "train":
@@ -133,11 +154,34 @@ def cmd_blend(args) -> None:
             Area.for_countries(codes, cache=root / "cache" / "areas")
         root.mkdir(parents=True, exist_ok=True)
         area.save(root / "area.json")
-        model = BlendModel.train(area, root, start=args.start, end=args.end)
+        kind = BlendModel if args.classic else FrontierBlend
+        model = kind.train(area, root, start=args.start, end=args.end)
         print(f"blend for {area.name} trained on {model.meta['runs']} runs at {model.meta['cells']:,} places "
               f"({len(model.meta['components'])} components pooled); saved in {root / 'blend'}")
         return
-    model = BlendModel.load(root / "blend")
+    model = load_blend(root / "blend")
+    now = None
+    if args.time:
+        from .util import hour_of
+
+        now = hour_of(args.time)
+    if args.action == "learn":
+        if not isinstance(model, FrontierBlend):
+            raise SystemExit("this blend was trained with --classic and has no online weights to update")
+        from datetime import datetime, timezone
+
+        from .sources.cmorph_daily import stage_daily
+        from .util import hour_to_datetime64
+
+        hour = int(datetime.now(timezone.utc).timestamp() // 3600) if now is None else now
+        region = {model.area_json["name"]: tuple(model.area_json["target_box"])}
+        truth = stage_daily(root / "truth", region, str(hour_to_datetime64(hour - 24 * 20))[:13],
+                            str(hour_to_datetime64(hour))[:13])
+        learned = model.learn(root / "live_archive", truth, hour)
+        model.save(root / "blend")
+        weights = ", ".join(f"{k} {v:.2f}" for k, v in model.weights().items())
+        print(f"learned from {len(learned)} day(s); weights for light rain on days 1-3: {weights}")
+        return
     towns_path = root / "towns.npz"
     if towns_path.exists():
         towns = Gazetteer(PointSet.load(towns_path))
@@ -147,11 +191,6 @@ def cmd_blend(args) -> None:
         la, lo = np.meshgrid(lat_g, lon_g, indexing="ij")
         lat, lon = la.ravel(), lo.ravel()
         names = [f"{a:.2f},{b:.2f}" for a, b in zip(lat, lon)]
-    now = None
-    if args.time:
-        from .util import hour_of
-
-        now = hour_of(args.time)
     result = model.forecast(lat, lon, root / "live_archive", now=now)
     out = write_table(result, names, root / f"blend_{result['day0']}.csv")
     print(f"14-day blended forecast from {result['day0']} for {len(names):,} places -> {out}")
@@ -192,13 +231,24 @@ def main(argv=None) -> None:
     p.add_argument("--state", default="~/.cache/pluvium/live")
     p.set_defaults(func=cmd_learn)
     p = sub.add_parser("blend", help="Pluvium Blend for any country: train on a year of archived runs, then forecast 14 days")
-    p.add_argument("action", choices=["train", "forecast"])
+    p.add_argument("action", choices=["train", "forecast", "learn"],
+                   help="train: fit the blend; forecast: 14 days for every town; learn: update the online weights "
+                        "from the days whose rain is now known (run it daily, before forecast)")
     p.add_argument("--country", default=None, help="ISO codes (train; default: the area saved in --root)")
     p.add_argument("--root", default="pluvium-area")
     p.add_argument("--start", default="2024-04-01T00", help="training runs from (train)")
     p.add_argument("--end", default="2025-04-01T00", help="training runs until (train)")
     p.add_argument("--time", default=None, help="forecast as of this UTC hour, e.g. 2026-11-14T12 (default: now)")
+    p.add_argument("--classic", action="store_true",
+                   help="train the first Blend (no tail weighting, online weights or record-storm hand-over)")
     p.set_defaults(func=cmd_blend)
+    p = sub.add_parser("cyclone", help="Pluvium Cyclone: track, cone and passage chances for every storm alive now")
+    p.add_argument("--root", default="pluvium-cyclone", help="folder for decks, pressure fields, tracks and bulletins")
+    p.add_argument("--basins", default="al,ep", help="deck prefixes: al (North Atlantic), ep (East Pacific)")
+    p.add_argument("--time", default=None, help="as of this UTC hour, e.g. 2025-10-25T22 (default: now)")
+    p.add_argument("--replay-days", type=int, default=10, help="days of earlier runs replayed to learn from")
+    p.add_argument("--offline", action="store_true", help="use only decks and fields already in --root")
+    p.set_defaults(func=cmd_cyclone)
     p = sub.add_parser("setup", help="prepare Pluvium for any country: area, terrain, provinces, towns")
     p.add_argument("--country", required=True, help="ISO codes, e.g. TT or DO,HT")
     p.add_argument("--box", default=None, help="south,north,west,east instead of the countries' own extent")

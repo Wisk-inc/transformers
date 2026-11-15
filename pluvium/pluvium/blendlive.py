@@ -48,10 +48,11 @@ class BlendModel:
         return out
 
     # ------------------------------------------------------------------------------------- train --
-    @classmethod
-    def train(cls, area, root, start: str = "2024-04-01T00", end: str = "2025-04-01T00", workers: int = 8,
-              max_cells: int = 1500, max_rows: int = 400_000) -> BlendModel:
-        from .benchmarks.fullyear import CellSet, FullYearConfig, _fit_model, _fit_stack, _usable, build_table, land_mask
+    @staticmethod
+    def prepare(area, root, start: str, end: str, workers: int = 8, max_cells: int = 1500, keep_raw: bool = False) -> dict:
+        """Download a period of runs and CMORPH for an area and build the training table:
+        ``{"cells", "table", "lat", "lon", "truth", "runs"}``."""
+        from .benchmarks.fullyear import CellSet, build_table, land_mask
         from .sources.cmorph_daily import DailyTruth, stage_daily
 
         root = Path(root).expanduser()
@@ -71,7 +72,27 @@ class BlendModel:
             ii, jj = ii[keep], jj[keep]
         cells = CellSet(lat[ii], lon[jj], lambda h: truth.days(area.name, [h])[0][ii, jj], area.name)
         cells.climatology(np.arange(a, hour_of(end), 24))
-        table = build_table(cells, reader, area.name, runs, set(int(r) for r in long))
+        table = build_table(cells, reader, area.name, runs, set(int(r) for r in long), keep_raw=keep_raw)
+        return {"cells": cells, "table": table, "lat": lat, "lon": lon, "truth": truth, "runs": runs}
+
+    @staticmethod
+    def grid_climatology(area, truth, lat, lon, start: str, end: str) -> dict:
+        """The climatology on the whole grid (every cell, not only the scored ones), by month."""
+        from .benchmarks.fullyear import CellSet
+
+        full = CellSet(np.repeat(lat, lon.size), np.tile(lon, lat.size),
+                       lambda h: truth.days(area.name, [h])[0].ravel(), area.name)
+        full.climatology(np.arange(hour_of(start), hour_of(end), 24))
+        return {m: {k: v.reshape(lat.size, lon.size) for k, v in full.clim[m].items()} for m in full.clim}
+
+    @classmethod
+    def train(cls, area, root, start: str = "2024-04-01T00", end: str = "2025-04-01T00", workers: int = 8,
+              max_cells: int = 1500, max_rows: int = 400_000) -> BlendModel:
+        from .benchmarks.fullyear import FullYearConfig, _fit_model, _fit_stack, _usable
+
+        root = Path(root).expanduser()
+        data = cls.prepare(area, root, start, end, workers, max_cells)
+        cells, table, lat, lon, truth, runs = (data[k] for k in ("cells", "table", "lat", "lon", "truth", "runs"))
         systems = list(ARCHIVE_SYSTEMS)
         models = {s: [s] for s in systems}
         models["all"] = systems
@@ -84,11 +105,7 @@ class BlendModel:
                 nets[name] = fitted[0]
         models = {k: v for k, v in models.items() if k in nets}
         pool, _, _ = _fit_stack(table, every, models, systems, len(cells), cfg)
-        # the climatology on the whole grid (every cell, not only the scored ones), by month
-        full = CellSet(np.repeat(lat, lon.size), np.tile(lon, lat.size),
-                       lambda h: truth.days(area.name, [h])[0].ravel(), area.name)
-        full.climatology(np.arange(a, hour_of(end), 24))
-        clim = {m: {k: v.reshape(lat.size, lon.size) for k, v in full.clim[m].items()} for m in full.clim}
+        clim = cls.grid_climatology(area, truth, lat, lon, start, end)
         model = cls(nets, pool, systems, area.to_json(), clim, (lat, lon),
                     {"trained": [start, end], "runs": int(len(runs)), "cells": int(len(cells)),
                      "components": list(models)})
@@ -146,8 +163,9 @@ class BlendModel:
         j = np.clip(np.round((lon - glon[0]) / (glon[1] - glon[0])).astype(int), 0, glon.size - 1)
         return {k: v[i, j] for k, v in self.clim[month].items()}
 
-    def chances(self, per: dict, clim: dict, lead: float, n: int) -> np.ndarray:
-        """P(rain >= THRESHOLDS) at ``n`` places from each system's features ``per`` (missing systems absent)."""
+    def chances(self, per: dict, clim: dict, lead: float, n: int, raw: dict | None = None) -> np.ndarray:
+        """P(rain >= THRESHOLDS) at ``n`` places from each system's features ``per`` (missing systems absent).
+        ``raw`` (each system's members at the places) is used only by models with the record-storm hand-over."""
         comps = self.components()
         if self.pool is None:
             return B.predict(self.nets["all"], B.assemble(per, self.systems, {"ens", "gefs"}, clim, lead, n))
@@ -195,7 +213,7 @@ class BlendModel:
                         raw[system] = f.pop("_members")
                         per[system] = f
             clim = self._clim_at(lat, lon, int(str(hour_to_datetime64(valid))[5:7]))
-            p = self.chances(per, clim, float(d), lat.size)
+            p = self.chances(per, clim, float(d), lat.size, raw=raw)
             q = B.quantiles(p)
             out["days"].append({"date": str(hour_to_datetime64(valid))[:10], "systems": sorted(per),
                                 **{f"p_ge_{int(t)}": B.exceed(p, t) for t in B.SCORED},

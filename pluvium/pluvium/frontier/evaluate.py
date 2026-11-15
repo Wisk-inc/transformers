@@ -81,8 +81,7 @@ def fit_design(design: PoolDesign, d: dict, thresholds, rng: np.random.Generator
     return pool, cuts
 
 
-def warm_start(agg: OnlineAggregator, design: PoolDesign, pool, d: dict, run_of_block: np.ndarray,
-               latency: int) -> None:
+def warm_start(agg: OnlineAggregator, design: PoolDesign, pool, d: dict, latency: int) -> None:
     """Run the aggregator through a quarter's out-of-fold rows in time order (the training period), so it starts the
     test period knowing how the experts did last year."""
     from ..pool import run_online
@@ -92,7 +91,7 @@ def warm_start(agg: OnlineAggregator, design: PoolDesign, pool, d: dict, run_of_
     p_pool = predict_pool(pool, z, present, lead.astype(np.float32), build_gates(design.gates, z, present, valid))
     p = np.concatenate([sigmoid(z), p_pool[:, None, :]], 1)
     pres = np.concatenate([present, np.ones((present.shape[0], 1), bool)], 1)
-    issued = run_of_block[d["oof_block"]]
+    issued = valid.astype(np.int64) - 24 * (lead.astype(np.int64) - 1)          # the hour each row's run started
     run_online(agg, p, pres, lead, y, issued, valid + 24 + latency, w)
 
 
@@ -109,14 +108,19 @@ def evaluate(store: Store, designs: list, thresholds=B.SCORED, case_days=(), lat
     aggs, pending, weights_log = {}, {}, {}
     for q in store.quarters():
         d = store.quarter(q)
-        fitted = {design.name: fit_design(design, d, thresholds, rng) for design in designs}
+        fitted, by_pool = {}, {}
+        for design in designs:                                  # designs that share a pool share its fit
+            key = (design.bands, design.smooth, design.gates, design.ridge, design.rows, design.iters)
+            if key not in by_pool:
+                by_pool[key] = fit_design(design, d, thresholds, rng)
+            fitted[design.name] = by_pool[key]
         supports = {design.name: Support.from_rows(d["oof_raw_mean"], d["oof_w"], design.record_quantile,
                                                    design.record_width) for design in designs if design.record}
         for design in designs:
             if design.online and design.name not in aggs:
                 prior = np.concatenate([np.full(len(names), (1 - design.pool_prior) / len(names)), [design.pool_prior]])
                 aggs[design.name] = OnlineAggregator(len(names) + 1, design.eta, design.share, prior)
-                warm_start(aggs[design.name], design, fitted[design.name][0], d, store.run, latency)
+                warm_start(aggs[design.name], design, fitted[design.name][0], d, latency)
                 pending[design.name] = []
         order = sorted(range(d["test"].size), key=lambda r: (store.run[d["test"][r]], store.lead[d["test"][r]]))
         log(f"  {store.folder.name}: quarter {q}: pools fitted; scoring {len(order)} test blocks")

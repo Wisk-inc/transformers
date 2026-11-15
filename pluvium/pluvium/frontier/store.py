@@ -149,6 +149,9 @@ def build_store(cfg: FrontierConfig, place: str, country: dict | None = None) ->
         test = test_all[(runs[test_all] >= a) & (runs[test_all] < b)]
         if test.size == 0 or train.size == 0:
             continue
+        if (out / f"q{q}.npz").exists():                           # a build that was interrupted picks up here
+            log(f"  {place}: quarter {q} is already stored")
+            continue
         log(f"  {place}: quarter {q}: {train.size} training blocks ({train.size * n:,} rows), {test.size} test blocks")
         nets, cuts = {}, {}
         for name, members in models.items():
@@ -170,9 +173,11 @@ def build_store(cfg: FrontierConfig, place: str, country: dict | None = None) ->
                     continue
                 test_z[r, :, k] = block_logits(nets[name], table, int(i), members, n)
                 test_present[r, k] = True
-        np.savez(out / f"q{q}.npz", oof_z=z, oof_present=present, oof_w=weights, oof_raw_p=raw_p.astype(np.float16),
+        part = out / f"q{q}.part.npz"                             # written whole, then renamed: never half a quarter
+        np.savez(part, oof_z=z, oof_present=present, oof_w=weights, oof_raw_p=raw_p.astype(np.float16),
                  oof_raw_mean=raw_mean.astype(np.float32), test=test, test_z=test_z, test_present=test_present,
                  cuts=json.dumps(cuts), **{f"oof_{k}": v for k, v in rows.items()})
+        part.replace(out / f"q{q}.npz")
         log(f"  {place}: quarter {q} stored ({z.shape[0]:,} out-of-fold rows)")
     (out / "done").write_text("ok")
     return out
@@ -203,7 +208,7 @@ class Store:
         return self.y.shape[1]
 
     def quarters(self) -> list:
-        return sorted(int(p.stem[1:]) for p in self.folder.glob("q*.npz"))
+        return sorted(int(p.stem[1:]) for p in self.folder.glob("q*.npz") if p.stem[1:].isdigit())
 
     def quarter(self, q: int) -> dict:
         d = np.load(self.folder / f"q{q}.npz")

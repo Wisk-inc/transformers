@@ -111,11 +111,15 @@ class TrackStore:
 
     def get(self, archive: FieldArchive, storm: Storm, init: int, systems=SYSTEMS, cfg: TrackerConfig | None = None,
             carq: dict | None = None) -> dict:
-        """Tracks from the store, tracked and saved first when they are not there."""
-        got = self.load(storm.id, init)
-        if got is None:
-            got = track_case(archive, storm, init, systems, cfg, carq)
-            self.save(got)
+        """Tracks from the store, tracked and saved first when they are not there. A system whose fields arrived
+        after the case was first tracked is added then."""
+        got = self.load(storm.id, init) or {}
+        missing = [s for s in systems if s not in got and archive.path(s, init).exists()]
+        if missing:
+            new = track_case(archive, storm, init, missing, cfg, carq)
+            if new:
+                got.update(new)
+                self.save(got)
         return got
 
 
