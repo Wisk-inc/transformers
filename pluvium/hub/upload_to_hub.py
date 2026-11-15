@@ -22,7 +22,7 @@ GITHUB = "https://github.com/Wisk-inc/transformers.git"
 BRANCH = "claude/linear-context-architecture-a35c6h"
 # what goes in the repository: the card is hub/README.md; everything else keeps its path
 INCLUDE = ["pluvium/**", "tests/**", "scripts/**", "notebooks/**", "docs/**", "hub/upload_to_hub.py", "pyproject.toml",
-           "pytest.ini", "LICENSE", "README.md"]
+           "pytest.ini", "LICENSE", "README.md", "CHANGELOG.md"]
 IGNORE = ["**/__pycache__/**", "**/*.pyc", "**/.pytest_cache/**", "**/.ruff_cache/**", "dist/**", "**/*.egg-info/**"]
 
 
