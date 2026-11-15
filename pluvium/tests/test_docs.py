@@ -45,15 +45,42 @@ def test_cells_compile_and_call_commands_that_exist():
 
     known = set(re.findall(r'add_parser\("([a-z-]+)"', Path(cli.__file__).read_text()))
     cells = sorted(ROOT.glob("notebooks/*.py")) + [ROOT / "hub" / "upload_to_hub.py"]
-    assert len(cells) >= 3
+    assert len(cells) >= 4
+    called = r"\{pluvium\} ([a-z-]+)|PLUVIUM \+ \[\"([a-z-]+)\""            # both ways the cells call the command line
     for cell in cells:
         source = cell.read_text()
         compile(source, str(cell), "exec")                                 # a cell that does not parse helps nobody
         assert "PASTE_YOUR_ORG_TOKEN_HERE" in source or "HF_TOKEN" not in source   # tokens are pasted, never shipped
-        for command in re.findall(r"\{pluvium\} ([a-z-]+)", source):
-            assert command in known, (cell.name, command)
+        assert not re.search(r"hf_[A-Za-z0-9]{20,}", source), cell.name    # and no real token has slipped in
+        for a, b in re.findall(called, source):
+            assert (a or b) in known, (cell.name, a or b)
     blend = (ROOT / "notebooks" / "pluvium_blend_cell.py").read_text()
     assert {"setup", "blend", "cyclone"} <= set(re.findall(r"\{pluvium\} ([a-z-]+)", blend))
+    everything = (ROOT / "notebooks" / "pluvium_everything.py").read_text()
+    assert {"now", "upstream", "blend", "cyclone"} <= {b for _, b in re.findall(called, everything)}
+    assert everything.index("HF_TOKEN = ") < everything.index("import ")    # the settings come before any code
+
+
+def test_papers_and_card_have_none_of_the_signs_the_style_check_lists():
+    """``scripts/check_style.py`` encodes Wikipedia's field guide to signs of AI writing: its word lists, the
+    formulas it describes and its formatting habits. The papers, the model card and the readme carry none."""
+    spec = importlib.util.spec_from_file_location("check_style", ROOT / "scripts" / "check_style.py")
+    style = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(style)
+    pages = sorted(ROOT.glob("docs/papers/*.md")) + [ROOT / "hub" / "README.md", ROOT / "README.md"]
+    assert len(pages) >= 7
+    for page in pages:
+        found = style.findings(page.read_text())
+        assert not found, (page.name, found[:5])
+    for page in sorted(ROOT.glob("docs/papers/0*.md")):
+        text = page.read_text()
+        rhythm = style.rhythm(text)
+        assert rhythm["share_8_to_20"] < 0.75, page.name                   # sentences of every length, as people write
+        body, refs = text.split("## References")
+        for author in re.findall(r"^- ([A-Z][a-z]+),", refs, re.M):         # every reference is used in the text
+            assert author in body, (page.name, author)
+        assert all("doi:" in line or "arXiv:" in line for line in refs.strip().split("\n- "))
+    assert style.findings("It stands as a testament, not just a tool.\n- **Speed:** fast\n## A Title In Title Case Here")
 
 
 def test_headline_results_are_the_same_text_wherever_they_appear():
@@ -65,8 +92,8 @@ def test_headline_results_are_the_same_text_wherever_they_appear():
         text = doc.read_text()
         assert text.count("<!-- frontier-summary:start -->") == 1 and text.count("<!-- frontier-summary:end -->") == 1
         block = text.split("<!-- frontier-summary:start -->")[1].split("<!-- frontier-summary:end -->")[0].strip()
-        bullets = [line for line in block.splitlines() if line.startswith("- **")]
-        assert len(bullets) >= 4 and bullets[0].startswith("- **Heavy rain (50 mm).**")
+        bullets = [line for line in block.splitlines() if line.startswith("- ")]
+        assert len(bullets) >= 4 and bullets[0].startswith("- At 50 mm, Brier skill improved on the first Blend")
         for bullet in bullets:
             assert bullet in page, bullet[:60]                             # word for word what the benchmark page says
         blocks.append(block)

@@ -32,7 +32,7 @@ import numpy as np
 import torch
 
 from .. import blend as B
-from ..blendlive import BlendModel
+from ..blendlive import BlendModel, read_state
 from ..pool import OnlineAggregator, fit_pool, predict_pool, run_online
 from ..pool.gated import GatedPool
 from ..sources.archive import ARCHIVE_SYSTEMS, DAYS, LIMIT, ArchiveReader
@@ -164,10 +164,14 @@ class FrontierBlend(BlendModel):
     def save(self, directory) -> Path:
         d = Path(directory).expanduser()
         d.mkdir(parents=True, exist_ok=True)
+        # tensors and plain values only, so the file can be opened without running code (blendlive.read_state)
+        online = None if self.online is None else {
+            k: torch.from_numpy(np.ascontiguousarray(v)) if isinstance(v, np.ndarray) else int(v)
+            for k, v in self.online.state().items()}
         torch.save({"nets": {k: net.state_dict() for k, net in self.nets.items()},
                     "n_in": {k: int(net.mu.numel()) for k, net in self.nets.items()},
                     "pool": self.pool.state_dict(), "components": list(self.components()),
-                    "online": None if self.online is None else self.online.state()}, d / "blend.pt")
+                    "online": online}, d / "blend.pt")
         extra = {} if self.cells is None else {"cell_lat": self.cells[0], "cell_lon": self.cells[1]}
         np.savez_compressed(d / "climatology.npz", lat=self.grid[0], lon=self.grid[1], **extra,
                             **{f"{k}_{m:02d}": v for m, entry in self.clim.items() for k, v in entry.items()})
@@ -183,10 +187,12 @@ class FrontierBlend(BlendModel):
         return d
 
     @classmethod
-    def load(cls, directory) -> FrontierBlend:
+    def load(cls, directory, trusted: bool = True) -> FrontierBlend:
+        """The blend saved in ``directory``. ``trusted=False`` for files that came from somewhere else: they are
+        opened only if that cannot run code (:func:`pluvium.blendlive.read_state`)."""
         d = Path(directory).expanduser()
         meta = json.loads((d / "blend.json").read_text())
-        state = torch.load(d / "blend.pt", map_location="cpu", weights_only=False)
+        state = read_state(d / "blend.pt", trusted)
         nets = {}
         for k, sd in state["nets"].items():
             nets[k] = B.BlendNet(int(state["n_in"][k]))
@@ -199,7 +205,7 @@ class FrontierBlend(BlendModel):
         if meta.get("online") and state.get("online") is not None:
             o = meta["online"]
             online = OnlineAggregator(len(state["components"]) + 1, o["eta"], o["share"], np.asarray(o["prior"]))
-            online.load_state(state["online"])
+            online.load_state({k: v.numpy() if torch.is_tensor(v) else v for k, v in state["online"].items()})
         support = None if not meta.get("support") else Support(meta["support"]["edge_mm"], meta["support"]["width"])
         z = np.load(d / "climatology.npz")
         clim, cells = {}, None
@@ -263,13 +269,28 @@ class FrontierBlend(BlendModel):
         if self.online is not None:
             self.online.update(p_exp, present, lead, y)
 
-    def learn(self, cache, truth, now: int | None = None, leads=(1, 2, 3, 5, 7, 10, 14), max_days: int = 14) -> list:
-        """Learn from every day whose rain is known and not yet learned from, newest ``max_days`` only.
+    def first_unlearned(self) -> int:
+        """The first day (hours since 1970) the online weights have not seen: the day after the newest one learned
+        from, or, for a blend that has only been trained, the first day forecast entirely by runs after its training
+        period."""
+        done = self.meta.get("learned_days", [])
+        if done:
+            return hour_of(max(done) + "T00") + 24
+        end = (self.meta.get("trained") or [None, None])[1]
+        return hour_of(end) + 24 * (DAYS + 1) if end else 0
 
-        For each such day the runs that forecast it at ``leads`` days ahead are read (from ``cache``, downloaded when
+    def learn(self, cache, truth, now: int | None = None, leads=(1, 2, 3, 5, 7, 10, 14), max_days: int = 14,
+              since: int | None = None, until: int | None = None) -> list:
+        """Learn from days whose rain is known and not yet learned from, at most ``max_days`` of them, oldest first.
+
+        Without ``since`` the newest ``max_days`` days are looked at, which suits a truth that arrives within two
+        days. The satellite record Pluvium trains on arrives months late, so the command line passes ``since``
+        (:meth:`first_unlearned`) and ``until`` (the last day the record holds) and each call catches up a little.
+
+        For each day the runs that forecast it at ``leads`` days ahead are read (from ``cache``, downloaded when
         missing), the experts' chances at the training places are rebuilt, and the weights are updated against
         ``truth`` (a :class:`pluvium.sources.cmorph_daily.DailyTruth`, or anything with ``days(name, [hour])``).
-        Returns the days learned from. Call it once a day, before :meth:`forecast`, then :meth:`save`."""
+        Returns the days learned from. Call :meth:`save` afterwards."""
         from ..benchmarks.fullyear import CellSet, system_at_cells
 
         if self.online is None or self.cells is None:
@@ -284,8 +305,13 @@ class FrontierBlend(BlendModel):
         j = np.clip(np.round((lon - glon[0]) / (glon[1] - glon[0])).astype(int), 0, glon.size - 1)
         done = set(self.meta.get("learned_days", []))
         last = now - now % 24 - 24 - int(self.meta.get("latency_hours", 48))        # the newest day that can be known
+        if until is not None:
+            last = min(last, int(until) - int(until) % 24)
+        first = last - 24 * (max_days - 1) if since is None else int(since) - int(since) % 24
         learned = []
-        for day in range(last - 24 * (max_days - 1), last + 1, 24):
+        for day in range(first, last + 1, 24):
+            if len(learned) >= max_days:
+                break
             stamp = str(hour_to_datetime64(day))[:10]
             if stamp in done:
                 continue
@@ -296,6 +322,7 @@ class FrontierBlend(BlendModel):
             if np.isfinite(y).mean() < 0.5:
                 continue
             clim = self._clim_at(lat, lon, int(stamp[5:7]))
+            used = 0
             for lead in leads:
                 init = day - 24 * (lead - 1)
                 per = {}
@@ -309,7 +336,9 @@ class FrontierBlend(BlendModel):
                 if per:
                     p_exp, present = self.experts(per, clim, float(lead), lat.size)
                     self.learn_rows(p_exp, present, np.full(lat.size, lead), y)
-            learned.append(stamp)
+                    used += 1
+            if used:                                                # a day no run could be read for is tried again
+                learned.append(stamp)
         self.meta["learned_days"] = sorted(done | set(learned))[-400:]
         if learned:
             log(f"blend for {name}: learned from {len(learned)} day(s), {learned[0]} to {learned[-1]}")
@@ -323,10 +352,11 @@ class FrontierBlend(BlendModel):
         return {n: float(w) for n, w in zip(names, self.online.weights()[0, 0])}
 
 
-def load_blend(directory) -> BlendModel:
-    """The blend saved in a folder, whichever kind it is."""
+def load_blend(directory, trusted: bool = True) -> BlendModel:
+    """The blend saved in a folder, whichever kind it is. ``trusted=False`` for a folder that was downloaded."""
     meta = json.loads((Path(directory).expanduser() / "blend.json").read_text())
-    return FrontierBlend.load(directory) if meta.get("kind") == "frontier" else BlendModel.load(directory)
+    kind = FrontierBlend if meta.get("kind") == "frontier" else BlendModel
+    return kind.load(directory, trusted)
 
 
-__all__ = ["BANDS", "HANDOVER_MODES", "FrontierBlend", "load_blend"]
+__all__ = ["BANDS", "HANDOVER_MODES", "FrontierBlend", "load_blend", "read_state"]

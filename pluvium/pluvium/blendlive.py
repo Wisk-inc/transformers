@@ -32,6 +32,23 @@ LATENCY = {"ens": 8, "gefs": 6, "ifs": 7, "aifs": 7, "graphcast": 6, "gfs": 5}
 RAW_ALERT_MM = 50.0
 
 
+def read_state(path, trusted: bool = True) -> dict:
+    """Open a saved ``blend.pt``.
+
+    Files written since version 0.4 hold tensors and plain values only, and are opened in a way that cannot run
+    code. A file written before that needs Python's full unpickler, which can run whatever code the file carries.
+    That is allowed for a ``trusted`` file (one trained on this machine) and refused for anything else, such as a
+    blend downloaded from a repository.
+    """
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as error:
+        if not trusted:
+            raise ValueError(f"{path} is not in the safe format (written by Pluvium 0.4 or later), and a downloaded "
+                             "file is not opened any other way") from error
+        return torch.load(path, map_location="cpu", weights_only=False)
+
+
 class BlendModel:
     """A trained Pluvium Blend: each system post-processed on its own, one network over all of them, and the pool
     that weighs them (:class:`pluvium.blend.StackPool`). Models saved before the pool existed hold one network."""
@@ -64,6 +81,20 @@ class BlendModel:
         stage_daily(root / "truth", region, start, str(hour_to_datetime64(hour_of(end) + 24 * (DAYS + 1)))[:13], workers=4)
         truth = DailyTruth(root / "truth")
         lat, lon = truth.grid(area.name)
+        days = np.arange(a - a % 24, hour_of(end), 24)
+        known = int(sum(np.isfinite(day).mean() > 0.5 for day in truth.days(area.name, days)))
+        if known < min(30, days.size):                              # nothing to learn from: say why, and what to do
+            from .sources.cmorph_daily import truth_until
+            from .util import PluviumError
+
+            last = truth_until()
+            ends = "" if last is None else f" Today it ends on {str(hour_to_datetime64(last))[:10]}."
+            hint = "" if last is None else (f" A period ending on {str(hour_to_datetime64(last - 24 * (DAYS + 1)))[:10]} "
+                                            "or earlier will work.")
+            raise PluviumError(
+                f"The satellite rain record (NOAA CMORPH) has {known} of the {days.size} days from {start[:10]} to "
+                f"{end[:10]}, too few to train on. NOAA publishes it about five months late.{ends}{hint} "
+                "`pluvium now` picks the most recent year that is complete by itself.")
         reader = ArchiveReader(root / "archive", region)
         mask = land_mask(reader, area.name, lat, lon, root / "masks")
         ii, jj = np.nonzero(mask)
@@ -127,10 +158,12 @@ class BlendModel:
         return d
 
     @classmethod
-    def load(cls, directory) -> BlendModel:
+    def load(cls, directory, trusted: bool = True) -> BlendModel:
+        """The blend saved in ``directory``. ``trusted=False`` for files that came from somewhere else
+        (:func:`read_state`)."""
         d = Path(directory).expanduser()
         meta = json.loads((d / "blend.json").read_text())
-        state = torch.load(d / "blend.pt", map_location="cpu", weights_only=False)
+        state = read_state(d / "blend.pt", trusted)
         if "nets" in state:
             nets = {}
             for k, sd in state["nets"].items():

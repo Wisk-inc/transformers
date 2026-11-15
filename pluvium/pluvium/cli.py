@@ -98,26 +98,77 @@ def cmd_info(args) -> None:
 
 def cmd_setup(args) -> None:
     """Prepare Pluvium for any country: its area, terrain, coasts, provinces and every town, ready to train."""
-    from .area import Area
-    from .domain import Geography, build_gazetteer
+    from .quick import setup
 
     root = Path(args.root).expanduser()
     codes = [c.strip() for c in args.country.split(",") if c.strip()]
     box = tuple(float(x) for x in args.box.split(",")) if args.box else None
-    area = Area.for_countries(codes, box=box, cache=root / "cache" / "areas")
-    root.mkdir(parents=True, exist_ok=True)
-    area.save(root / "area.json")
-    geo = Geography.build(cache=root / "cache" / "geography", area=area)
-    geo.save(root / "geography")
-    towns = build_gazetteer(geo.terrain, countries=area.iso2, cache=root / "cache" / "geonames", box=area.target_box)
-    towns.points.save(root / "towns.npz")
+    area, geo, towns = setup(codes, root, box)
     s, n, w, e = area.target_box
     print(f"{area.name}: {', '.join(area.countries.values())}")
     print(f"  forecasts for {s:.2f} to {n:.2f} N, {w:.2f} to {e:.2f} E; weather read over {area.domain}")
     print(f"  mesh {len(geo.mesh):,} points, {len(geo.targets):,} truth cells, {len(towns.points):,} places")
     print(f"  live rain now from {area.satellite}; bulletins in "
           + "; ".join(f"{cc}: {', '.join(area.bulletin_languages(cc))}" for cc in area.iso2))
-    print(f"next: pluvium program --root {root} --country {','.join(codes)}")
+    print(f"next: pluvium now --country {','.join(codes)} --root {root}   (14-day rain, on a CPU)")
+    print(f"  or: pluvium program --root {root} --country {','.join(codes)}   (the hourly network, on a GPU)")
+
+
+def cmd_now(args) -> None:
+    """From nothing to the 14-day rain forecast for a country, in one command (:mod:`pluvium.quick`)."""
+    from .blendlive import alert_summary
+    from .frontier.model import FrontierBlend
+    from .quick import brief, forecast
+
+    got = forecast(args.country, args.root, args.repo or None, time=args.time, learn=args.learn,
+                   train=not args.no_train, handover=args.handover)
+    model, result = got["model"], got["result"]
+    source = {"local": "the blend already in this folder", "downloaded": f"the blend published in {args.repo}",
+              "trained": "a blend trained just now"}[got["how"]]
+    print(f"\n{model.area_json['name']}: 14-day rain forecast from {result['day0']} for {len(got['names']):,} places, "
+          f"with {source}")
+    print("runs read: " + ", ".join(f"{k} {v}Z" for k, v in result["runs"].items()))
+    missing = [s for s in model.systems if s not in result["runs"]]
+    if missing:
+        print("not available right now, and left out: " + ", ".join(missing))
+    if isinstance(model, FrontierBlend):
+        print(handover_line(model))
+    print()
+    print(brief(result, got["names"], got["population"], top=args.top, days=args.days, place=args.place))
+    print()
+    alerts = alert_summary(result)
+    if alerts:
+        print(alerts)
+    print(f"every place and all 14 days: {got['table']}")
+    if args.storms:
+        args.root, args.basins, args.offline, args.replay_days = str(got["root"]), args.basins, False, 10
+        cmd_cyclone(args)
+
+
+def cmd_upstream(args) -> None:
+    """The published weights of the AI models whose forecasts Pluvium reads: list them, copy them, mirror them."""
+    from . import upstream
+
+    if args.action == "list":
+        print(f"{'name':26s} {'MB':>6s}  {'licence':22s} {'feeds':10s} what")
+        for m in upstream.MODELS:
+            print(f"{m.name:26s} {m.size_mb:6d}  {m.licence:22s} {m.feeds:10s} {m.title}" + ("  (in use today)" if m.current else ""))
+        print(f"{'':26s} {sum(m.size_mb for m in upstream.MODELS):6d}  in all. Pluvium reads these models' forecasts; "
+              "it does not run them.")
+        return
+    if args.action == "fetch":
+        for m in upstream.select(args.names):
+            folder = upstream.fetch_model(m, args.cache)
+            print(f"{m.name}: {folder}")
+        return
+    if not args.repo:
+        raise SystemExit("mirror needs --repo, e.g. --repo CorxLabs/Pluvium-500")
+    results = upstream.mirror(args.repo, names=args.names, cache=args.cache, private=args.private, keep=not args.no_keep)
+    for name, outcome in results.items():
+        print(f"{name}: {outcome}")
+    print(f"upstream weights in https://huggingface.co/{args.repo}/tree/main/upstream: {upstream.summary(results)}")
+    if any(r.startswith("failed") for r in results.values()):
+        raise SystemExit(1)
 
 
 def cmd_cyclone(args) -> None:
@@ -162,16 +213,29 @@ def cmd_blend(args) -> None:
     from .frontier.model import FrontierBlend, load_blend
 
     root = Path(args.root).expanduser()
+    if args.action == "publish":
+        from .quick import publish_blend
+
+        if not args.repo:
+            raise SystemExit("publish needs --repo, e.g. --repo CorxLabs/Pluvium-500")
+        publish_blend(args.repo, root, private=args.private)
+        return
     if args.action == "train":
         codes = [c.strip() for c in (args.country or "").split(",") if c.strip()]
         area = Area.load(root / "area.json") if (root / "area.json").exists() and not codes else \
             Area.for_countries(codes, cache=root / "cache" / "areas")
         root.mkdir(parents=True, exist_ok=True)
         area.save(root / "area.json")
+        start, end = args.start, args.end
+        if not (start and end):
+            from .quick import recent_year
+
+            start, end = recent_year()
+            print(f"training period: {start[:10]} to {end[:10]}, the most recent year NOAA's rain record covers")
         if args.classic:
-            model = BlendModel.train(area, root, start=args.start, end=args.end)
+            model = BlendModel.train(area, root, start=start, end=end)
         else:
-            model = FrontierBlend.train(area, root, start=args.start, end=args.end, handover=args.handover or "auto")
+            model = FrontierBlend.train(area, root, start=start, end=end, handover=args.handover or "auto")
         print(f"blend for {area.name} trained on {model.meta['runs']} runs at {model.meta['cells']:,} places "
               f"({len(model.meta['components'])} components pooled); saved in {root / 'blend'}")
         if isinstance(model, FrontierBlend):
@@ -188,17 +252,9 @@ def cmd_blend(args) -> None:
     if args.action == "learn":
         if not isinstance(model, FrontierBlend):
             raise SystemExit("this blend was trained with --classic and has no online weights to update")
-        from datetime import datetime, timezone
+        from .quick import catch_up
 
-        from .sources.cmorph_daily import stage_daily
-        from .util import hour_to_datetime64
-
-        hour = int(datetime.now(timezone.utc).timestamp() // 3600) if now is None else now
-        region = {model.area_json["name"]: tuple(model.area_json["target_box"])}
-        truth = stage_daily(root / "truth", region, str(hour_to_datetime64(hour - 24 * 20))[:13],
-                            str(hour_to_datetime64(hour))[:13])
-        learned = model.learn(root / "live_archive", truth, hour)
-        model.save(root / "blend")
+        learned = catch_up(model, root, now)
         weights = ", ".join(f"{k} {v:.2f}" for k, v in model.weights().items())
         print(f"learned from {len(learned)} day(s); weights for light rain on days 1-3: {weights}")
         return
@@ -254,13 +310,17 @@ def main(argv=None) -> None:
     p.add_argument("--state", default="~/.cache/pluvium/live")
     p.set_defaults(func=cmd_learn)
     p = sub.add_parser("blend", help="Pluvium Blend for any country: train on a year of archived runs, then forecast 14 days")
-    p.add_argument("action", choices=["train", "forecast", "learn"],
+    p.add_argument("action", choices=["train", "forecast", "learn", "publish"],
                    help="train: fit the blend; forecast: 14 days for every town; learn: update the online weights "
-                        "from the days whose rain is now known (run it daily, before forecast)")
+                        "from the days whose rain is now known (run it daily, before forecast); publish: upload the "
+                        "trained blend to a Hub repository so that others can skip training")
+    p.add_argument("--repo", default=None, help="Hub model repository (publish)")
+    p.add_argument("--private", action="store_true", help="create the repository as private (publish)")
     p.add_argument("--country", default=None, help="ISO codes (train; default: the area saved in --root)")
     p.add_argument("--root", default="pluvium-area")
-    p.add_argument("--start", default="2024-04-01T00", help="training runs from (train)")
-    p.add_argument("--end", default="2025-04-01T00", help="training runs until (train)")
+    p.add_argument("--start", default=None, help="training runs from, e.g. 2024-04-01T00 (train; default with --end "
+                                                 "left out too: the most recent year the rain record covers)")
+    p.add_argument("--end", default=None, help="training runs until (train)")
     p.add_argument("--time", default=None, help="forecast as of this UTC hour, e.g. 2026-11-14T12 (default: now)")
     p.add_argument("--classic", action="store_true",
                    help="train the first Blend (no tail weighting, online weights or record-storm hand-over)")
@@ -269,6 +329,32 @@ def main(argv=None) -> None:
                         "staged at training (the default), always hand it to the raw systems, or never. With train "
                         "it is saved in the model; with forecast it applies to that run only")
     p.set_defaults(func=cmd_blend)
+    p = sub.add_parser("now", help="the 14-day rain forecast for a country in one command: sets it up, downloads a "
+                                   "trained blend or trains one, reads the newest runs")
+    p.add_argument("--country", required=True, help="ISO codes, e.g. JM or DO,HT")
+    p.add_argument("--root", default=None, help="folder for the country's files (default: ~/pluvium-<codes>)")
+    p.add_argument("--repo", default=DEFAULT_REPO, help="Hub repository to look in for a trained blend ('' for none)")
+    p.add_argument("--place", default=None, help="show the places whose name contains this, not the largest towns")
+    p.add_argument("--top", type=int, default=5, help="how many places to print")
+    p.add_argument("--days", type=int, default=5, help="how many days to print (the table always has 14)")
+    p.add_argument("--learn", action="store_true",
+                   help="first update the online weights from the days whose rain is now known (daily use)")
+    p.add_argument("--no-train", action="store_true", help="stop if no trained blend is found, do not train one")
+    p.add_argument("--time", default=None, help="forecast as of this UTC hour, e.g. 2026-11-14T12 (default: now)")
+    p.add_argument("--handover", choices=["auto", "always", "never"], default=None,
+                   help="overrule the staged storms' verdict on record storms for this run")
+    p.add_argument("--storms", action="store_true", help="also track every tropical cyclone alive now")
+    p.add_argument("--basins", default="al,ep", help="basins for --storms")
+    p.set_defaults(func=cmd_now)
+    p = sub.add_parser("upstream", help="the published weights of the AI models whose forecasts Pluvium reads: "
+                                        "list them, copy them, mirror them into a Hub repository")
+    p.add_argument("action", choices=["list", "fetch", "mirror"])
+    p.add_argument("names", nargs="*", help="which models (default: all; see `pluvium upstream list`)")
+    p.add_argument("--repo", default=None, help="Hub model repository to mirror into (mirror)")
+    p.add_argument("--cache", default="~/.cache/pluvium/upstream", help="where the local copies are kept")
+    p.add_argument("--private", action="store_true", help="create the repository as private (mirror)")
+    p.add_argument("--no-keep", action="store_true", help="delete each local copy once it is uploaded (mirror)")
+    p.set_defaults(func=cmd_upstream)
     p = sub.add_parser("cyclone", help="Pluvium Cyclone: track, cone and passage chances for every storm alive now")
     p.add_argument("--root", default="pluvium-cyclone", help="folder for decks, pressure fields, tracks and bulletins")
     p.add_argument("--basins", default="al,ep", help="deck prefixes: al (North Atlantic), ep (East Pacific)")
@@ -304,7 +390,12 @@ def main(argv=None) -> None:
 
         bench_main(rest)
         return
-    args.func(args)
+    from .util import PluviumError
+
+    try:
+        args.func(args)
+    except PluviumError as error:                               # something the person can act on: no traceback
+        raise SystemExit(f"pluvium: {error}") from None
 
 
 if __name__ == "__main__":

@@ -60,6 +60,11 @@ class FetchError(RuntimeError):
     pass
 
 
+class PluviumError(RuntimeError):
+    """Something a person can act on (a period with no data, a missing folder). The command line prints its message
+    and stops, without a traceback."""
+
+
 def fetch(url: str, start: int | None = None, end: int | None = None, timeout: float = 120.0, attempts: int = 5,
           missing_ok: bool = False) -> bytes | None:
     """

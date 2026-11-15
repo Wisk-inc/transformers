@@ -1,6 +1,6 @@
 # Forecasting beyond the training record: a hand-over to the raw systems, decided by staged storms
 
-**Pluvium technical paper 2.** Nathan, November 2026.
+Pluvium technical paper 2. Nathan, November 2026.
 
 ## Summary
 
@@ -8,27 +8,27 @@ A calibrated forecast is a map learned from the forecasts of its training period
 
 We hand such a forecast back, in part, to the plain agreement of the raw systems. The share handed over is exactly zero inside the range of the training forecasts and rises beyond it, and it is scaled by how many systems agree. To test the idea without touching the test year, we stage record storms inside the training year: the wettest days are removed from training and then forecast.
 
-With the four wettest days withheld, the calibrated forecast gave on average 10 mm where 22 mm fell. The hand-over improved the Brier score at 50 mm on those days in 5 of 7 places (Jamaica, the Caribbean, the Maritime Continent, the US Great Plains and the Southern Andes) and not in the Alps and the US Pacific Northwest.
+With the four wettest days withheld, the calibrated forecast gave on average 10 mm where 22 mm fell. The hand-over improved the Brier score at 50 mm on those days in 5 of 7 places (Jamaica, the Caribbean, the Maritime Continent, the US Great Plains and the Southern Andes). It made the score worse in the Alps and the US Pacific Northwest.
 
-That split is the main finding. The hand-over is not good or bad in general. It helps where the raw systems are the better guide to a storm the calibration has never seen, and hurts where they overcall heavy rain against the truth. So each place decides from its own staged storms: the hand-over is used only where it lowered the Brier score at 50 mm on them.
+That split is the main finding. The hand-over helps where the raw systems are the better guide to a storm the calibration has never seen, and it does harm where they overcall heavy rain against the truth. So each place decides from its own staged storms: the hand-over is used only where it lowered the Brier score at 50 mm on them.
 
 In the test year the hand-over was on in Jamaica, the Caribbean, the Maritime Continent, the US Great Plains and the Southern Andes and off in the Alps and the US Pacific Northwest. Mean Brier skill at 50 mm on days 1-3 over the 7 places is +0.1996 with no hand-over, +0.2089 with it always on and +0.2133 as the places decided. Each place's verdict had the sign of what the hand-over then did in the test year in 7 of 7 places, and in 2 of the 2 scored after the rule was final.
 
-This paper also reports a rule that failed. Before settling on the staged storms we switched the hand-over by an audit of the training period's out-of-fold forecasts, a far larger sample. It would have had the right sign in 4 of 7 places. The hand-over touches one forecast in a thousand, so its effect on a year's score is a few tenths of a percent, and the sign of that number is not evidence.
+The paper also reports a rule that failed. Before settling on the staged storms we switched the hand-over by an audit of the training period's out-of-fold forecasts, a far larger sample. It would have had the right sign in 4 of 7 places. The hand-over touches one forecast in a thousand, so its effect on a year's score is a few tenths of a percent, and the sign of so small a number tells us nothing.
 
-The staged-storm rule was the first one written down, was replaced by the audit, and was restored when 5 of the 7 places (the Caribbean, the Maritime Continent, the Alps, the US Pacific Northwest and the Southern Andes) had been scored. It is not a blind result for them. The rain test year (April 2025 to March 2026) is the year on which the weak spots were found. Every design choice was made inside the training year and written down before the test year was scored, but a second look at a year is weaker evidence than a fresh year.
+The staged-storm rule was the first one written down, was replaced by the audit, and was restored when 5 of the 7 places (the Caribbean, the Maritime Continent, the Alps, the US Pacific Northwest and the Southern Andes) had been scored. For those places the rule was settled with their test results known. The rain test year (April 2025 to March 2026) is the year on which the weak spots were found. Every design choice was made inside the training year and written down before the test year was scored, but a second look at a year is weaker evidence than a fresh year.
 
 ## 1. The problem
 
-Calibration shrinks forecasts towards what usually happens, and it should: a raw 80 mm forecast usually verifies well below 80 mm. A record storm is exactly the case where that lesson is wrong, and it is the case that matters most. No amount of care in fitting helps, because the training period does not hold the event.
+Calibration shrinks forecasts towards what usually happens, and it should: a raw 80 mm forecast usually verifies well below 80 mm. A record storm is the case in which that lesson fails, and it is also the case in which a low forecast costs the most. Fitting more carefully does not help, because the training period does not hold the event.
 
-The raw systems are not bound in the same way. They are physics, or machine learning trained on forty years of reanalysis, and they can produce an event unlike anything in a one-year training set.
+The raw systems are not bound in the same way. They are physical models, or machine-learning models trained on about forty years of reanalysis, and they can produce an event unlike anything in a one-year training set.
 
 ## 2. Method
 
 ### 2.1 The raw consensus
 
-Every system has one vote, however many members it runs. A system's chance of a threshold is the share of its members that reach it, 0 or 1 for a single run, and the consensus is the mean over the systems present. On ordinary days this is a poorly calibrated forecast, which is why it is not the forecast.
+Every system has one vote, however many members it runs. A system's chance of a threshold is the share of its members that reach it, 0 or 1 for a single run, and the consensus is the mean over the systems present. On ordinary days the consensus is poorly calibrated, which is why it is used only for the hand-over.
 
 ### 2.2 Support: has the calibration seen a forecast like this one?
 
@@ -47,19 +47,21 @@ Every system has one vote, however many members it runs. A system's chance of a 
 
 The remedy cannot be tuned on the test year, and ordinary days say nothing about it. So the situation is staged inside the training year. The four wettest days, at least five days apart, are removed from training along with the two days either side. Twelve ordinary days are removed as a control. A calibrated forecast is trained on the rest, and the withheld days are forecast with and without the hand-over.
 
-**The verdict.** A place uses the hand-over if it lowered the Brier score at 50 mm on its withheld storms. The control days are not part of the verdict. They show that ordinary days are left alone. With no storm to judge by, the hand-over is kept, because a shrunk record storm is the costlier error. `pluvium blend train` stages the storms, prints the verdict and saves it with the model. The owner can overrule it (`--handover always` or `never`).
+### 2.5 The verdict
 
-### 2.5 The yearly check, and why it does not decide
+A place uses the hand-over if it lowered the Brier score at 50 mm on its withheld storms. The control days take no part in the verdict; they are there to show that ordinary days are left alone. With no storm to judge by, the hand-over is kept, because a shrunk record storm is the costlier error. `pluvium blend train` stages the storms, prints the verdict and saves it with the model. The owner can overrule it (`--handover always` or `never`).
+
+### 2.6 The yearly check, and why it does not decide
 
 The staged storms are four days. A larger sample is at hand: every training row has an out-of-fold forecast, made by networks that never saw that row's days. The check applies the hand-over to all of them and compares
 
     Brier(with hand-over) against Brier(without),   at 50 mm, over all training rows
 
-with the rows' sampling weights undone. It costs nothing, and we first used it as the switch. It does not work as one. The hand-over touches about one row in a thousand, most of them heavy days of a kind the networks have seen. Over a year its effect on the score is a few tenths of a percent in either direction, and in three of seven places the sign changes when the check is run on the one-network component's forecast in place of the pool's ([WHAT_DID_NOT_WORK.md](../WHAT_DID_NOT_WORK.md)). It is still run at every training and saved with the model, as the price of the hand-over in an ordinary year.
+with the rows' sampling weights undone. It costs nothing, and we first used it as the switch. It turned out to be useless for that. The hand-over touches about one row in a thousand, most of them heavy days of a kind the networks have seen. Over a year its effect on the score is a few tenths of a percent in either direction, and in three of seven places the sign changes when the check is run on the one-network component's forecast in place of the pool's ([WHAT_DID_NOT_WORK.md](../WHAT_DID_NOT_WORK.md)). The check is still run at every training and saved with the model, because it shows what the hand-over costs in an ordinary year.
 
-### 2.6 What the user is told
+### 2.7 What the user is told
 
-The forecast table carries three more columns. An alert tier for 50 mm (watch at a 10% chance, warning at 30%, extreme at 60%). A flag when the raw systems call for more than anything in the training period, in which case amounts should be read as a lower bound. And how rare the expected amount is at that place, from a generalised Pareto fit to the area's daily record (Pickands, 1975; Hosking and Wallis, 1987) with one shape for the area and a threshold and scale per place (Dalrymple, 1960). Beyond four times the length of the record the answer is only "rarer than once in that many years".
+The forecast table carries three more columns. The first is an alert tier for 50 mm: watch at a 10% chance, warning at 30%, extreme at 60%. The second is a flag for the days on which the raw systems call for more than anything in the training period; on those days the amounts should be read as a lower bound. The third says how rare the expected amount is at that place. It comes from a generalised Pareto fit to the area's daily record (Pickands, 1975; Hosking and Wallis, 1987), with one shape for the area and a threshold and scale per place, which is the index-flood idea of Dalrymple (1960). Beyond four times the length of the record the answer is only "rarer than once in that many years".
 
 ## 3. Results
 
@@ -91,7 +93,7 @@ The staged storms decide. The yearly check is shown beside them. The last column
 | US Great Plains | -4.3% | **keep** | -0.17% | **keep** (at 4 of 4 refits: keep) | +0.0152 |
 | Southern Andes | -5.4% | **keep** | +0.07% | switch off (at 0 of 4 refits: keep) | +0.0175 |
 
-The staged storms had the sign of the test year in 7 of 7 places and the yearly check in 4 of 7. The first count is partly hindsight (see the summary). The effects in the test year are several times larger than anything the yearly check measures, in both directions: a year's verdict on the hand-over is made by a few storms.
+The staged storms had the sign of the test year in 7 of 7 places and the yearly check in 4 of 7. The first count is partly hindsight (see the summary). The effects in the test year are several times larger than anything the yearly check measures, in both directions, because a year's verdict on the hand-over is made by a few storms.
 
 ### 3.3 The test year, three ways
 
@@ -123,7 +125,9 @@ Brier skill at 50 mm, days 4-7. Bold is the best of the three.
 
 ### 3.4 The tail as a whole, and what a warning meant
 
-**Skill in the tail against the raw consensus of the six systems** (threshold-weighted CRPS above 25 mm; 1 is perfect, 0 no better than the raw consensus)
+The scores in this section weight the tail of the distribution, following Gneiting and Ranjan (2011). Scoring forecasts only on the days when something extreme happened would favour a forecaster who always cries wolf (Lerch et al., 2017), so every day is scored.
+
+Skill in the tail against the raw consensus of the six systems (threshold-weighted CRPS above 25 mm; 1 is perfect, 0 no better than the raw consensus).
 
 | Place | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -135,7 +139,7 @@ Brier skill at 50 mm, days 4-7. Bold is the best of the three.
 | US Great Plains | +0.030 | +0.048 | +0.060 | +0.067 |
 | Southern Andes | +0.352 | +0.233 | +0.192 | +0.166 |
 
-**What a warning for 50 mm meant, days 1-3** (issued: share of all place-days; came: how often 50 mm or more then fell; caught: share of all 50 mm cases covered)
+What a warning for 50 mm meant on days 1-3 (issued: share of all place-days; came: how often 50 mm or more then fell; caught: share of all 50 mm cases covered).
 
 | Place | 50 mm days | Watch (10%+): issued / came / caught | Warning (30%+) | Extreme (60%+) |
 |---|---|---|---|---|
@@ -158,21 +162,29 @@ Observed on 2025-10-28 (CMORPH): 154 mm on average, up to 447 mm; 100% of places
 | 8 | 9%, 16 | 10%, 1%, 17 | 0% | 18%, 28 |
 | 12 | 2%, 5 | 1%, 0%, 5 | 0% | 23%, 41 |
 
-**How rare was it?** A generalised Pareto fit to Jamaica's CMORPH record from 2020-01 to 2025-04 (5.1 years, 450 places, all before the test year) puts the daily amount reached once a year at 79 mm on average over the places, and once in five years at 123 mm. On 2025-10-28, 100% of places had more than their once-a-year amount, 78% more than their once-in-five-years amount, and 35% an amount rarer than once in 20 years, which is as far as a record of that length can say. The median place had a day expected about once in 13 years. These are rough figures from five years of satellite estimates.
+How rare that was: a generalised Pareto fit to Jamaica's CMORPH record from 2020-01 to 2025-04 (5.1 years, 450 places, all before the test year) puts the daily amount reached once a year at 79 mm on average over the places, and once in five years at 123 mm. On 2025-10-28, 100% of places had more than their once-a-year amount, 78% more than their once-in-five-years amount, and 35% an amount rarer than once in 20 years, which is as far as a record of that length can say. The median place had a day expected about once in 13 years. These are rough figures from five years of satellite estimates.
 
 ## 4. What did not work
 
-**Handing over everywhere.** That was the design as first written down. It was tested by staging storms in two regions, and both happened to be regions where it helps. Section 3.3 shows what it cost in the others.
+### 4.1 Handing over everywhere
 
-**An audit of an ordinary year as the switch.** Section 2.5. A larger sample, and the wrong one: nearly all of it is heavy days the networks have seen, and the question is about the storm they have not.
+That was the design as first written down. It was tested by staging storms in two regions, and both happened to be regions where it helps. Section 3.3 shows what it cost in the others.
 
-**Discounting the raw systems first.** Scaling the raw chances by how often they verified at the top of the training forecasts, and never letting the hand-over lower a chance, still did harm on the Alps' staged storms and gave away most of the gain where the plain hand-over helps. A switch per place is simpler and did better.
+### 4.2 An audit of an ordinary year as the switch
 
-**Starting the hand-over further out**, at the 99.99th percentile of the training forecasts or at their maximum, so that no training row could speak against it. On the staged storms that gave nearly all of the gain away: the gain comes from forecasts just beyond what the training period held. The numbers are in [WHAT_DID_NOT_WORK.md](../WHAT_DID_NOT_WORK.md).
+This is the yearly check of section 2.6. The sample is a hundred times larger than four storms, but nearly all of it is heavy days the networks have seen, and the hand-over exists for the storm they have not seen.
+
+### 4.3 Discounting the raw systems first
+
+We scaled the raw chances by how often they verified at the top of the training forecasts, and never let the hand-over lower a chance. That still did harm on the Alps' staged storms and gave away most of the gain where the plain hand-over helps. A switch per place is simpler and did better.
+
+### 4.4 Starting the hand-over further out
+
+We tried starting at the 99.99th percentile of the training forecasts, and at their maximum, so that no training row could speak against the hand-over. On the staged storms that gave nearly all of the gain away: the gain comes from forecasts just beyond what the training period held. The numbers are in [WHAT_DID_NOT_WORK.md](../WHAT_DID_NOT_WORK.md).
 
 ## 5. Limits
 
-- The rain test year (April 2025 to March 2026) is the year on which the weak spots were found. Every design choice was made inside the training year and written down before the test year was scored, but a second look at a year is weaker evidence than a fresh year.
+- The test year is the one on which the weak spots were found (see the summary).
 - Where the staged storms switch the hand-over off, a record storm is forecast by the calibration alone, which shrinks it. The beyond-record flag and the count of raw systems calling for 50 mm are still shown.
 - The verdict rests on four storms of one training year, one amount (50 mm) and one truth. A place can pass and still be hurt in a given year, or fail and then meet the storm that would have justified the hand-over.
 - The rule was settled after most places had been scored. A fresh year in fresh places is the test it still needs.
@@ -191,8 +203,8 @@ The staged-storm experiment is `pluvium.tails.withheld.withheld_experiment` and 
 
 ## References
 
-- Dalrymple, T. (1960). Flood-frequency analyses. *US Geological Survey Water-Supply Paper* 1543-A.
-- Gneiting, T., and Ranjan, R. (2011). Comparing density forecasts using threshold- and quantile-weighted scoring rules. *Journal of Business and Economic Statistics*, 29, 411-422.
-- Hosking, J. R. M., and Wallis, J. R. (1987). Parameter and quantile estimation for the generalized Pareto distribution. *Technometrics*, 29, 339-349.
-- Lerch, S., Thorarinsdottir, T. L., Ravazzolo, F., and Gneiting, T. (2017). Forecaster's dilemma: extreme events and forecast evaluation. *Statistical Science*, 32, 106-127.
-- Pickands, J. (1975). Statistical inference using extreme order statistics. *Annals of Statistics*, 3, 119-131.
+- Dalrymple, T. (1960). Flood-frequency analyses. Manual of Hydrology, part 3. *US Geological Survey Water-Supply Paper* 1543-A. doi:10.3133/wsp1543A
+- Gneiting, T., and Ranjan, R. (2011). Comparing density forecasts using threshold- and quantile-weighted scoring rules. *Journal of Business and Economic Statistics*, 29, 411-422. doi:10.1198/jbes.2010.08110
+- Hosking, J. R. M., and Wallis, J. R. (1987). Parameter and quantile estimation for the generalized Pareto distribution. *Technometrics*, 29, 339-349. doi:10.1080/00401706.1987.10488243
+- Lerch, S., Thorarinsdottir, T. L., Ravazzolo, F., and Gneiting, T. (2017). Forecaster's dilemma: extreme events and forecast evaluation. *Statistical Science*, 32, 106-127. doi:10.1214/16-STS588
+- Pickands, J. (1975). Statistical inference using extreme order statistics. *Annals of Statistics*, 3, 119-131. doi:10.1214/aos/1176343003

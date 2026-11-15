@@ -1,11 +1,12 @@
-# Pluvium Blend and Pluvium Cyclone for any country, on a CPU: set up, train, forecast.
+# Pluvium Blend and Pluvium Cyclone for any country, on a CPU, step by step: set up, train, forecast.
 # Paste into one notebook cell (Colab, Kaggle, Jupyter, a laptop) or run as `python pluvium_blend_cell.py`.
 # No GPU and no account are needed. Running it again reuses everything already downloaded.
+# The shorter way is one command, `pluvium now --country JM`; notebooks/pluvium_everything.py does that and the rest.
 
 COUNTRY = "JM"                              # ISO codes: "JM", "TT", "DO,HT", "PH", "KE" ...
 ROOT = "~/pluvium-JM"                       # working folder; needs about 5 GB
-TRAIN_START = "2024-04-01T00"               # the training period: a year of archived runs and satellite rain
-TRAIN_END = "2025-04-01T00"
+TRAIN_START = ""                            # empty: the most recent year NOAA's satellite rain record covers
+TRAIN_END = ""                              # or both set, e.g. "2024-04-01T00" and "2025-04-01T00"
 HURRICANES = True                           # also write a bulletin for every tropical cyclone alive now
 BASINS = "al,ep"                            # al: North Atlantic, ep: East Pacific
 
@@ -21,7 +22,7 @@ def sh(cmd: str, check: bool = True) -> int:
 
 
 # 1. the package: from PyPI, or from the source tree when PyPI is not reachable
-if sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.3.0'", check=False) != 0:
+if sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.4.0'", check=False) != 0:
     sh(f"{sys.executable} -m pip install -q 'git+https://github.com/Wisk-inc/transformers.git"
        f"@claude/linear-context-architecture-a35c6h#subdirectory=pluvium'")
 
@@ -36,10 +37,12 @@ if not (root / "area.json").exists():
 #    period and prints whether forecasts beyond the record are handed to the raw systems here. Add
 #    "--handover always" to hand them over whatever that test says. The model is saved in ROOT/blend.
 if not (root / "blend" / "blend.json").exists():
-    sh(f"{pluvium} blend train --root {root} --start {TRAIN_START} --end {TRAIN_END}")
+    period = f" --start {TRAIN_START} --end {TRAIN_END}" if TRAIN_START and TRAIN_END else ""
+    sh(f"{pluvium} blend train --root {root}{period}")
 
-# 4. every day: learn from the days whose rain is now known, then forecast 14 days for every town
-sh(f"{pluvium} blend learn --root {root}", check=False)        # nothing to learn on the first day: that is fine
+# 4. learn from the days whose rain NOAA has published since (on most days there are none: the record arrives
+#    about five months late), then forecast 14 days for every town
+sh(f"{pluvium} blend learn --root {root}", check=False)
 sh(f"{pluvium} blend forecast --root {root}")
 
 # 5. hurricanes: track, cone, chance of passing near each place, for every storm alive now

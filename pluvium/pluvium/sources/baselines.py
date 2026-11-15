@@ -7,7 +7,8 @@ The operational systems Pluvium is measured against, read exactly as their produ
 * **ECMWF HRES**: the European Centre's single high-resolution IFS run, at the same resolution.
 * **ECMWF AIFS**: ECMWF's operational AI weather model (AIFS Single).
 * **NOAA GEFS**: the 31-member Global Ensemble Forecast System, 0.5 degrees. Its 6-hour rain buckets are summed.
-* **NOAA GraphCast**: NOAA's real-time run of DeepMind's GraphCast, started from GFS analyses, 0.25 degrees.
+* **NOAA GraphCast**: NOAA's real-time run of DeepMind's GraphCast, started from GFS analyses, 0.25 degrees. NOAA
+  published it as GraphCastGFS until 5 May 2026 and publishes its successor, AIGFS, since; both are read here.
 * **NOAA GFS**: the deterministic model that drives Pluvium in the benchmark, 0.5 degrees.
 
 Every reader returns ``{"values": (members, 3, H, W), "lat", "lon"}``: rain accumulated from the start of the run
@@ -34,7 +35,19 @@ GEFS = ("https://noaa-gefs-pds.s3.amazonaws.com/gefs.{day}/{hour:02d}/atmos/pgrb
         "{member}.t{hour:02d}z.pgrb2a.0p50.f{step:03d}")
 GRAPHCAST = ("https://noaa-nws-graphcastgfs-pds.s3.amazonaws.com/graphcastgfs.{day}/{hour:02d}/forecasts_13_levels/"
              "graphcastgfs.t{hour:02d}z.pgrb2.0p25.f{step:03d}")
+#: NOAA's successor to GraphCastGFS, in the same bucket: GraphCast's architecture with newer weights. Rain since the
+#: start of the run and sea-level pressure are in its surface files, written as GraphCastGFS wrote them.
+AIGFS = ("https://noaa-nws-graphcastgfs-pds.s3.amazonaws.com/aigfs.{day}/{hour:02d}/model/atmos/grib2/"
+         "aigfs.t{hour:02d}z.sfc.f{step:03d}.grib2")
+#: the first run read from AIGFS. GraphCastGFS runs end on 5 May 2026; AIGFS has 00 UTC runs from 22 April 2026
+AIGFS_FROM = int(np.datetime64("2026-05-06T00", "h").astype(np.int64))
 STEPS = (24, 48, 72)
+
+
+def graphcast_template(init: int) -> str:
+    """The address pattern of NOAA's GraphCast run started at ``init`` (hours since 1970): GraphCastGFS until
+    5 May 2026, AIGFS after. Both take ``day``, ``hour`` and ``step``."""
+    return AIGFS if int(init) >= AIGFS_FROM else GRAPHCAST
 
 #: name -> (label, members, kind of product)
 SYSTEMS = {
@@ -197,7 +210,7 @@ class BaselineReader:
         return {"values": np.stack([f[0] for f in fields])[None], "lat": fields[0][1], "lon": fields[0][2]}
 
     def _graphcast(self, init: int) -> dict:
-        return self._ncep_cumulative(init, GRAPHCAST)
+        return self._ncep_cumulative(init, graphcast_template(init))
 
     def _gfs(self, init: int) -> dict:
         return self._ncep_cumulative(init, GFS05)

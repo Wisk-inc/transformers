@@ -25,6 +25,8 @@ tags:
 - pytorch
 - naturev1
 - ihelix
+- graphcast
+- aifs
 metrics:
 - brier_score
 - crps
@@ -32,58 +34,88 @@ metrics:
 
 # Pluvium-500
 
-Rain forecasts for every town, in any country between 60 S and 60 N, and hurricane tracks. Three products in one
-package (`pip install pluvium`):
+Rain forecasts for every town, in any country between 60 S and 60 N, and hurricane tracks. There are three
+products in one package (`pip install pluvium`).
 
 | Product | What it forecasts | Needs |
 |---|---|---|
-| **Pluvium-500**, the network | Rain hour by hour for three days at every town: will it rain, when it starts, how heavy, how long, how much, thunder, flood risk | One GPU to train |
-| **Pluvium Blend** | The chance of 1, 10, 25 and 50 mm on each of the next 14 days, from six operational systems at once | A CPU |
-| **Pluvium Cyclone** | Where every tropical cyclone in the North Atlantic and the eastern North Pacific will go: track, a circle that should hold the centre two times in three, and the chance of passing near each place | A CPU |
+| Pluvium Blend | The chance of 1, 10, 25 and 50 mm on each of the next 14 days, from six operational systems at once | A CPU |
+| Pluvium Cyclone | Where every tropical cyclone in the North Atlantic and the eastern North Pacific will go: track, a circle that should hold the centre two times in three, and the chance of passing near each place | A CPU |
+| Pluvium-500, the network | Rain hour by hour for three days at every town: whether it rains, when it starts, how heavy, how long, how much, thunder, flood risk | One GPU to train |
 
-The six systems are ECMWF ENS, ECMWF HRES, ECMWF AIFS, NOAA GEFS, NOAA GFS and NOAA GraphCast.
+The six systems are ECMWF ENS, ECMWF HRES, ECMWF AIFS, NOAA GEFS, NOAA GFS and NOAA's run of GraphCast.
 
 > A research model, not an official forecast. Follow your national meteorological service and, for hurricanes, the
 > US National Hurricane Center.
 
+## One command
+
+```bash
+pip install pluvium
+pluvium now --country JM
+```
+
+`pluvium now` does whatever is still missing. It sets the country up (borders, terrain, every town). It looks in
+this repository for a blend already trained for that country (`blends/`) and downloads it; if there is none, it
+trains one on the most recent year whose rain has been published, which takes about two hours, nearly all of it
+downloads. Then it reads the newest run of each of the six systems for the country and prints the forecast for the
+largest towns. The second time it takes about a minute.
+
+`--country` takes any ISO codes (`TT`, `DO,HT`, `PH`, `KE`). The table it writes has one row per place and day: the
+chance of 1, 10, 25 and 50 mm; the median, 90th percentile and expected rain; how many raw systems call for 50 mm;
+an alert tier (watch, warning, extreme); whether the forecast is beyond the training record; and how rare the
+expected amount is at that place. `pluvium cyclone --root ~/storms` writes a bulletin for every storm alive now.
+
+In Python:
+
+```python
+from pluvium.quick import forecast, brief
+got = forecast("JM")
+print(brief(got["result"], got["names"], got["population"]))
+```
+
+## The six systems, and what you have to do about them
+
+Nothing. Pluvium does not need the six systems' output to be fetched or converted by hand. At forecast time it asks
+each public archive (ECMWF open data, NOAA on AWS) for the rain fields over the country and nothing else, which
+comes to a few megabytes. A system whose newest run is not out yet is read from its previous run, and a system
+that is missing altogether is left out; the blend was trained to forecast from whichever are there.
+
+Two of the six are AI models with public weights: NOAA's run of GraphCast and ECMWF's AIFS. Copies of those
+weights are kept in this repository under `upstream/`, unchanged, each with its publisher's licence, and
+`upstream/README.md` lists them. `pluvium upstream mirror --repo <repository>` makes or refreshes the copies.
+
+Pluvium does not run those models. Running them needs a large GPU and that day's global analysis from NOAA or
+ECMWF, which no copy of the weights can replace, and the other four systems are physical models with no weights
+at all. A forecast feed can still change under a project like this one: NOAA stopped publishing its GraphCast run
+as GraphCastGFS on 5 May 2026 and has published the successor, AIGFS, since. From version 0.4 the package reads
+AIGFS after that date.
+
 ## What is in this repository
 
-- **All the code** the three products are built from: the `pluvium` package (158 modules), its tests, the benchmark
-  runners and the scripts that write the result pages.
-- **Four technical papers** in [docs/papers](docs/papers/README.md).
-- **The benchmarks**, with losses reported beside wins:
+- All the code the three products are built from: the `pluvium` package, its tests, the benchmark runners and the
+  scripts that write the result pages.
+- Four technical papers in [docs/papers](docs/papers/README.md).
+- The benchmarks, with losses reported beside wins:
   [rain, second full-year benchmark](docs/FRONTIER_BENCHMARK.md),
   [rain, first full-year benchmark](docs/FULL_YEAR_BENCHMARK.md),
   [hurricane tracks](docs/CYCLONE_BENCHMARK.md),
   [against operational systems, summer 2025](docs/OPERATIONAL_BENCHMARK.md).
-- **What did not work**: [docs/WHAT_DID_NOT_WORK.md](docs/WHAT_DID_NOT_WORK.md).
-- **Weights.** Pluvium Blend is trained for your own country in about two hours on a CPU, so it has no weights to
-  download. Pluvium Cyclone ships what it learned on 2024 and 2025 inside the package and keeps learning. The
-  weights of the Pluvium-500 network are written to this repository by the training program when it is run with a
-  write token (see below). Until then this repository holds code, papers and benchmarks.
+- A record of what was tried and dropped: [docs/WHAT_DID_NOT_WORK.md](docs/WHAT_DID_NOT_WORK.md).
+- Trained blends, in `blends/<country>/`, once somebody has published one with
+  `pluvium blend publish --root <folder> --repo <repository>`. Pluvium opens a downloaded blend in a way that
+  cannot run code.
+- The upstream weights described above, in `upstream/`.
+- The weights of the Pluvium-500 network, once the training program below has run with a write token. Its own
+  card, with the scores it measured, is then in `NETWORK_CARD.md`. Pluvium Cyclone needs no download: what it
+  learned on 2024 and 2025 ships inside the package, and it keeps learning.
 
-## Quick start
+## Everything in one cell
 
-```bash
-pip install pluvium
-
-# rain for a country, 14 days (CPU, about two hours the first time, mostly downloads)
-pluvium setup --country JM --root ~/pluvium-JM
-pluvium blend train --root ~/pluvium-JM
-pluvium blend forecast --root ~/pluvium-JM
-
-# every day after that
-pluvium blend learn --root ~/pluvium-JM
-pluvium blend forecast --root ~/pluvium-JM
-
-# hurricanes alive now
-pluvium cyclone --root ~/storms
-```
-
-`--country` takes any ISO codes (`TT`, `DO,HT`, `PH`, `KE`). The forecast table has one row per place and day: the
-chance of 1, 10, 25 and 50 mm; the median, 90th percentile and expected rain; how many raw systems call for 50 mm;
-an alert tier (watch, warning, extreme); whether the forecast is beyond the training record; and how rare the
-expected amount is at that place.
+[notebooks/pluvium_everything.py](notebooks/pluvium_everything.py) is one notebook cell that installs the package,
+builds this repository (code, papers, the collection, the upstream weights), trains the network if a GPU of 24 GB
+or more is there, forecasts the rain for a country and tracks the hurricanes alive now. Each step can be run
+again; what is already done is not done twice.
 
 ## Train the Pluvium-500 network on one GPU
 
@@ -143,14 +175,14 @@ the Blend is ahead of both.
 <!-- frontier-summary:start -->
 On the test year, in 7 places (the same year the first Blend was scored on):
 
-- **Heavy rain (50 mm).** Brier skill improved on the first Blend in 13 of 28 place and lead-group cells, and in 7 of 7 on days 1-3. Mean skill over the places on days 1-3 went from +0.1901 to +0.2133. The new Blend leads every other system at 50 mm in 15 of 28 cells (the first led in 14).
-- **In the places scored after the design was final** (Jamaica and the US Great Plains), 50 mm skill improved on the first Blend in 4 of 8 cells, and the new Blend leads every other system in 3 (the first: 0).
-- **Against each post-processed system at 50 mm**, 79 of 161 comparisons are better with 95% confidence and 0 worse.
-- **Rain or no rain (1 mm).** The new Blend leads in 24 of 28 cells (the first: 26), and improved on the first in 13. On days 1-7, 81 of 84 comparisons with single post-processed systems are better with 95% confidence and 0 worse.
-- **CRPS** leads in 25 of 28 cells (was 23); **RMSE** in 21 of 28 (was 20); **ACC** in 18 of 28 (was 16).
-- **Days 11-14 got slightly worse.** There the new Blend leads every other system at 1 mm in 4 of 7 places (the first: 6) and at 50 mm in 2 (the first: 5). Mean Brier skill at 1 mm on those days went from +0.0394 to +0.0390. The pool alone scores +0.0396: the online weights for that lead group learn from few forecasts that verify late, and cost a little.
-- **Record storms.** Each place's staged storms kept the hand-over in Jamaica, the Caribbean, the Maritime Continent, the US Great Plains and the Southern Andes and switched it off in the Alps and the US Pacific Northwest. That verdict had the sign of what the hand-over then did in the test year in 7 of 7 places (2 of the 2 scored after the rule was final). The out-of-fold audit tried first would have been right in 4 of 7.
-- **Structure at long range.** On days 11-14 one coupled scenario has 0.88 of the weather's spatial variability (raw ECMWF ENS: 0.84), and the CRPS of rain averaged over two-degree boxes is 2.26 mm against 2.93 for uncoupled draws and 2.57 for the raw ensemble (means over 7 places).
+- At 50 mm, Brier skill improved on the first Blend in 13 of 28 place and lead-group cells, and in 7 of 7 on days 1-3. Mean skill over the places on days 1-3 went from +0.1901 to +0.2133. The new Blend leads every other system at 50 mm in 15 of 28 cells (the first led in 14).
+- In the places scored after the design was final (Jamaica and the US Great Plains), 50 mm skill improved on the first Blend in 4 of 8 cells, and the new Blend leads every other system in 3 (the first: 0).
+- Against each post-processed system at 50 mm, 79 of 161 comparisons are better with 95% confidence and 0 are worse.
+- At 1 mm, which is rain or no rain, the new Blend leads in 24 of 28 cells (the first: 26), and improved on the first in 13. On days 1-7, 81 of 84 comparisons with single post-processed systems are better with 95% confidence and 0 are worse.
+- The CRPS leads in 25 of 28 cells (was 23), the RMSE in 21 of 28 (was 20) and the anomaly correlation in 18 of 28 (was 16).
+- Days 11-14 got slightly worse. There the new Blend leads every other system at 1 mm in 4 of 7 places (the first: 6) and at 50 mm in 2 (the first: 5). Mean Brier skill at 1 mm on those days went from +0.0394 to +0.0390. The pool alone scores +0.0396: the online weights for that lead group learn from few forecasts that verify late, and cost a little.
+- Each place's staged storms kept the record-storm hand-over in Jamaica, the Caribbean, the Maritime Continent, the US Great Plains and the Southern Andes and switched it off in the Alps and the US Pacific Northwest. That verdict had the sign of what the hand-over then did in the test year in 7 of 7 places (2 of the 2 scored after the rule was final). The out-of-fold audit tried first would have been right in 4 of 7.
+- On days 11-14 one coupled scenario has 0.88 of the weather's spatial variability (raw ECMWF ENS: 0.84), and the CRPS of rain averaged over two-degree boxes is 2.26 mm against 2.93 for uncoupled draws and 2.57 for the raw ensemble (means over 7 places).
 <!-- frontier-summary:end -->
 
 Full tables, every part of the design scored on its own, and what is still weak:
@@ -170,16 +202,16 @@ Mean track error in nautical miles for the early guidance, on the forecasts all 
 | NHC consensus TVCN | 19 | 27 | 35 | 43 | 53 | 64 | 92 | 127 |
 | NHC corrected consensus HCCA | 19 | 30 | 34 | 43 | 51 | 58 | 78 | 107 |
 
-- **Better than every single model** on the test season: lower error than ECMWF HRES at all 8 leads (8 with 95%
-  confidence) and than NOAA GFS at all 8 (5 with 95% confidence), as tracked by the National Hurricane Center.
-- **Level with the Center's simple consensus** (TVCN).
-- **Behind the official forecast** at every lead on the test season, by 2 to 25 nautical miles, and behind Google
-  DeepMind's cyclone model.
-- On a development season (North Atlantic 2025) it was ahead of the official forecast at every lead. Its settings
-  were chosen with that season in view, so that is not the result to trust.
-- **The uncertainty is honest.** The circle meant to hold the centre two times in three held it 70% of the time.
-  The chance of the centre passing within 150 km of a place scored a Brier skill of 0.47, against 0.42 for the raw
-  cloud of ensemble members.
+On the test season Pluvium Cyclone had a lower error than every single model as the National Hurricane Center
+tracks it: lower than ECMWF HRES at all 8 leads (all 8 with 95% confidence) and than NOAA GFS at all 8 (5 with 95%
+confidence). It was level with TVCN, the Center's simple consensus. It was behind the official forecast at every
+lead, by 2 to 25 nautical miles, and behind Google DeepMind's cyclone model.
+
+On a development season (North Atlantic 2025) it was ahead of the official forecast at every lead. Its settings
+were chosen with that season in view, so that result should not be relied on.
+
+The circle meant to hold the centre two times in three held it 70% of the time. The chance of the centre passing
+within 150 km of a place scored a Brier skill of 0.47, against 0.42 for the raw cloud of ensemble members.
 
 ![Track error by lead](docs/img/cyclone_track_error.png)
 
@@ -195,33 +227,40 @@ not been scored there yet.
 
 ## What it is not good at
 
-- **A year already seen.** The rain test year is the one on which the weak spots of the first version were found.
-  Design choices were made inside the training year, but a fresh year is the test that counts.
-- **Heavy rain is not won everywhere**, and at long range every system is close to the climatology.
-- **The pattern of the expected amount beyond a week** in mid-latitudes: raw models keep a higher anomaly
-  correlation.
-- **Record storms are still shrunk in some places.** Handing a record forecast to the raw systems helps where they
-  are the better guide and hurts where they overcall heavy rain. Each place decides from four storms staged in its
-  own training year. Where they say no, a storm beyond the training record is forecast by the calibration alone.
-  The table flags such a forecast. The verdict can be wrong, and `pluvium blend train --handover always` or
+- The rain test year is the one on which the weak spots of the first version were found. Design choices were made
+  inside the training year, but a fresh year is the test that counts.
+- The satellite rain record Pluvium learns from is published about four and a half months late. A blend can
+  therefore be trained only on runs that are five months old, and its online weights learn that much later than
+  they did in the benchmark, which gave them each day's rain after two days. The benchmark page says what that
+  delay costs.
+- Heavy rain is not won everywhere, and at long range every system is close to the climatology.
+- Beyond a week in mid-latitudes, raw models keep a higher anomaly correlation for the expected amount.
+- Record storms are still shrunk in some places. Handing a record forecast to the raw systems helps where they are
+  the better guide and does harm where they overcall heavy rain. Each place decides from four storms staged in its
+  own training year. Where they say no, a storm beyond the training record is forecast by the calibration alone,
+  and the table flags such a forecast. The verdict can be wrong, and `pluvium blend train --handover always` or
   `never` overrules it.
-- **Hurricanes: track only.** No intensity, size, wind, surge or rain, and no forecast of formation. Behind the
-  official forecast on the clean test.
-- **One truth for rain**: a satellite estimate, weak on frozen and orographic precipitation.
-- Rain only: no temperature or wind. Nothing poleward of 60 degrees. Daily totals for the Blend.
+- NOAA's GraphCast input changed from GraphCastGFS to AIGFS in May 2026. Every benchmark here was scored before
+  that, so the Blend and the tracker have not been scored with AIGFS.
+- Hurricanes are forecast by track only: no intensity, size, wind, surge or rain, and no forecast of formation. On
+  the clean test the track was behind the official forecast.
+- There is one truth for rain, a satellite estimate that is weak on frozen and orographic precipitation.
+- Rain only: no temperature or wind. Nothing poleward of 60 degrees. The Blend gives daily totals.
 - The flood rule has not been verified against flood reports.
 
 ## How it works
 
-- **The network** runs on the NatureV1 / iHELIX engine: geodesic attention on a mesh of the sphere, physics computed
-  inside the model (mountain rain, sea breezes, fronts, advection of the rain falling now), and a chain of intensity
-  states per town and hour from which every timing and amount is read.
-- **Pluvium Blend** post-processes each system with its own small network trained on every heavy-rain day, pools
-  them with weights by threshold and lead, re-weighs them online after every verified day, and hands a forecast
-  that lies beyond the training record back, in part, to the raw systems, in the places where that improved the
-  forecast of storms withheld from training.
-- **Pluvium Cyclone** tracks the storm in every ensemble member from sea-level pressure and combines the systems
-  with weights that minimise the expected error given their error covariance so far.
+The network runs on the NatureV1 / iHELIX engine: geodesic attention on a mesh of the sphere, physics computed
+inside the model (mountain rain, sea breezes, fronts, advection of the rain falling now), and a chain of intensity
+states per town and hour from which every timing and amount is read.
+
+Pluvium Blend post-processes each system with its own small network trained on every heavy-rain day, pools them
+with weights by threshold and lead, and re-weighs them online as days verify. A forecast that lies beyond the
+training record is handed back, in part, to the raw systems, in the places where that improved the forecast of
+storms withheld from training.
+
+Pluvium Cyclone tracks the storm in every ensemble member from sea-level pressure and combines the systems with
+weights that minimise the expected error given their error covariance so far.
 
 The full account is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and every module's purpose is in
 [docs/MODULES.md](docs/MODULES.md).
@@ -233,20 +272,25 @@ The full account is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and every m
 3. [Sharp scenarios from smooth chances](docs/papers/03_scenarios.md)
 4. [A learning consensus for tropical cyclone tracks](docs/papers/04_pluvium_cyclone.md)
 
-They are research notes from one person's project and are not peer reviewed.
+They are research notes from one person's project and have not been peer reviewed.
 
 ## Data and attribution
 
 ERA5 (Copernicus Climate Change Service), CMORPH CDR and ISD (NOAA NCEI), GFS, GEFS and MRMS (NOAA), NOAA's
-real-time GraphCast, ECMWF open data: IFS, ENS and AIFS (CC-BY-4.0), ATCF decks (US National Hurricane Center),
-GOES imagery and lightning (NOAA), METAR (NOAA Aviation Weather Center), GeoNames (CC-BY-4.0), geoBoundaries
-(CC-BY-4.0), Terrarium elevation tiles (Mapzen and its sources).
+real-time GraphCast and AIGFS, ECMWF open data: IFS, ENS and AIFS (CC BY 4.0), ATCF decks (US National Hurricane
+Center), GOES imagery and lightning (NOAA), METAR (NOAA Aviation Weather Center), GeoNames (CC BY 4.0),
+geoBoundaries (CC BY 4.0), Terrarium elevation tiles (Mapzen and its sources).
+
+The weights under `upstream/` are other publishers' work: GraphCast by Google DeepMind (CC BY 4.0), GraphCastGFS
+and AIGFS by NOAA (released by NOAA under CC0; fine-tuned from GraphCast, so DeepMind's attribution is kept with
+them), and AIFS by ECMWF (CC BY 4.0). Each folder carries the licence text and the notice to keep.
 
 ## Licence and citation
 
-Code: Apache-2.0, CorX Labs.
+Everything Pluvium made, code and trained weights, is under Apache 2.0, CorX Labs. That licence does not cover the
+folder `upstream/`, which holds the publishers' own licences.
 
 ```
-Nathan (2026). Pluvium 0.3: rain and tropical cyclone forecasts from six operational systems.
-https://github.com/Wisk-inc/transformers/tree/main/pluvium
+Nathan (2026). Pluvium: rain and tropical cyclone forecasts from six operational systems.
+https://pypi.org/project/pluvium/
 ```

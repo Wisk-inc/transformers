@@ -2,14 +2,16 @@
 """
 Pluvium: rain forecasts for every town, in any country, on the NatureV1 / iHELIX engine.
 
-``pluvium forecast`` makes the live forecast with a published model; ``pluvium program`` trains one on a single GPU.
-``pluvium setup`` and ``pluvium blend`` set up any country and forecast its rain for 14 days from every operational
-system (:mod:`pluvium.blend`, :mod:`pluvium.frontier`). ``pluvium cyclone`` forecasts the track of every tropical
-cyclone alive now from the same systems (:mod:`pluvium.cyclone`).
+``pluvium now --country JM`` goes from nothing to a 14-day rain forecast for a country in one command
+(:mod:`pluvium.quick`). ``pluvium setup`` and ``pluvium blend`` are its steps, one at a time (:mod:`pluvium.blend`,
+:mod:`pluvium.frontier`). ``pluvium cyclone`` forecasts the track of every tropical cyclone alive now from the same
+six systems (:mod:`pluvium.cyclone`). ``pluvium forecast`` makes the hourly forecast with a published network, and
+``pluvium program`` trains one on a single GPU. ``pluvium upstream`` copies the published weights of the AI models
+whose forecasts Pluvium reads (:mod:`pluvium.upstream`).
 See :mod:`pluvium.model` for the architecture and its experimental components.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .domain import Gazetteer, Geography, PointSet  # noqa: E402
 from .model import PluviumConfig, PluviumModel  # noqa: E402

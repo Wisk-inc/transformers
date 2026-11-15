@@ -79,6 +79,14 @@ forecasts just beyond what the training period held, which is where the hand-ove
 **The hand-over is not free even where it is kept.** Its effect on the test year is shown part by part in the
 benchmark ("What each part added"), including the scores where it cost something (test data).
 
+**Assuming the rain is known two days later (found by running live).** The online weights were designed and
+scored with each day's rain arriving 48 hours after the day. Nobody checked how late the record really is. NOAA
+publishes the CMORPH climate data record about four and a half months after the fact: on 15 November 2026 the
+newest complete month was May. So in live use `pluvium blend learn` never found a day to learn from, and the
+benchmark had given the online weights information a live system does not have. The test year was scored again
+with the rain 140 days late, and the benchmark page shows the result beside the original. The same check found
+that NOAA had retired its GraphCastGFS feed in May 2026 and that version 0.3 had been forecasting without it.
+
 ## Pluvium Cyclone
 
 **Correcting each system's bias.** Learned from one season and applied to the next, and learned online. Best
@@ -116,3 +124,7 @@ look once. And where a rule can be checked on every place's own training data, l
 A second lesson came from the audit. A bigger sample is not better evidence when most of it is beside the point.
 Four storms that ask the right question beat four hundred thousand rows that mostly do not. And a rule that was
 changed twice after results were seen has to say so wherever its results are shown.
+
+A third came from the first live run. A benchmark on archived data can assume something about timing that the
+live data does not allow, and only running the whole thing against today's feeds shows it. Two such faults went
+unnoticed through both benchmarks and were found in one afternoon of running live.

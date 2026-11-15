@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.4.0 (November 2026)
+
+One command from nothing to a forecast, copies of the upstream AI models' weights, and three faults found by
+running the system live.
+
+### One command
+
+- `pluvium now --country JM` sets the country up, downloads a trained blend from the Hub repository if one is
+  published there, trains one if not, reads the newest runs and prints the forecast for the largest towns
+  (`pluvium.quick`). `--place`, `--learn`, `--storms` and `--handover` adjust it. In Python:
+  `pluvium.quick.forecast("JM")`.
+- `pluvium blend publish --root FOLDER --repo REPO` uploads a trained blend to `blends/<country>/`, so that the
+  next person's `pluvium now` is a download.
+- Blend files now hold tensors and plain values only. A blend that was downloaded is opened by a reader that cannot
+  run code, and is not used if it does not open that way. Files written by 0.3 still load when they were made on the
+  same machine.
+
+### Upstream weights
+
+- `pluvium upstream list`, `fetch` and `mirror --repo REPO` (`pluvium.upstream`) copy the published weights of the
+  AI models whose forecasts Pluvium reads: DeepMind's GraphCast, NOAA's GraphCastGFS and AIGFS, and ECMWF's AIFS
+  Single 0.2.1, 1.0, 1.1 and 2.0. The copies are unchanged and checked, and each carries its publisher's licence
+  (CC BY 4.0, or CC0 for NOAA's) and a note of its source with the SHA-256 of every file. Pluvium does not run these
+  models; it reads the forecasts NOAA and ECMWF make with them.
+
+### Faults found live, and fixed
+
+- NOAA stopped publishing its GraphCast run as GraphCastGFS on 5 May 2026 and has published the successor, AIGFS,
+  since. Version 0.3 read nothing for that input after that date and forecast from the other five systems. The
+  rain reader and the hurricane tracker now read AIGFS from 6 May 2026.
+- NOAA publishes the satellite rain record Pluvium learns from about four and a half months late. Training on a
+  period the record did not cover failed with an error that explained nothing, and `pluvium blend learn` never
+  found a day to learn from. Now the training period defaults to the most recent year the record covers, a period
+  without rain stops with a message that names one that will work, and `blend learn` works through newly published
+  months two weeks a call.
+- The benchmark gave the online weights each day's rain after two days, which that record cannot do. The test
+  year was scored again with the rain 140 days late, and the result is in
+  [docs/FRONTIER_BENCHMARK.md](docs/FRONTIER_BENCHMARK.md) and paper 1.
+
+### The Hub
+
+- `hub/upload_to_hub.py` also creates a collection in the organisation, holding the model and the papers it
+  builds on.
+- `pluvium program` publishes the network's own card as `NETWORK_CARD.md` and no longer replaces a card the
+  repository already has.
+- `notebooks/pluvium_everything.py` is one cell that does all of it.
+
+### Documents
+
+- The papers, the model card and the readme were revised against Wikipedia's field guide to signs of AI writing
+  (`scripts/check_style.py` holds the checks, and the test suite runs them). Every reference is now cited where it
+  is used and carries its DOI or arXiv number, each checked against Crossref or arXiv.
+
 ## 0.3.0 (November 2026)
 
 Aimed at the three weak spots the first full-year benchmark found (the heavy tail, winter in mid-latitude climates,

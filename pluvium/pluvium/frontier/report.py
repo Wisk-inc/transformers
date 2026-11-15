@@ -140,7 +140,7 @@ def ablation(results: dict, board=(("Brier skill, 1 mm", "bss", "1", True), ("Br
     """The mean over places of each score for each part of the design, by lead group."""
     lines = []
     for title, key, t, _higher in board:
-        lines += [f"**{title}** (mean over {len(results)} places)", "",
+        lines += [f"{title} (mean over {len(results)} places).", "",
                   "| Design | " + " | ".join(F.LEAD_GROUPS) + " |", "|---|" + "---|" * len(F.LEAD_GROUPS)]
         for name, label in PARTS:
             cells = []
@@ -253,7 +253,7 @@ def rarity_lines(path, day: str = "2025-10-28", place: str = "Jamaica") -> list:
     d = r["days"].get(day)
     if not d:
         return []
-    return [f"**How rare was it?** A generalised Pareto fit to {place}'s CMORPH record from {r['span'][0][:7]} to "
+    return [f"How rare that was: a generalised Pareto fit to {place}'s CMORPH record from {r['span'][0][:7]} to "
             f"{r['span'][1][:7]} ({r['years']:.1f} years, {r['places']} places, all before the test year) puts the daily "
             f"amount reached once a year at {r['level_mm']['1']:.0f} mm on average over the places, and once in five years "
             f"at {r['level_mm']['5']:.0f} mm. On {day}, {100 * d['share_ge_1y']:.0f}% of places had more than their "
@@ -296,6 +296,56 @@ def rules_table(results: dict, group: str = "days 1-3", titles: dict | None = No
     return lines if len(lines) > 2 else []
 
 
+# ------------------------------------------------------------------------- the truth arriving late --
+
+def without_online(res: dict) -> str:
+    """The design that is Pluvium Blend minus its online weights in a place: the pool, with the hand-over where the
+    place's staged storms kept it."""
+    return "pool_record" if kept(res) is not False else "pool"
+
+
+def late_mean(new: dict, late: dict, t: str, group: str, which: str) -> float:
+    """Mean Brier skill at ``t`` mm over the places in ``late``: ``"bench"`` (rain known after two days, as in the
+    benchmark), ``"late"`` (the same design scored with the rain held back) or ``"none"`` (no online weights)."""
+    vals = []
+    for place in late:
+        if which == "late":
+            vals.append(F._value(late[place]["groups"][group].get("stack"), "bss", t))
+        else:
+            name = "stack" if which == "bench" else without_online(new[place])
+            vals.append(F._value(new[place]["groups"][group].get(name), "bss", t))
+    return float(np.mean(vals)) if vals else float("nan")
+
+
+def late_rows(new: dict, late: dict, amounts=("1", "50")) -> list:
+    """A table: mean Brier skill with no online weights, with the rain known after two days, and with it known late,
+    by amount and lead group."""
+    lines = ["| Rain, days | No online weights | Online, rain known after 2 days (the benchmark) | Online, rain known "
+             "late |", "|---|---|---|---|"]
+    for t in amounts:
+        for g in F.LEAD_GROUPS:
+            cells = [late_mean(new, late, t, g, which) for which in ("none", "bench", "late")]
+            lines.append(f"| {t} mm, {g} | " + " | ".join(f"{v:+.4f}" for v in cells) + " |")
+    return lines
+
+
+def late_counts(new: dict, late: dict, amounts=("1", "50")) -> tuple:
+    """``(cells, lower than the benchmark, lower than with no online weights)`` over place, lead group and amount."""
+    cells = lower = below = 0
+    for place in late:
+        for g in F.LEAD_GROUPS:
+            for t in amounts:
+                slow = F._value(late[place]["groups"][g].get("stack"), "bss", t)
+                bench = F._value(new[place]["groups"][g].get("stack"), "bss", t)
+                none = F._value(new[place]["groups"][g].get(without_online(new[place])), "bss", t)
+                if slow == slow and bench == bench and none == none:
+                    cells += 1
+                    lower += slow < bench
+                    below += slow < none
+    return cells, lower, below
+
+
 __all__ = ["ABLATIONS", "PARTS", "PLACE_NAMES", "PLACE_ORDER", "RULES", "SCORED_AFTER", "SEEN_FIRST", "ablation",
            "audit_agreement", "audit_misses", "audit_outcomes", "before_after", "best_rival", "handover_three_ways",
-           "join_names", "kept", "load_results", "online_weights", "rarity_lines", "rules_table", "tally", "without"]
+           "join_names", "kept", "late_counts", "late_mean", "late_rows", "load_results", "online_weights",
+           "rarity_lines", "rules_table", "tally", "without", "without_online"]

@@ -1,10 +1,10 @@
 # Sharp scenarios from smooth chances: ensemble copula coupling for multi-model rain forecasts
 
-**Pluvium technical paper 3.** Nathan, November 2026.
+Pluvium technical paper 3. Nathan, November 2026.
 
 ## Summary
 
-A calibrated chance of rain at each place makes a smooth map, smoother the further ahead it looks, because it averages over every place a storm might be. That is right for one place and wrong as a picture of a day. The first benchmark counted this as a weak spot: the sharpness of the expected-amount map fell with lead.
+A calibrated chance of rain at each place makes a smooth map, and the map gets smoother the further ahead it looks, because it averages over every place a storm might be. For any one place that is the correct forecast. As a picture of a day it misleads, since no real day looks like the average of many. The first benchmark counted this as a weak spot: the sharpness of the expected-amount map fell with lead.
 
 We leave that map alone and add scenarios. Each scenario takes its amounts, place by place, from Pluvium Blend's calibrated distribution and its arrangement in space from one member of the ECMWF ensemble (ensemble copula coupling; Schefzik, Thorarinsdottir and Gneiting, 2013), with ties among dry members broken by rain nearby.
 
@@ -21,7 +21,7 @@ Sharpness here is the spatial standard deviation of a map over that of the obser
 | Pluvium Blend, expected amount | 0.63 | 0.47 | 0.33 | 0.28 |
 | Raw ECMWF ENS, ensemble mean | 0.73 | 0.58 | 0.45 | 0.38 |
 
-Both fall with lead, as they must. At day 12 nobody knows where the rain band will lie, so every place gets a modest chance. Sharpening the map of expected amounts would make it wrong. What a user needs at long range is something else: a set of days that could happen, each one looking like weather, which together carry the calibrated chances. A hydrologist needs them for rain over a basin, where what matters is whether nearby places are wet together.
+Both fall with lead, as they must. At day 12 nobody knows where the rain band will lie, so every place gets a modest chance, and sharpening the map of expected amounts would make it wrong. At that range a user is better served by a set of days that could happen, each one looking like weather, which together carry the calibrated chances. A hydrologist needs such a set for rain over a basin, where the total depends on whether nearby places are wet together.
 
 ## 2. Method
 
@@ -46,16 +46,13 @@ Where no physical ensemble is at hand, the arrangement can come from past observ
 
 Three sets of scenarios with the same number of members are compared: the raw ensemble, coupled scenarios, and uncoupled ones (the same amounts, each place drawn on its own).
 
-- **Sharpness of one scenario**: its spatial standard deviation over the observed one. 1 is as varied as the weather.
-- **CRPS** place by place. Coupled and uncoupled are equal by construction.
-- **Areal CRPS**: the CRPS of the mean rain over boxes two degrees wide. Only scenarios with the right structure get it right.
-- **Energy score** (Gneiting et al., 2008) and **variogram score** (Scheuerer and Hamill, 2015), which reward the right joint behaviour of nearby places.
+The sharpness of one scenario is its spatial standard deviation over the observed one, so that 1 is as varied as the weather. The CRPS is computed place by place, where coupled and uncoupled scenarios are equal by construction. The areal CRPS is the CRPS of the mean rain over boxes two degrees wide, which only scenarios with the right structure get right. The energy score (Gneiting et al., 2008) and the variogram score (Scheuerer and Hamill, 2015) reward the right joint behaviour of nearby places.
 
 ## 3. Results
 
 Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 
-**Sharpness of one scenario (1 = as varied as the weather)**
+Sharpness of one scenario (1 = as varied as the weather).
 
 | Place | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -67,7 +64,7 @@ Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 | US Great Plains | 0.84 / 0.97 / **0.97** | 0.90 / **0.99** / 1.02 | **1.07** / 1.13 / 1.21 | 0.94 / **1.01** / 1.10 |
 | Southern Andes | 1.12 / 0.93 / **0.94** | 1.37 / **1.02** / 1.04 | **1.12** / 0.76 / 0.78 | **1.06** / 0.72 / 0.75 |
 
-**CRPS place by place, mm (lower is better)**
+CRPS place by place, mm (lower is better).
 
 | Place | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -79,7 +76,7 @@ Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 | US Great Plains | 1.55 / **1.38** / 1.38 | 1.73 / **1.62** / 1.62 | 1.30 / **1.24** / 1.24 | 1.76 / **1.71** / 1.71 |
 | Southern Andes | 1.90 / **0.85** / 0.85 | 1.60 / **0.94** / 0.94 | 2.04 / **1.71** / 1.71 | 1.96 / **1.59** / 1.59 |
 
-**CRPS of the mean rain over two-degree boxes, mm (lower is better)**
+CRPS of the mean rain over two-degree boxes, mm (lower is better).
 
 | Place | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -91,7 +88,7 @@ Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 | US Great Plains | 1.37 / **1.18** / 1.38 | 1.52 / **1.41** / 1.77 | 1.25 / **1.19** / 1.67 | 1.63 / **1.59** / 2.26 |
 | Southern Andes | 1.94 / **0.83** / 0.96 | 1.69 / **1.03** / 1.28 | 2.16 / **1.90** / 2.37 | 2.14 / **1.80** / 2.30 |
 
-**Energy score per root place, mm (lower is better)**
+Energy score per root place, mm (lower is better).
 
 | Place | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -103,7 +100,7 @@ Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 | US Great Plains | 3.24 / **2.98** / 3.00 | 3.35 / **3.20** / 3.35 | 2.65 / **2.60** / 2.94 | 3.60 / **3.58** / 4.01 |
 | Southern Andes | 4.28 / **2.36** / 2.39 | 3.66 / **2.51** / 2.61 | 4.75 / **4.28** / 4.40 | 4.74 / **4.15** / 4.40 |
 
-**Variogram score for places within 150 km (lower is better)**
+Variogram score for places within 150 km (lower is better).
 
 | Place | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -115,17 +112,17 @@ Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 | US Great Plains | 0.801 / **0.744** / 0.817 | 0.949 / **0.890** / 1.089 | 0.835 / **0.816** / 1.079 | 1.298 / **1.288** / 1.612 |
 | Southern Andes | 1.112 / **0.534** / 0.554 | 1.028 / **0.587** / 0.661 | 1.307 / **1.022** / 1.106 | 1.379 / **1.096** / 1.200 |
 
-Coupled scenarios have the lowest areal CRPS in 28 of 28 place and lead-group cells. Against the raw ensemble the gain is calibration. Against uncoupled draws it is structure alone: the amounts are the same, only their arrangement differs, and the gap widens with lead because independent draws average out over a box while real rain does not.
+Coupled scenarios have the lowest areal CRPS in 28 of 28 place and lead-group cells. Against the raw ensemble the gain comes from calibration. Against uncoupled draws it comes from structure alone, since the amounts are the same and only their arrangement differs. That gap widens with lead, because independent draws average out over a box and real rain does not.
 
-A single uncoupled draw is as sharp as a coupled one, or sharper. Sharpness alone does not show structure; the areal and variogram scores do.
+A single uncoupled draw is as sharp as a coupled one, or sharper. Sharpness by itself therefore says nothing about structure, which is what the areal and variogram scores measure.
 
 ## 4. Limits
 
-- The arrangement is the ECMWF ensemble's. Where that ensemble puts the rain band in the wrong place, so does every scenario. Coupling fixes amounts, not positions.
-- The scenarios number as many as the ensemble has members.
+- The arrangement is the ECMWF ensemble's. Where that ensemble puts the rain band in the wrong place, so does every scenario: coupling corrects the amounts and leaves the positions as the ensemble has them.
+- There are as many scenarios as the ensemble has members.
 - Only daily totals are coupled, and each day on its own. A scenario is not yet one story across the 14 days.
-- Scored against one satellite estimate, on quarter-degree cells.
-- The rain test year (April 2025 to March 2026) is the year on which the weak spots were found. Every design choice was made inside the training year and written down before the test year was scored, but a second look at a year is weaker evidence than a fresh year.
+- Everything is scored against one satellite estimate, on quarter-degree cells.
+- The test year is the one on which the weak spots were found (see the summary).
 
 ## 5. Reproducing
 
@@ -139,7 +136,7 @@ The benchmark is `pluvium.benchmarks.scenario_bench`, run by `python -m pluvium.
 
 ## References
 
-- Clark, M., Gangopadhyay, S., Hay, L., Rajagopalan, B., and Wilby, R. (2004). The Schaake shuffle: a method for reconstructing space-time variability in forecasted precipitation and temperature fields. *Journal of Hydrometeorology*, 5, 243-262.
-- Gneiting, T., Stanberry, L. I., Grimit, E. P., Held, L., and Johnson, N. A. (2008). Assessing probabilistic forecasts of multivariate quantities, with an application to ensemble predictions of surface winds. *TEST*, 17, 211-235.
-- Schefzik, R., Thorarinsdottir, T. L., and Gneiting, T. (2013). Uncertainty quantification in complex simulation models using ensemble copula coupling. *Statistical Science*, 28, 616-640.
-- Scheuerer, M., and Hamill, T. M. (2015). Variogram-based proper scoring rules for probabilistic forecasts of multivariate quantities. *Monthly Weather Review*, 143, 1321-1334.
+- Clark, M., Gangopadhyay, S., Hay, L., Rajagopalan, B., and Wilby, R. (2004). The Schaake shuffle: a method for reconstructing space-time variability in forecasted precipitation and temperature fields. *Journal of Hydrometeorology*, 5, 243-262. doi:10.1175/1525-7541(2004)005<0243:TSSAMF>2.0.CO;2
+- Gneiting, T., Stanberry, L. I., Grimit, E. P., Held, L., and Johnson, N. A. (2008). Assessing probabilistic forecasts of multivariate quantities, with an application to ensemble predictions of surface winds. *TEST*, 17, 211-235. doi:10.1007/s11749-008-0114-x
+- Schefzik, R., Thorarinsdottir, T. L., and Gneiting, T. (2013). Uncertainty quantification in complex simulation models using ensemble copula coupling. *Statistical Science*, 28, 616-640. doi:10.1214/13-STS443
+- Scheuerer, M., and Hamill, T. M. (2015). Variogram-based proper scoring rules for probabilistic forecasts of multivariate quantities. *Monthly Weather Review*, 143, 1321-1334. doi:10.1175/MWR-D-14-00269.1

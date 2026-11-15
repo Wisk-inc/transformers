@@ -4,31 +4,32 @@ The first full-year benchmark ([FULL_YEAR_BENCHMARK.md](FULL_YEAR_BENCHMARK.md))
 
 ## Read this first
 
-- **The test year is the same as before** (April 2025 to March 2026), and the weak spots were found on it. So this is a second look at a year already seen, not a fresh test.
-- **To keep it honest**, every design choice was made inside the training year (April 2024 to March 2025), by cross-validation or by forecasting its later months from its earlier ones. The design was written down before the test year was scored. The parts are shown separately below, including where they cost something.
-- **One thing was changed after scoring began.** The design as written down handed every record storm to the raw systems. The first places scored showed that this helps in some places and hurts in others. Each place now decides from its own training year: the hand-over is used only where it improved the forecast of storms withheld from training. A first remedy, an audit on out-of-fold forecasts, was tried and dropped: its verdict went against the test year in 3 of 7 places, and its sign depends on details that should not matter. The rule now used was fixed when 5 of the 7 places had been scored (the Caribbean, the Maritime Continent, the Alps, the US Pacific Northwest and the Southern Andes). Only Jamaica and the US Great Plains were scored after it. The design as written down, the final one and the design with no hand-over are scored everywhere and shown side by side.
-- **Truth is CMORPH**, a satellite estimate. It is weak on frozen precipitation and on the heaviest rain.
+The test year is the same as before (April 2025 to March 2026), and the weak spots were found on it. This is a second look at a year already seen. Every design choice was made inside the training year (April 2024 to March 2025), by cross-validation or by forecasting its later months from its earlier ones, and the design was written down before the test year was scored. The parts are shown separately below, including where they cost something.
+
+One thing was changed after scoring began. The design as written down handed every record storm to the raw systems. The first places scored showed that this helps in some places and does harm in others. Each place now decides from its own training year: the hand-over is used only where it improved the forecast of storms withheld from training. A first remedy, an audit on out-of-fold forecasts, was tried and dropped. Its verdict went against the test year in 3 of 7 places, and its sign changes with which calibrated forecast it is computed on. The rule now used was fixed when 5 of the 7 places had been scored (the Caribbean, the Maritime Continent, the Alps, the US Pacific Northwest and the Southern Andes). Only Jamaica and the US Great Plains were scored after it. The design as written down, the final one and the design with no hand-over are scored everywhere and shown side by side.
+
+One assumption of the test was too kind. The online weights were given each day's rain two days after it fell. The satellite record is published about four and a half months late. The truth is CMORPH, a satellite estimate, which is weak on frozen precipitation and on the heaviest rain.
 
 ## What changed
 
-1. **Components see every heavy day.** Each post-processing network is trained on all rows with observed or forecast rain of 25 mm or more, the rest thinned, with weights that undo the thinning.
-2. **The pool is fitted on the same kind of rows.**
-3. **Online weights.** The components and the pool are re-weighed after every verified day, with a 48-hour delay for the truth to arrive. One learning rate, chosen on the training year.
-4. **Record storms.** A forecast outside anything in the training period is handed back, in part, to what the raw systems say.
-5. **Each place decides about the hand-over.** The four wettest days of the training year are withheld from training and then forecast. The hand-over is used in a place only if it lowered the Brier score at 50 mm on those storms.
-6. **Scenarios.** Calibrated amounts are arranged in space like the ECMWF ensemble's members, so each scenario is as varied as real weather.
+1. Each post-processing network is trained on all rows with observed or forecast rain of 25 mm or more. The other rows are thinned, with weights that undo the thinning.
+2. The pool is fitted on the same kind of rows.
+3. The components and the pool are re-weighed online after every verified day, with a 48-hour delay for the truth to arrive and one learning rate, chosen on the training year.
+4. A forecast outside anything in the training period is handed back, in part, to what the raw systems say.
+5. Each place decides about that hand-over. The four wettest days of the training year are withheld from training and then forecast, and the hand-over is used in a place only if it lowered the Brier score at 50 mm on those storms.
+6. Scenarios arrange the calibrated amounts in space like the ECMWF ensemble's members, so each scenario is as varied as real weather.
 
 ## The short version
 
-- **Heavy rain (50 mm).** Brier skill improved on the first Blend in 13 of 28 place and lead-group cells, and in 7 of 7 on days 1-3. Mean skill over the places on days 1-3 went from +0.1901 to +0.2133. The new Blend leads every other system at 50 mm in 15 of 28 cells (the first led in 14).
-- **In the places scored after the design was final** (Jamaica and the US Great Plains), 50 mm skill improved on the first Blend in 4 of 8 cells, and the new Blend leads every other system in 3 (the first: 0).
-- **Against each post-processed system at 50 mm**, 79 of 161 comparisons are better with 95% confidence and 0 worse.
-- **Rain or no rain (1 mm).** The new Blend leads in 24 of 28 cells (the first: 26), and improved on the first in 13. On days 1-7, 81 of 84 comparisons with single post-processed systems are better with 95% confidence and 0 worse.
-- **CRPS** leads in 25 of 28 cells (was 23); **RMSE** in 21 of 28 (was 20); **ACC** in 18 of 28 (was 16).
-- **Days 11-14 got slightly worse.** There the new Blend leads every other system at 1 mm in 4 of 7 places (the first: 6) and at 50 mm in 2 (the first: 5). Mean Brier skill at 1 mm on those days went from +0.0394 to +0.0390. The pool alone scores +0.0396: the online weights for that lead group learn from few forecasts that verify late, and cost a little.
-- **Record storms.** Each place's staged storms kept the hand-over in Jamaica, the Caribbean, the Maritime Continent, the US Great Plains and the Southern Andes and switched it off in the Alps and the US Pacific Northwest. That verdict had the sign of what the hand-over then did in the test year in 7 of 7 places (2 of the 2 scored after the rule was final). The out-of-fold audit tried first would have been right in 4 of 7.
-- **Structure at long range.** On days 11-14 one coupled scenario has 0.88 of the weather's spatial variability (raw ECMWF ENS: 0.84), and the CRPS of rain averaged over two-degree boxes is 2.26 mm against 2.93 for uncoupled draws and 2.57 for the raw ensemble (means over 7 places).
-- **What is still weak** is listed [near the end](#what-is-still-weak).
+- At 50 mm, Brier skill improved on the first Blend in 13 of 28 place and lead-group cells, and in 7 of 7 on days 1-3. Mean skill over the places on days 1-3 went from +0.1901 to +0.2133. The new Blend leads every other system at 50 mm in 15 of 28 cells (the first led in 14).
+- In the places scored after the design was final (Jamaica and the US Great Plains), 50 mm skill improved on the first Blend in 4 of 8 cells, and the new Blend leads every other system in 3 (the first: 0).
+- Against each post-processed system at 50 mm, 79 of 161 comparisons are better with 95% confidence and 0 are worse.
+- At 1 mm, which is rain or no rain, the new Blend leads in 24 of 28 cells (the first: 26), and improved on the first in 13. On days 1-7, 81 of 84 comparisons with single post-processed systems are better with 95% confidence and 0 are worse.
+- The CRPS leads in 25 of 28 cells (was 23), the RMSE in 21 of 28 (was 20) and the anomaly correlation in 18 of 28 (was 16).
+- Days 11-14 got slightly worse. There the new Blend leads every other system at 1 mm in 4 of 7 places (the first: 6) and at 50 mm in 2 (the first: 5). Mean Brier skill at 1 mm on those days went from +0.0394 to +0.0390. The pool alone scores +0.0396: the online weights for that lead group learn from few forecasts that verify late, and cost a little.
+- Each place's staged storms kept the record-storm hand-over in Jamaica, the Caribbean, the Maritime Continent, the US Great Plains and the Southern Andes and switched it off in the Alps and the US Pacific Northwest. That verdict had the sign of what the hand-over then did in the test year in 7 of 7 places (2 of the 2 scored after the rule was final). The out-of-fold audit tried first would have been right in 4 of 7.
+- On days 11-14 one coupled scenario has 0.88 of the weather's spatial variability (raw ECMWF ENS: 0.84), and the CRPS of rain averaged over two-degree boxes is 2.26 mm against 2.93 for uncoupled draws and 2.57 for the raw ensemble (means over 7 places).
+- The weak spots that remain are listed [near the end](#what-is-still-weak).
 
 ## Scoreboard
 
@@ -61,7 +62,7 @@ Brier skill score for 50 mm or more: first Blend -> new Blend (best other system
 | US Great Plains (mid-latitude storms) | +0.105 -> **+0.129** (+0.114) + | +0.032 -> +0.029 (+0.035) | +0.017 -> +0.015 (+0.017) | -0.002 -> +0.003 (+0.004) + |
 | Southern Andes and Chile (southern mid-latitudes) | +0.250 -> **+0.283** (+0.228) + | +0.115 -> **+0.133** (+0.107) + | +0.034 -> **+0.032** (+0.029) | +0.005 -> +0.006 (+0.006) + |
 
-**Skill in the tail against the raw consensus of the six systems** (threshold-weighted CRPS above 25 mm; 1 is perfect, 0 no better than the raw consensus)
+Skill in the tail against the raw consensus of the six systems (threshold-weighted CRPS above 25 mm; 1 is perfect, 0 no better than the raw consensus).
 
 | Place | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -73,7 +74,7 @@ Brier skill score for 50 mm or more: first Blend -> new Blend (best other system
 | US Great Plains | +0.030 | +0.048 | +0.060 | +0.067 |
 | Southern Andes | +0.352 | +0.233 | +0.192 | +0.166 |
 
-**What a warning for 50 mm meant, days 1-3** (issued: share of all place-days; came: how often 50 mm or more then fell; caught: share of all 50 mm cases covered)
+What a warning for 50 mm meant on days 1-3 (issued: share of all place-days; came: how often 50 mm or more then fell; caught: share of all 50 mm cases covered).
 
 | Place | 50 mm days | Watch (10%+): issued / came / caught | Warning (30%+) | Extreme (60%+) |
 |---|---|---|---|---|
@@ -87,7 +88,7 @@ Brier skill score for 50 mm or more: first Blend -> new Blend (best other system
 
 ### The hand-over: staged, checked, and scored three ways
 
-**Storms withheld from training** (training year only). The wettest days were taken out of training, then forecast. The calibrated forecast shrinks them. The hand-over gives some of that back where the raw systems are the better guide, and does harm where they are not. Ordinary days are left alone. A place uses the hand-over only where the Brier score in the fifth column fell (bold).
+Storms withheld from training (training year only). The wettest days were taken out of training, then forecast. The calibrated forecast shrinks them. The hand-over gives some of that back where the raw systems are the better guide, and does harm where they are not. Ordinary days are left alone. A place uses the hand-over only where the Brier score in the fifth column fell (bold).
 
 | Place | Withheld days | Observed mean, mm | Calibrated amount, mm | Brier at 50 mm: calibrated -> with hand-over | Raw systems alone | Ordinary days handed over |
 |---|---|---|---|---|---|---|
@@ -99,7 +100,7 @@ Brier skill score for 50 mm or more: first Blend -> new Blend (best other system
 | US Great Plains | 2024-11-18, 2024-11-03, 2025-04-05, 2024-04-28 | 20.7 | 11.9 | 0.1083 -> **0.1036** | 0.1017 | 0.02% |
 | Southern Andes | 2024-08-01, 2025-03-29, 2024-09-01, 2024-04-02 | 15.1 | 4.3 | 0.0827 -> **0.0782** | 0.0666 | 0.14% |
 
-**Two rules from training data, and what happened.** The staged storms are the rule that decides. The yearly check was tried first as the switch: the hand-over is applied to all the training period's out-of-fold forecasts and the Brier score at 50 mm compared. It touches one row in a thousand, so its effect on a year's score is a few tenths of a percent, and the sign of so small a number proved not to be evidence. The last column is the test year: Brier skill at 50 mm on days 1-3 with the hand-over always on, minus without it. A verdict is bold where it had the sign of the test year.
+Two rules from training data, and what happened. The staged storms are the rule that decides. The yearly check was tried first as the switch: the hand-over is applied to all the training period's out-of-fold forecasts and the Brier score at 50 mm compared. It touches one row in a thousand, so its effect on a year's score is a few tenths of a percent, and the sign of so small a number tells us nothing. The last column is the test year: Brier skill at 50 mm on days 1-3 with the hand-over always on, minus without it. A verdict is bold where it had the sign of the test year.
 
 | Place | Staged storms: Brier at 50 mm on the withheld storms | Their verdict | Yearly check: Brier at 50 mm over the training period | It would have said | Test year: what the hand-over did |
 |---|---|---|---|---|---|
@@ -113,7 +114,7 @@ Brier skill score for 50 mm or more: first Blend -> new Blend (best other system
 
 The staged storms had the sign of the test year in 7 of 7 places, the yearly check in 4 of 7. The staged rule was the first one written down, was replaced by the yearly check, and was restored when 5 of the 7 places had been scored, so its count is partly hindsight.
 
-**Brier skill at 50 mm in the test year, days 1-3**, three ways. Bold is the best of the three.
+Brier skill at 50 mm in the test year, days 1-3, three ways. Bold is the best of the three.
 
 | Place | No hand-over | Always on (as first declared) | As the staged storms decided (Pluvium Blend) | Their verdict |
 |---|---|---|---|---|
@@ -126,7 +127,7 @@ The staged storms had the sign of the test year in 7 of 7 places, the yearly che
 | Southern Andes | +0.2652 | **+0.2827** | **+0.2827** | keep |
 | **Mean** | +0.1996 | +0.2089 | +0.2133 | |
 
-**Brier skill at 50 mm in the test year, days 4-7**, three ways. Bold is the best of the three.
+Brier skill at 50 mm in the test year, days 4-7, three ways. Bold is the best of the three.
 
 | Place | No hand-over | Always on (as first declared) | As the staged storms decided (Pluvium Blend) | Their verdict |
 |---|---|---|---|---|
@@ -152,11 +153,11 @@ Brier skill score for 1 mm or more in each place's winter: first Blend -> new Bl
 
 ### Winter against a second truth
 
-CMORPH is weak on frozen precipitation, so a winter loss could be the forecast's or the truth's. The two US places were scored again for December to February against MRMS, the US radar and gauge analysis, on the same rows. Everything was trained on CMORPH, so every system carries the same handicap against MRMS. What matters is whether the order between systems changes.
+CMORPH is weak on frozen precipitation, so a winter loss could be the forecast's or the truth's. The two US places were scored again for December to February against MRMS, the US radar and gauge analysis, on the same rows. Everything was trained on CMORPH, so every system carries the same handicap against MRMS, and the question is whether the order between the systems changes.
 
 US Pacific Northwest, DJF: 90 days. Each cell: Brier skill against CMORPH / against MRMS, each against its own base rate. Bold is the best in the column for that truth.
 
-**1 mm or more**
+Rain of 1 mm or more.
 
 | System | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -171,7 +172,7 @@ US Pacific Northwest, DJF: 90 days. Each cell: Brier skill against CMORPH / agai
 | Share of rows with the rain: CMORPH / MRMS | 20.4% / 27.1% | 20.7% / 27.6% | 20.7% / 27.1% | 20.7% / 27.6% |
 | Rows where the two truths agree | 84% | 84% | 84% | 84% |
 
-**10 mm or more**
+Rain of 10 mm or more.
 
 | System | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -188,7 +189,7 @@ US Pacific Northwest, DJF: 90 days. Each cell: Brier skill against CMORPH / agai
 
 US Great Plains, DJF: 90 days. Each cell: Brier skill against CMORPH / against MRMS, each against its own base rate. Bold is the best in the column for that truth.
 
-**1 mm or more**
+Rain of 1 mm or more.
 
 | System | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -203,7 +204,7 @@ US Great Plains, DJF: 90 days. Each cell: Brier skill against CMORPH / against M
 | Share of rows with the rain: CMORPH / MRMS | 5.3% / 7.5% | 5.2% / 7.5% | 6.2% / 8.6% | 5.2% / 7.5% |
 | Rows where the two truths agree | 94% | 94% | 93% | 94% |
 
-**10 mm or more**
+Rain of 10 mm or more.
 
 | System | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -221,11 +222,11 @@ US Great Plains, DJF: 90 days. Each cell: Brier skill against CMORPH / against M
 
 ## Weak spot 3: structure at long range
 
-The map of expected amounts is smooth at long range, and should be: nobody knows where the rain band will lie in twelve days. Its sharpness in the scoreboard's sense has not changed and will not. What a user needs at long range is a set of scenarios that each look like weather. Those are scored here.
+The map of expected amounts is smooth at long range, and should be: nobody knows where the rain band will lie in twelve days. Its sharpness in the scoreboard's sense has not changed and will not. At that range a user is better served by a set of scenarios that each look like weather, and those are scored here.
 
 Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 
-**Sharpness of one scenario (1 = as varied as the weather)**
+Sharpness of one scenario (1 = as varied as the weather).
 
 | Place | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -237,7 +238,7 @@ Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 | US Great Plains | 0.84 / 0.97 / **0.97** | 0.90 / **0.99** / 1.02 | **1.07** / 1.13 / 1.21 | 0.94 / **1.01** / 1.10 |
 | Southern Andes | 1.12 / 0.93 / **0.94** | 1.37 / **1.02** / 1.04 | **1.12** / 0.76 / 0.78 | **1.06** / 0.72 / 0.75 |
 
-**CRPS place by place, mm (lower is better)**
+CRPS place by place, mm (lower is better).
 
 | Place | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -249,7 +250,7 @@ Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 | US Great Plains | 1.55 / **1.38** / 1.38 | 1.73 / **1.62** / 1.62 | 1.30 / **1.24** / 1.24 | 1.76 / **1.71** / 1.71 |
 | Southern Andes | 1.90 / **0.85** / 0.85 | 1.60 / **0.94** / 0.94 | 2.04 / **1.71** / 1.71 | 1.96 / **1.59** / 1.59 |
 
-**CRPS of the mean rain over two-degree boxes, mm (lower is better)**
+CRPS of the mean rain over two-degree boxes, mm (lower is better).
 
 | Place | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -261,7 +262,7 @@ Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 | US Great Plains | 1.37 / **1.18** / 1.38 | 1.52 / **1.41** / 1.77 | 1.25 / **1.19** / 1.67 | 1.63 / **1.59** / 2.26 |
 | Southern Andes | 1.94 / **0.83** / 0.96 | 1.69 / **1.03** / 1.28 | 2.16 / **1.90** / 2.37 | 2.14 / **1.80** / 2.30 |
 
-**Energy score per root place, mm (lower is better)**
+Energy score per root place, mm (lower is better).
 
 | Place | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -273,7 +274,7 @@ Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 | US Great Plains | 3.24 / **2.98** / 3.00 | 3.35 / **3.20** / 3.35 | 2.65 / **2.60** / 2.94 | 3.60 / **3.58** / 4.01 |
 | Southern Andes | 4.28 / **2.36** / 2.39 | 3.66 / **2.51** / 2.61 | 4.75 / **4.28** / 4.40 | 4.74 / **4.15** / 4.40 |
 
-**Variogram score for places within 150 km (lower is better)**
+Variogram score for places within 150 km (lower is better).
 
 | Place | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -287,7 +288,7 @@ Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 
 ## What each part added
 
-**Brier skill, 1 mm** (mean over 7 places)
+Brier skill, 1 mm (mean over 7 places).
 
 | Design | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -297,7 +298,7 @@ Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 | Pool + online weights + hand-over, always on (as first declared) | +0.3591 | +0.2494 | +0.1226 | +0.0390 |
 | Pool + online weights + hand-over where the staged storms say so (Pluvium Blend) | +0.3591 | +0.2494 | +0.1226 | +0.0390 |
 
-**Brier skill, 25 mm** (mean over 7 places)
+Brier skill, 25 mm (mean over 7 places).
 
 | Design | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -307,7 +308,7 @@ Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 | Pool + online weights + hand-over, always on (as first declared) | +0.2647 | +0.1581 | +0.0697 | +0.0094 |
 | Pool + online weights + hand-over where the staged storms say so (Pluvium Blend) | +0.2653 | +0.1582 | +0.0700 | +0.0094 |
 
-**Brier skill, 50 mm** (mean over 7 places)
+Brier skill, 50 mm (mean over 7 places).
 
 | Design | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -317,7 +318,7 @@ Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 | Pool + online weights + hand-over, always on (as first declared) | +0.2089 | +0.0997 | +0.0394 | +0.0077 |
 | Pool + online weights + hand-over where the staged storms say so (Pluvium Blend) | +0.2133 | +0.1022 | +0.0412 | +0.0077 |
 
-**CRPS** (mean over 7 places)
+CRPS (mean over 7 places).
 
 | Design | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -327,7 +328,7 @@ Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.
 | Pool + online weights + hand-over, always on (as first declared) | 1.8359 | 2.1022 | 2.3312 | 2.4778 |
 | Pool + online weights + hand-over where the staged storms say so (Pluvium Blend) | 1.8352 | 2.1020 | 2.3307 | 2.4778 |
 
-**RMSE** (mean over 7 places)
+RMSE (mean over 7 places).
 
 | Design | days 1-3 | days 4-7 | days 8-10 | days 11-14 |
 |---|---|---|---|---|
@@ -348,17 +349,19 @@ Observed over Jamaica on 2025-10-28 (CMORPH): 154 mm on average, up to 447 mm; 1
 | 8 | 9%, 16 | 10%, 1%, 17 | 0% | 18%, 28 |
 | 12 | 2%, 5 | 1%, 0%, 5 | 0% | 23%, 41 |
 
-**How rare was it?** A generalised Pareto fit to Jamaica's CMORPH record from 2020-01 to 2025-04 (5.1 years, 450 places, all before the test year) puts the daily amount reached once a year at 79 mm on average over the places, and once in five years at 123 mm. On 2025-10-28, 100% of places had more than their once-a-year amount, 78% more than their once-in-five-years amount, and 35% an amount rarer than once in 20 years, which is as far as a record of that length can say. The median place had a day expected about once in 13 years. These are rough figures from five years of satellite estimates.
+How rare that was: a generalised Pareto fit to Jamaica's CMORPH record from 2020-01 to 2025-04 (5.1 years, 450 places, all before the test year) puts the daily amount reached once a year at 79 mm on average over the places, and once in five years at 123 mm. On 2025-10-28, 100% of places had more than their once-a-year amount, 78% more than their once-in-five-years amount, and 35% an amount rarer than once in 20 years, which is as far as a record of that length can say. The median place had a day expected about once in 13 years. These are rough figures from five years of satellite estimates.
 
 ## What is still weak
 
-- **Heavy rain is not won everywhere.** At 50 mm the Blend is behind some other system in 13 of 28 place and lead-group cells, 4 of them on days 1-7. The largest gaps: Jamaica days 11-14 (0.357 behind ECMWF HRES raw); Jamaica days 8-10 (0.052 behind ECMWF HRES); US Pacific Northwest days 8-10 (0.016 behind ECMWF ENS); US Great Plains days 4-7 (0.007 behind ECMWF ENS raw). Beyond a week the skill of every system at 50 mm is close to zero and one storm can decide a cell.
-- **The pattern of the expected amount at long range.** On days 11-14 the anomaly correlation of the Blend's expected amount is behind another system in 4 of 7 places: Alps +0.05 against +0.26 (ECMWF ENS raw); US Great Plains +0.17 against +0.29 (ECMWF ENS raw); US Pacific Northwest +0.22 against +0.28 (ECMWF AIFS raw); Jamaica +0.15 against +0.17 (ECMWF AIFS raw). A calibrated expected amount is smooth by construction, and a raw model's field keeps its pattern even when the pattern is in the wrong place. A correction that traded RMSE for this score was tested and not adopted ([WHAT_DID_NOT_WORK.md](WHAT_DID_NOT_WORK.md)).
-- **Days 11-14 carry little skill for anyone.** Brier skill at 1 mm on days 11-14: Jamaica -0.006, Caribbean +0.054, Maritime Continent +0.113, Alps +0.032, US Pacific Northwest +0.002, US Great Plains +0.033, Southern Andes +0.045. Zero is the climatology.
-- **The hand-over is not universal.** In the Alps and the US Pacific Northwest the staged storms were not forecast better with it, so it is off there, and a storm beyond the record is forecast by the calibration alone, which shrinks it. The table still flags such a forecast.
-- **The verdict rests on four storms per place.** It had the sign of what the hand-over then did in the test year in 7 of 7 places. That is partly hindsight: the rule was fixed after 5 of the 7 places had been scored. It can be overruled (`pluvium blend train --handover always` or `never`).
-- **The truth is one satellite product.** CMORPH underestimates frozen and orographic precipitation and the heaviest rain. Winter was scored against radar and gauges for the two US places only.
-- **A year already seen.** The test year is the one on which the weak spots were found. A fresh year is the test that counts, and it does not exist yet.
+- At 50 mm the Blend is behind some other system in 13 of 28 place and lead-group cells, 4 of them on days 1-7. The largest gaps: Jamaica days 11-14 (0.357 behind ECMWF HRES raw); Jamaica days 8-10 (0.052 behind ECMWF HRES); US Pacific Northwest days 8-10 (0.016 behind ECMWF ENS); US Great Plains days 4-7 (0.007 behind ECMWF ENS raw). Beyond a week the skill of every system at 50 mm is close to zero and one storm can decide a cell.
+- On days 11-14 the anomaly correlation of the Blend's expected amount is behind another system in 4 of 7 places: Alps +0.05 against +0.26 (ECMWF ENS raw); US Great Plains +0.17 against +0.29 (ECMWF ENS raw); US Pacific Northwest +0.22 against +0.28 (ECMWF AIFS raw); Jamaica +0.15 against +0.17 (ECMWF AIFS raw). A calibrated expected amount is smooth by construction, and a raw model's field keeps its pattern even when the pattern is in the wrong place. A correction that traded RMSE for this score was tested and not adopted ([WHAT_DID_NOT_WORK.md](WHAT_DID_NOT_WORK.md)).
+- Days 11-14 carry little skill for anyone. Brier skill at 1 mm on those days: Jamaica -0.006, Caribbean +0.054, Maritime Continent +0.113, Alps +0.032, US Pacific Northwest +0.002, US Great Plains +0.033, Southern Andes +0.045. Zero is the climatology.
+- In the Alps and the US Pacific Northwest the staged storms were not forecast better with the hand-over, so it is off there, and a storm beyond the record is forecast by the calibration alone, which shrinks it. The table still flags such a forecast.
+- The verdict on the hand-over rests on four storms per place. It had the sign of what the hand-over then did in the test year in 7 of 7 places. That is partly hindsight: the rule was fixed after 5 of the 7 places had been scored. It can be overruled (`pluvium blend train --handover always` or `never`).
+- The online weights were scored with each day's rain known two days later. The satellite record is published about four and a half months late, so a live system learns that much later.
+- The quarterly refits used every run before each quarter. A live system can train only on runs whose rain has been published, which are about five months old. That gap was not tested.
+- The truth is one satellite product. CMORPH underestimates frozen and orographic precipitation and the heaviest rain. Winter was scored against radar and gauges for the two US places only.
+- The test year is the one on which the weak spots were found. A fresh year is the test that counts, and it does not exist yet.
 
 ## Every place
 

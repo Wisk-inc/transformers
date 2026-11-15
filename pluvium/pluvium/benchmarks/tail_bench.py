@@ -98,14 +98,14 @@ def run(store, keep_blocks: np.ndarray, keep_p: np.ndarray, amount: float = 50.0
 
 def markdown(results: list) -> str:
     """Tail skill against the raw consensus and what the warnings meant, for every place."""
-    lines = ["**Skill in the tail against the raw consensus of the six systems** (threshold-weighted CRPS above 25 mm; "
-             "1 is perfect, 0 no better than the raw consensus)", "",
+    lines = ["Skill in the tail against the raw consensus of the six systems (threshold-weighted CRPS above 25 mm; "
+             "1 is perfect, 0 no better than the raw consensus).", "",
              "| Place | " + " | ".join(LEAD_GROUPS) + " |", "|---|" + "---|" * len(LEAD_GROUPS)]
     for r in results:
         cells = [f"{r['groups'][g]['skill_tw25']:+.3f}" if g in r["groups"] else "-" for g in LEAD_GROUPS]
         lines.append(f"| {place_name(r['region'])} | " + " | ".join(cells) + " |")
-    lines += ["", "**What a warning for 50 mm meant, days 1-3** (issued: share of all place-days; came: how often 50 mm "
-              "or more then fell; caught: share of all 50 mm cases covered)", "",
+    lines += ["", "What a warning for 50 mm meant on days 1-3 (issued: share of all place-days; came: how often 50 mm "
+              "or more then fell; caught: share of all 50 mm cases covered).", "",
               "| Place | 50 mm days | Watch (10%+): issued / came / caught | Warning (30%+) | Extreme (60%+) |", "|---|---|---|---|---|"]
     for r in results:
         a = r["groups"].get("days 1-3", {}).get("alerts")

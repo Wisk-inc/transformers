@@ -135,18 +135,59 @@ def stage_daily(root, regions: dict, first_day: str, end_day: str, workers: int 
     months = sorted({str(hour_to_datetime64(int(h)))[:7] for h in range(a, b, 24)})
     with ProcessPoolExecutor(max_workers=workers) as pool:
         for month in months:
-            if all((root / r / f"{month}.npz").exists() for r in regions):
-                continue
             days = [h for h in range(a, b, 24) if str(hour_to_datetime64(h))[:7] == month]
-            got = dict(pool.map(_read_day, [(h, plans) for h in days], chunksize=1))
-            for r, p in plans.items():
-                rain = np.stack([got[h][r] for h in days]).astype(np.float32)
+            # what each region already holds for this month. A day stored with nothing known counts as not held:
+            # it was asked for before NOAA had published it, and may be there now.
+            held = {}
+            for r in regions:
+                path = root / r / f"{month}.npz"
+                if path.exists():
+                    with np.load(path) as z:
+                        held[r] = {int(h): z["rain"][i] for i, h in enumerate(z["days"])}
+                else:
+                    held[r] = {}
+            wanted = [h for h in days if any(h not in held[r] or not np.isfinite(held[r][h]).any() for r in regions)]
+            if not wanted:
+                continue
+            got = dict(pool.map(_read_day, [(h, plans) for h in wanted], chunksize=1))
+            for r in plans:
+                merged = {**held[r], **{h: got[h][r] for h in wanted}}
+                order = sorted(merged)
                 tmp = root / r / f"{month}.tmp.npz"
-                np.savez_compressed(tmp, days=np.asarray(days, np.int64), rain=rain)
+                np.savez_compressed(tmp, days=np.asarray(order, np.int64),
+                                    rain=np.stack([merged[h] for h in order]).astype(np.float32))
                 tmp.replace(root / r / f"{month}.npz")
-            known = np.mean([np.isfinite(got[h][r]).mean() for h in days for r in plans])
-            log(f"daily truth {month}: {len(days)} days, {known:.0%} of cells known")
+            known = np.mean([np.isfinite(got[h][r]).mean() for h in wanted for r in plans])
+            log(f"daily truth {month}: {len(wanted)} days, {known:.0%} of cells known")
     return DailyTruth(root)
 
 
-__all__ = ["DailyTruth", "STEP", "region_grid", "stage_daily"]
+#: the days NOAA has published for one month, as the bucket lists them
+LISTING = "https://noaa-cdr-precip-cmorph-pds.s3.amazonaws.com/?list-type=2&delimiter=/&prefix=data/30min/8km/{y}/{m}/"
+
+
+def truth_until(now: int | None = None, months: int = 18, enough: int = 25, listing: str = LISTING) -> int | None:
+    """The last UTC day (hours since 1970, at 00 UTC) for which the CMORPH record can be relied on: the last day
+    published in the newest month that has at least ``enough`` days. NOAA adds to this record months after the
+    fact and fills a month in over several weeks, so a month with a few days is not counted yet. None when the
+    bucket cannot be listed (no network)."""
+    import re
+    from datetime import datetime, timezone
+
+    now = int(datetime.now(timezone.utc).timestamp() // 3600) if now is None else int(now)
+    stamp = str(hour_to_datetime64(now))
+    year, month = int(stamp[:4]), int(stamp[5:7])
+    for _ in range(months):
+        try:
+            text = fetch(listing.format(y=year, m=f"{month:02d}"), attempts=3).decode()
+        except Exception:
+            return None
+        days = sorted(int(d) for d in re.findall(r"<Prefix>data/30min/8km/\d{4}/\d{2}/(\d{2})/</Prefix>", text))
+        if len(days) >= enough:
+            last = hour_of(f"{year}-{month:02d}-{days[-1]:02d}T00")
+            return min(last, now - now % 24)
+        year, month = (year, month - 1) if month > 1 else (year - 1, 12)
+    return None
+
+
+__all__ = ["DailyTruth", "STEP", "region_grid", "stage_daily", "truth_until"]

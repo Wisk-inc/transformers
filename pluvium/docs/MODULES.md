@@ -28,11 +28,11 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/benchmarks/tail_bench.py` | 157 | The heavy end of the forecast, scored on its own. |
 | `pluvium/benchmarks/winter_bench.py` | 142 | Winter, scored twice: against the satellite and against radar and gauges. |
 | `pluvium/blend.py` | 323 | Pluvium Blend: one calibrated forecast from every operational system and Pluvium's own network. |
-| `pluvium/blendlive.py` | 297 | Pluvium Blend for any country, every day. |
+| `pluvium/blendlive.py` | 330 | Pluvium Blend for any country, every day. |
 | `pluvium/calibrate.py` | 147 | Making the stated chances true: isotonic recalibration fitted on held-out forecasts. |
 | `pluvium/card.py` | 146 | The model card written next to a trained Pluvium: what it is, how it was trained, and how well it did. |
 | `pluvium/chain.py` | 256 | The intensity chain (experimental): rain at a place as a hidden Markov chain over *intensity states* -- dry, light, moderate, heavy -- whose hour-by-hour transition matrix the network writes for every place. |
-| `pluvium/cli.py` | 311 | ``pluvium forecast / place / program / info``. |
+| `pluvium/cli.py` | 395 | ``pluvium forecast / place / program / info``. |
 | `pluvium/convection.py` | 90 | The convective environment: how ready the air is to make thunderstorms, from the driving model's temperature, humidity and wind at 850, 700, 500 and 200 hPa (the forecaster's classic instability and moisture indices). |
 | `pluvium/cyclone/__init__.py` | 27 | Pluvium Cyclone: where a tropical cyclone will go, from every operational system at once. |
 | `pluvium/cyclone/approach.py` | 86 | How close will it come? |
@@ -74,9 +74,9 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/forecast.py` | 544 | The live forecast: for every town and village in the Caribbean, hour by hour for three days -- the chance of rain, whether it will be drizzle, showers, steady or heavy rain or thunderstorms, when it is most likely to start (in local time) and when it will be heaviest, how much may fall, the flash-flood risk, and why. |
 | `pluvium/frontier/__init__.py` | 27 | Pluvium Frontier: the second generation of Pluvium Blend. |
 | `pluvium/frontier/evaluate.py` | 237 | Scoring pool designs on a place's stored components. |
-| `pluvium/frontier/model.py` | 332 | Pluvium Blend as benchmarked on the frontier, for any country, every day. |
+| `pluvium/frontier/model.py` | 362 | Pluvium Blend as benchmarked on the frontier, for any country, every day. |
 | `pluvium/frontier/oof.py` | 109 | Out-of-fold forecasts: what each component says about days it was not trained on. |
-| `pluvium/frontier/report.py` | 301 | The frontier benchmark as tables: where the new Blend stands, what each part added, and what changed since the first. |
+| `pluvium/frontier/report.py` | 351 | The frontier benchmark as tables: where the new Blend stands, what each part added, and what changed since the first. |
 | `pluvium/frontier/store.py` | 232 | The component store: every component's forecasts for a place, kept so that pools can be fitted and scored in minutes. |
 | `pluvium/guard/__init__.py` | 24 | What can go wrong when the model is running, and what Pluvium does about it. |
 | `pluvium/guard/consistency.py` | 71 | Outputs that contradict each other, found and repaired. |
@@ -113,7 +113,8 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/prob/extremes.py` | 91 | The tail: cloudbursts and their return periods. |
 | `pluvium/prob/scores.py` | 88 | Scores that a single mean error hides. |
 | `pluvium/products.py` | 192 | From the heads' raw outputs to what a person asks: will it rain here, when will it start, how hard, will there be thunder, how long will it last, how much will fall, and why. |
-| `pluvium/program.py` | 620 | Pluvium-500 from nothing on one GPU, in stages that each finish or resume: |
+| `pluvium/program.py` | 628 | Pluvium-500 from nothing on one GPU, in stages that each finish or resume: |
+| `pluvium/quick.py` | 358 | From nothing to a forecast in one call. |
 | `pluvium/render/__init__.py` | 16 | Forecasts in the forms people and agencies use: |
 | `pluvium/render/alerts.py` | 77 | Alerts in the Common Alerting Protocol (OASIS CAP 1.2). |
 | `pluvium/render/bulletin.py` | 105 | A national rain bulletin. |
@@ -129,9 +130,9 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/schedule.py` | 67 | The forecast's clock: which hours each frame stands for, shared by training, live input and the products. |
 | `pluvium/sources/__init__.py` | 3 | Where the data comes from: ERA5 (training predictors), CMORPH and airport reports (truth), GFS/ECMWF and GOES (live). |
 | `pluvium/sources/archive.py` | 259 | Every operational system's rain, read once per run and cut to many regions at the same time. |
-| `pluvium/sources/baselines.py` | 220 | The operational systems Pluvium is measured against, read exactly as their producers publish them. |
+| `pluvium/sources/baselines.py` | 233 | The operational systems Pluvium is measured against, read exactly as their producers publish them. |
 | `pluvium/sources/cmorph.py` | 235 | The truth Pluvium learns rain from: NOAA's CMORPH Climate Data Record, 8 km every 30 minutes since 1998 (``noaa-cdr-precip-cmorph-pds`` on AWS Open Data, about 1.6 MB an hour for the whole band 60 S - 60 N). |
-| `pluvium/sources/cmorph_daily.py` | 152 | Daily rain truth for any region of the world between 60 S and 60 N: CMORPH, summed over each UTC day and averaged onto the 0.25-degree grid the operational systems publish. |
+| `pluvium/sources/cmorph_daily.py` | 193 | Daily rain truth for any region of the world between 60 S and 60 N: CMORPH, summed over each UTC day and averaged onto the 0.25-degree grid the operational systems publish. |
 | `pluvium/sources/era5.py` | 218 | Training predictors: ERA5 reanalysis from the public ARCO and WeatherBench 2 stores on Google Cloud. |
 | `pluvium/sources/glm.py` | 81 | Lightning now: flashes seen by GOES-East's Geostationary Lightning Mapper in the last minutes (``noaa-goes19``, ``GLM-L2-LCFA``, one file per 20 seconds), counted around every town. |
 | `pluvium/sources/goes.py` | 162 | Rain already falling, live, from GOES (the forecast's "history" frames). |
@@ -158,9 +159,13 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/training/curriculum.py` | 58 | Showing the network the rare events. |
 | `pluvium/training/distill.py` | 38 | Distillation: a small Pluvium that forecasts like the large one. |
 | `pluvium/training/ema.py` | 50 | Polyak averaging of the weights. |
-| `pluvium/util.py` | 144 | Small shared pieces: logging, HTTP with retries and byte ranges, parallel fetching, and the hour clock. |
+| `pluvium/upstream/__init__.py` | 22 | The published weights of the AI weather models whose forecasts Pluvium reads, and how to keep a copy of them. |
+| `pluvium/upstream/fetch.py` | 215 | Copy a published set of weights to a local folder, unchanged, with its licence and a record of where it came from. |
+| `pluvium/upstream/mirror.py` | 121 | Keep a copy of the upstream weights inside a Hugging Face model repository, under ``upstream/<name>/``. |
+| `pluvium/upstream/registry.py` | 205 | The AI weather models behind two of the six systems Pluvium reads, and where their weights are published. |
+| `pluvium/util.py` | 149 | Small shared pieces: logging, HTTP with retries and byte ranges, parallel fetching, and the hour clock. |
 | `pluvium/verify.py` | 218 | Scoring forecasts against what fell, and against the forecasts a person could have used instead. |
 | `pluvium/weather.py` | 283 | What the weather *is*, in the words people use: intensity classes, drizzle versus rain versus showers, thunder. |
 | `pluvium/zarrlite.py` | 166 | A minimal reader for consolidated Zarr v2 stores over HTTPS (the public ERA5 stores on Google Cloud). |
 
-158 modules, 21,820 lines.
+163 modules, 23,005 lines.

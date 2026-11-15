@@ -1,0 +1,213 @@
+# Pluvium, everything in one cell: the newest package, the Hugging Face repository (code, papers, a collection, the
+# upstream AI models' weights), the hourly network on a GPU, your country's 14-day rain forecast and hurricane tracks.
+# Paste into one notebook cell (Colab, Kaggle, Jupyter, a rented GPU box) or run as `python pluvium_everything.py`.
+#
+# With nothing changed it needs no account and no GPU: it sets the country up, gets a trained blend (downloads one
+# if the repository has it, otherwise trains one in about two hours) and prints the forecast.
+# With a token pasted in, it also builds the repository. On a GPU of 24 GB or more it also trains the network.
+# Every step can be run again: what is already downloaded, uploaded or trained is not done twice.
+
+COUNTRY = "JM"                              # ISO codes: "JM", "TT", "DO,HT", "PH", "KE" ...
+ROOT = "~/pluvium-JM"                       # the country's working folder; about 5 GB if a blend is trained here
+HANDOVER = "auto"                           # record storms: "auto" follows the storms staged in training; "always"; "never"
+HURRICANES = True                           # a bulletin for every tropical cyclone alive now
+BASINS = "al,ep"                            # al: North Atlantic, ep: East Pacific
+
+HF_TOKEN = "PASTE_YOUR_ORG_TOKEN_HERE"      # a Hugging Face write token; leave as it is to skip everything on the Hub
+HF_REPO = "CorxLabs/Pluvium-500"            # the model repository to create or update
+PRIVATE = False                             # True to keep the repository and the collection private
+MIRROR_UPSTREAM = True                      # copy GraphCast's, NOAA's and ECMWF's weights into the repository (4.9 GB)
+
+TRAIN_NETWORK = "auto"                      # the hourly network: "auto" trains it when a GPU of 24 GB or more is here; "yes"; "no"
+GPU_HOURS = 24                              # wall-clock budget for the network
+NETWORK_ROOT = "/workspace/pluvium"         # its working folder; about 150 GB for six years of data
+SIZE = "pluvium-500"                        # or "pluvium-base" for a smaller, faster network
+
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.request
+from pathlib import Path
+
+if not HF_TOKEN.startswith("PASTE"):
+    os.environ["HF_TOKEN"] = HF_TOKEN       # for the commands below only; it is never printed or written to a file
+TOKEN = os.environ.get("HF_TOKEN", "")
+PLUVIUM = [sys.executable, "-m", "pluvium.cli"]
+root = Path(os.path.expanduser(ROOT))
+steps = []                                  # (what, outcome), printed at the end
+
+
+def run(args: list, env: dict | None = None) -> None:
+    """Run a command and show its output line by line, so a notebook shows progress. Stopping the cell stops it."""
+    print("$ " + " ".join(str(a) for a in args), flush=True)
+    proc = subprocess.Popen([str(a) for a in args], env=dict(os.environ, PYTHONUNBUFFERED="1", **(env or {})),
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    try:
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+    if proc.wait() != 0:
+        raise RuntimeError(f"`{' '.join(str(a) for a in args[:5])} ...` ended with exit code {proc.returncode}")
+
+
+def step(what: str, action, skip: str = "") -> bool:
+    """Do one step. A step that fails is reported and the cell goes on: the steps do not depend on each other."""
+    print(f"\n=== {what} " + "=" * max(4, 96 - len(what)), flush=True)
+    if skip:
+        print(f"skipped: {skip}", flush=True)
+        steps.append((what, f"skipped ({skip})"))
+        return False
+    started = time.time()
+    try:
+        action()
+    except BaseException as error:          # also a stopped cell: say so, then let the stop go through
+        steps.append((what, f"FAILED after {(time.time() - started) / 60:.0f} min: {type(error).__name__}: {error}"))
+        print(f"FAILED: {type(error).__name__}: {error}", flush=True)
+        if isinstance(error, KeyboardInterrupt):
+            raise
+        return False
+    steps.append((what, f"done in {(time.time() - started) / 60:.0f} min"))
+    return True
+
+
+# 1. the package: from PyPI, or from the source tree when PyPI cannot be reached
+def install() -> None:
+    try:
+        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.4.0"])
+    except RuntimeError:
+        run([sys.executable, "-m", "pip", "install", "-q", "git+https://github.com/Wisk-inc/transformers.git"
+             "@claude/linear-context-architecture-a35c6h#subdirectory=pluvium"])
+    run(PLUVIUM + ["upstream", "list"])     # also proves the command line works
+
+
+def version() -> str:
+    out = subprocess.run([sys.executable, "-c", "import pluvium; print(pluvium.__version__)"], capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+if not step("1. Pluvium, the newest version", install):
+    raise SystemExit("Pluvium could not be installed, so nothing else can run. The error is above.")
+print(f"pluvium {version()}")
+
+
+# 2. the repository: the model card, all the code, the papers, the benchmarks, and a collection in the organisation
+def source_tree() -> Path:
+    """The full Pluvium project (code, tests, docs, papers, card) for the installed version: the source archive
+    from PyPI, or the source tree on GitHub when this version is not on PyPI."""
+    work = Path(tempfile.mkdtemp(prefix="pluvium-src-"))
+    try:
+        with urllib.request.urlopen(f"https://pypi.org/pypi/pluvium/{version()}/json", timeout=60) as response:
+            url = next(f["url"] for f in json.load(response)["urls"] if f["packagetype"] == "sdist")
+        urllib.request.urlretrieve(url, work / "pluvium.tar.gz")
+        with tarfile.open(work / "pluvium.tar.gz") as archive:
+            try:
+                archive.extractall(work, filter="data")
+            except TypeError:               # Pythons from before the filter existed
+                archive.extractall(work)
+        return next(p for p in work.iterdir() if p.is_dir())
+    except OSError as error:
+        print(f"no source archive on PyPI for this version ({error}); cloning the source tree", flush=True)
+        run(["git", "clone", "--depth", "1", "--branch", "claude/linear-context-architecture-a35c6h",
+             "https://github.com/Wisk-inc/transformers.git", work / "clone"])
+        return work / "clone" / "pluvium"
+
+
+def upload_code() -> None:
+    source = source_tree()
+    spec = importlib.util.spec_from_file_location("pluvium_hub_upload", source / "hub" / "upload_to_hub.py")
+    hub = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hub)
+    hub.HF_REPO, hub.PRIVATE, hub.SOURCE = HF_REPO, PRIVATE, str(source)
+    hub.main()                              # reads the token from the environment
+
+
+NO_TOKEN = "" if TOKEN else "no token pasted into HF_TOKEN"
+step(f"2. {HF_REPO}: code, model card, papers, benchmarks, collection", upload_code, NO_TOKEN)
+
+# 3. the weights of the AI models whose forecasts Pluvium reads, copied unchanged with their licences
+step("3. Upstream weights: GraphCast (DeepMind), GraphCastGFS and AIGFS (NOAA), AIFS (ECMWF)",
+     lambda: run(PLUVIUM + ["upstream", "mirror", "--repo", HF_REPO] + (["--private"] if PRIVATE else [])),
+     NO_TOKEN or ("" if MIRROR_UPSTREAM else "MIRROR_UPSTREAM is False"))
+
+
+# 4. the hourly network, on a GPU. It goes before the rest because GPU time is the part with a clock on it.
+def gpu_gb() -> float:
+    """Memory of the largest GPU here, in GB; 0 when there is none."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=60).stdout
+        return max(float(x) for x in out.split()) / 1024
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
+def network() -> None:
+    probe = ("import torch; assert torch.cuda.is_available(), 'no GPU visible';"
+             "x = torch.ones(8, device='cuda'); print(torch.cuda.get_device_name(0), torch.__version__, float(x @ x))")
+    if subprocess.run([sys.executable, "-c", probe]).returncode != 0:
+        print("PyTorch here has no kernels for this GPU; installing the CUDA 12.8 build", flush=True)
+        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "torch", "--index-url",
+             "https://download.pytorch.org/whl/cu128"])
+        subprocess.run([sys.executable, "-c", probe], check=True)
+    if not TOKEN:
+        print("No Hub token: nothing is mirrored, so a stopped session cannot resume and nothing is published.")
+    run([sys.executable, "-u", "-m", "pluvium.program"],
+        env={"GPU_HOURS": str(GPU_HOURS), "HF_REPO": HF_REPO, "PLUVIUM_ROOT": NETWORK_ROOT, "PLUVIUM_SIZE": SIZE,
+             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True", "TOKENIZERS_PARALLELISM": "false"})
+    print(f"the network's own forecast is in {NETWORK_ROOT}/forecast/report.txt")
+
+
+gpu = gpu_gb()
+resuming = (Path(os.path.expanduser(NETWORK_ROOT)) / "program.json").exists()
+place = Path(os.path.expanduser(NETWORK_ROOT))
+while not place.exists():
+    place = place.parent
+free_gb = shutil.disk_usage(place).free / 1e9
+why_not = ("TRAIN_NETWORK is 'no'" if TRAIN_NETWORK == "no" else
+           "no GPU here; the rain forecast and the hurricane tracks need none" if gpu == 0 else
+           "" if TRAIN_NETWORK == "yes" else
+           f"the GPU has {gpu:.0f} GB and the network wants 24 or more (TRAIN_NETWORK = 'yes' with SIZE = "
+           "'pluvium-base' trains a smaller one)" if gpu < 22 else
+           f"{free_gb:.0f} GB free at {place} and the data needs about 150 (point NETWORK_ROOT at a bigger disk)"
+           if free_gb < 150 and not resuming else "")
+step(f"4. The Pluvium-500 network on the GPU ({GPU_HOURS} hours)", network, why_not)
+
+# 5. rain for the country, 14 days: sets the country up, downloads a trained blend or trains one, reads the newest runs
+later = (root / "live_archive").exists()    # not the first forecast here: also learn from the days now verified
+step(f"5. Rain for {COUNTRY}, 14 days",
+     lambda: run(PLUVIUM + ["now", "--country", COUNTRY, "--root", root, "--repo", HF_REPO]
+                 + (["--handover", HANDOVER] if HANDOVER != "auto" else []) + (["--learn"] if later else [])))
+
+# 6. share the blend trained here, so that the next person's step 5 is a download
+trained_here = (root / "blend" / "blend.json").exists() and not (root / "blend" / "FETCHED").exists()
+step(f"6. Publish the trained blend for {COUNTRY}",
+     lambda: run(PLUVIUM + ["blend", "publish", "--root", root, "--repo", HF_REPO] + (["--private"] if PRIVATE else [])),
+     NO_TOKEN or ("" if trained_here else "the blend here was downloaded, not trained here"))
+
+# 7. hurricanes: track, cone and the chance of passing near each place, for every storm alive now
+step("7. Hurricanes alive now", lambda: run(PLUVIUM + ["cyclone", "--root", root, "--basins", BASINS]),
+     "" if HURRICANES else "HURRICANES is False")
+
+print("\n" + "=" * 100)
+for what, outcome in steps:
+    print(f"{what}: {outcome}")
+tables = sorted(root.glob("blend_*.csv"))
+print(f"\nforecast table: {tables[-1] if tables else 'none written'}")
+print("its columns: the chance of 1, 10, 25 and 50 mm; median, 90th percentile and expected rain; how many raw systems "
+      "call for 50 mm; the alert tier; whether the forecast is beyond the training record; how rare the amount is")
+if HURRICANES:
+    print(f"hurricane bulletins and data: {root / 'cyclone'}")
+if TOKEN:
+    print(f"repository: https://huggingface.co/{HF_REPO}")
+print(f"every day after this: pluvium now --country {COUNTRY} --root {root} --learn")
+failed = [what for what, outcome in steps if outcome.startswith("FAILED")]
+if failed:
+    print(f"\n{len(failed)} step(s) failed and are listed above. Running the cell again repeats only what is missing.")

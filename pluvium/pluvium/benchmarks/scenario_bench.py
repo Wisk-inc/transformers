@@ -136,7 +136,7 @@ def markdown(results: list) -> str:
               "variogram": "Variogram score for places within 150 km (lower is better)"}
     lines = ["Each cell: raw ECMWF ENS / Pluvium coupled / Pluvium uncoupled.", ""]
     for key, title in titles.items():
-        lines += [f"**{title}**", "", "| Place | " + " | ".join(LEAD_GROUPS) + " |", "|---|" + "---|" * len(LEAD_GROUPS)]
+        lines += [f"{title}.", "", "| Place | " + " | ".join(LEAD_GROUPS) + " |", "|---|" + "---|" * len(LEAD_GROUPS)]
         for r in results:
             cells = []
             for g in LEAD_GROUPS:

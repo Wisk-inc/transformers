@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..sources.baselines import ECMWF, ECMWF_ARCHIVES, GEFS, GRAPHCAST, _ecmwf_rows, _first, _stamp
+from ..sources.baselines import ECMWF, ECMWF_ARCHIVES, GEFS, _ecmwf_rows, _first, _stamp, graphcast_template
 from ..sources.nwp import GFS, _index_ncep, decode
 from ..util import fetch, hour_to_datetime64, log, parallel_map
 from .basins import BASINS
@@ -153,7 +153,7 @@ class FieldArchive:
 
     def _graphcast(self, init):
         day, hour = _stamp(init)
-        return self._ncep(init, [lambda step: GRAPHCAST.format(day=day, hour=hour, step=step)])
+        return self._ncep(init, [lambda step: graphcast_template(init).format(day=day, hour=hour, step=step)])
 
     def _gefs(self, init):
         day, hour = _stamp(init)

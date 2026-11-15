@@ -492,14 +492,22 @@ class Program:
         return trainer.model, trainer.loss_fn, builder, held_b
 
     def publish(self, out: Path) -> None:
-        """Upload the release folder to the Hub repository (one commit)."""
+        """Upload the release folder to the Hub repository (one commit). The network's own card, with the scores
+        measured in this run, always goes up as ``NETWORK_CARD.md``. It also becomes the repository's ``README.md``
+        unless the repository already has one (the full card that ``hub/upload_to_hub.py`` puts there)."""
         try:
             from huggingface_hub import HfApi
 
             api = HfApi(token=self.mirror.token)
             api.create_repo(self.cfg.hub_repo, repo_type="model", exist_ok=True, private=self.cfg.private)
+            if (out / "README.md").exists():
+                shutil.copy2(out / "README.md", out / "NETWORK_CARD.md")
+            try:
+                has_card = bool(api.file_exists(self.cfg.hub_repo, "README.md"))
+            except Exception:
+                has_card = False
             api.upload_folder(folder_path=str(out), repo_id=self.cfg.hub_repo, repo_type="model",
-                              commit_message="Pluvium-500 release")
+                              commit_message="Pluvium-500 release", ignore_patterns=["README.md"] if has_card else None)
             log(f"published to https://huggingface.co/{self.cfg.hub_repo}")
         except Exception as error:
             log(f"publish skipped ({type(error).__name__}: {error})")

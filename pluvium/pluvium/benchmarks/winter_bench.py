@@ -99,7 +99,7 @@ def markdown(result: dict, labels: dict | None = None) -> str:
              "skill against CMORPH / against MRMS, each against its own base rate. Bold is the best in the column for "
              "that truth.", ""]
     for t in next(iter(result["groups"].values()))["wet_share"]["cmorph"]:
-        lines += [f"**{t} mm or more**", "", "| System | " + " | ".join(groups) + " |", "|---|" + "---|" * len(groups)]
+        lines += [f"Rain of {t} mm or more.", "", "| System | " + " | ".join(groups) + " |", "|---|" + "---|" * len(groups)]
         models = list(next(iter(result["groups"].values()))["skill"])
         best = {g: {k: max((result["groups"][g]["skill"][m][k][t] for m in models if m in result["groups"][g]["skill"]),
                            default=float("nan")) for k in ("cmorph", "mrms")} for g in groups}

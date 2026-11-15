@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from ..util import hour_to_datetime64, log, parallel_map
-from .baselines import ECMWF, ECMWF_ARCHIVES, GEFS, GRAPHCAST, _ecmwf_rows, _first, _stamp
+from .baselines import ECMWF, ECMWF_ARCHIVES, GEFS, _ecmwf_rows, _first, _stamp, graphcast_template
 from .nwp import GFS05, _index_ncep, decode
 
 #: name -> (south, north, west, east): tropical islands, tropical mountains, mid-latitude mountains, coasts and plains,
@@ -222,7 +222,7 @@ class ArchiveReader:
         return self._assemble(parallel_map(one, list(enumerate(steps)), workers=self.workers), 1, steps)
 
     def _graphcast(self, init, steps, ext_members):
-        return self._ncep_cumulative(init, steps, GRAPHCAST)
+        return self._ncep_cumulative(init, steps, graphcast_template(init))
 
     def _gfs(self, init, steps, ext_members):
         return self._ncep_cumulative(init, steps, GFS05)

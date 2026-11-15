@@ -163,7 +163,7 @@ than that network in about 20 of 24 comparisons. Bagging, hiding whole systems d
 for short and long leads were tried and gave mixed or worse results. See the full-year benchmark for the record.
 
 **A fair rival for every system:** each system's component is that system's post-processed forecast, scored on its
-own. Pluvium Blend has to beat each system after equal treatment, not just its raw output.
+own. Pluvium Blend has to beat each system after equal treatment as well as its raw output.
 
 Training a blend for a new country needs a year of archived runs and satellite truth: about two hours of downloads
 and under an hour of CPU (`pluvium blend train`).
@@ -182,11 +182,13 @@ Each part was chosen inside the training year and is scored on its own in
 2. **The pool is fitted on the same rows** (`pluvium.pool.gated`). It keeps its form: weights per component and band
    of thresholds, changing with lead.
 3. **Online weights** (`pluvium.pool.online`). The components and the pool are treated as experts. After every day
-   whose rain is known (48 hours later), each expert's weight moves by how much better or worse it did than the
-   mixture, separately for four lead groups and three bands of thresholds. A small share of weight always returns to
-   the starting weights, so no expert is written off for good. This is how the forecast follows a model upgrade or a
-   season in which one system pulls ahead. The weights are part of the saved model and move with
-   `pluvium blend learn`.
+   whose rain is known, each expert's weight moves by how much better or worse it did than the mixture, separately
+   for four lead groups and three bands of thresholds. A small share of weight always returns to the starting
+   weights, so no expert is written off for good. This is how the forecast follows a model upgrade or a season in
+   which one system pulls ahead. The weights are part of the saved model and move with `pluvium blend learn`. The
+   benchmark gave the weights each day's rain 48 hours later. Live, the rain is known when NOAA publishes it, about
+   four and a half months later, so the weights follow that far behind; the benchmark page shows what the delay
+   costs.
 4. **Record storms** (`pluvium.tails.support`, `pluvium.tails.override`). Calibration learned on ordinary years pulls
    a record forecast towards normal. The model keeps the edge of what it was trained on: the 99.9th percentile of the
    raw systems' consensus amount. Inside that edge nothing changes. Beyond it, trust moves from the calibrated chances
@@ -211,6 +213,26 @@ Each part was chosen inside the training year and is scored on its own in
    "rarer than once in that many years".
 
 What was tried and dropped is in [WHAT_DID_NOT_WORK.md](WHAT_DID_NOT_WORK.md).
+
+### One command, shared blends and the upstream weights (version 0.4)
+
+`pluvium now --country XX` (`pluvium.quick`) strings the steps together and does only what is missing: it sets the
+country up, gets a trained blend, reads the newest runs and writes the forecast. A trained blend is small (a few
+hundred kilobytes), so one can be shared. `pluvium blend publish` uploads it to a Hub repository under
+`blends/<area>/`, and `pluvium now` looks there before it trains. A downloaded blend is used only if it is for the
+same box and opens with a reader that cannot run code (`pluvium.blendlive.read_state`); blend files are written as
+tensors and plain values for that reason.
+
+The training period is no longer fixed. A blend learns from the rain that fell after each forecast, and the
+satellite record arrives about four and a half months late, so `pluvium.quick.recent_year` asks NOAA's bucket how
+far the record goes (`pluvium.sources.cmorph_daily.truth_until`) and takes the year that ends 15 days before that.
+
+Two of the six systems are AI models with public weights: NOAA's run of GraphCast and ECMWF's AIFS.
+`pluvium.upstream` lists where each publisher keeps them and under which licence, copies them unchanged with their
+checksums, and can keep the copies in a Hub repository under `upstream/`. Pluvium does not run them. It reads the
+forecasts NOAA and ECMWF make with them, because running them needs a large GPU and that day's global analysis,
+which only those centres produce. The copies guard against a different risk: a feed being renamed or switched off,
+as NOAA's GraphCastGFS was in May 2026 (the reader now follows it to its successor, AIGFS).
 
 ## 3b. Any country
 
