@@ -47,14 +47,15 @@ def index_text(models: list, results: dict) -> str:
                     f"Pluvium's {'GraphCast' if m.feeds == 'graphcast' else 'AIFS'} input |")
     return "\n".join([
         "# Upstream weights", "",
-        "Two of the six forecast systems Pluvium reads are AI models whose weights are public: NOAA's run of "
-        "GraphCast (now called AIGFS) and ECMWF's AIFS. The folders here are unchanged copies of those weights, kept "
-        "so that this repository holds everything the forecasts depend on.", "",
-        "Pluvium does not run these models. It reads the forecasts NOAA and ECMWF publish from them, a few megabytes "
-        "for one country. Running them needs a large GPU and that day's global analysis from NOAA or ECMWF, which no "
-        "copy of the weights can replace.", "",
-        "The licences below are the publishers', not Pluvium's. Each folder has the full text in `LICENSE` and the "
-        "notice to keep in `SOURCE.md`. Apache 2.0, which covers the rest of this repository, does not cover them.", "",
+        "Two of the six forecasts Pluvium reads come from AI models and their weights are public, NOAA's GraphCast "
+        "(now called AIGFS) and AIFS from ECMWF. The folders here are copies of those weights, not changed, so that "
+        "everything the forecast depends on is in this one repository.", "",
+        "Pluvium does not run these models. It reads the forecasts NOAA and ECMWF put out from them, a few megabytes "
+        "for one country. To run them you need a big GPU and that day's global analysis from NOAA or ECMWF, and no "
+        "copy of the weights can replace that.", "",
+        "The licences in the table are the publishers' licences and not Pluvium's. Each folder has the full text in "
+        "`LICENSE` and the notice you have to keep in `SOURCE.md`. Apache 2.0 covers the rest of this repository, it "
+        "does not cover these.", "",
         *rows, "",
         f"Last checked against the publishers on {now.day} {now:%B %Y}. To copy them again or add a newer version: "
         "`pluvium upstream mirror --repo <this repository>`.", ""])
@@ -103,7 +104,7 @@ def mirror(repo: str, token: str | None = None, names=None, cache=DEFAULT_CACHE,
             results[model.name] = f"failed: {type(error).__name__}: {str(error)[:200]}"
             say(f"upstream: {model.title}: not mirrored ({results[model.name][8:]})")
     if any(not r.startswith("failed") for r in results.values()):
-        # the index lists every model in the repository, not only the ones this call was asked to copy: a model
+        # the index lists every model in the repository, also the ones this call was not asked to copy: a model
         # copied on an earlier call, or one whose publisher could not be reached today, is still there
         kept = [m for m in select() if results.get(m.name) in ("copied", "already there")
                 or f"{FOLDER}/{m.name}/SOURCE.md" in have]

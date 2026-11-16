@@ -125,7 +125,7 @@ def test_mirror_copies_once_skips_what_is_there_and_survives_a_failure(tmp_path,
     again = upstream.mirror("org/repo", cache=tmp_path / "cache", api=api, say=said.append)
     assert again["toy"] == "already there" and len([c for c in api.commits if c.startswith("Mirror")]) == 1
     assert upstream.summary(again) == "0 copied, 1 already there, 1 failed (gone)"
-    with pytest.raises(SystemExit):                                                 # no token, no upload
+    with pytest.raises(SystemExit):                                                 # without a token nothing goes up
         monkeypatch.delenv("HF_TOKEN", raising=False)
         upstream.mirror("org/repo", cache=tmp_path / "cache")
 

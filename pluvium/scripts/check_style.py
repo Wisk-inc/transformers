@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT = ["docs/papers/*.md", "hub/README.md", "README.md"]
+DEFAULT = ["docs/papers/*.md", "hub/README.md", "README.md", "docs/GUIDE.md", "docs/MODEL_CARD.md"]
 
 WORDS = (r"additionally|align(?:s|ed|ing)? with|boasts?|bolster(?:s|ed|ing)?|crucial(?:ly)?|deep dive|delv(?:e|es|ed|ing)|"
          r"emphasi[sz](?:e|es|ed|ing)|enduring|enhanc(?:e|es|ed|ing|ement|ements)|foster(?:s|ed|ing)?|garner(?:s|ed|ing)?|"
@@ -58,7 +58,7 @@ CHECKS = {
     "parallel": (r"\b(?:not (?:just|only|merely|simply)|isn't (?:just|only|merely)|more than just|"
                  r"is not (?:an? |the )?[\w -]{1,40}[,;] (?:it|but)|no [\w-]+, no [\w-]+)\b"),
     "chat": (r"(?:i hope this helps|let me know|would you like|certainly!|of course!|as an ai\b|as a large language|"
-             r"my (?:last|latest) (?:training|knowledge)|knowledge cutoff|here is an?\b|here's an?\b|feel free to)"),
+             r"my (?:last|latest) (?:training|knowledge)|knowledge cutoff|\bhere is an?\b|\bhere's an?\b|feel free to)"),
     "hedge": (r"\b(?:based on available information|not (?:extensively|widely|well) documented|should not be confused "
               r"with|does not establish|readily available sources|it is important to|it should be noted)\b"),
 }
@@ -129,11 +129,53 @@ def rhythm(text: str) -> dict:
             "threes": len(re.findall(r"\b\w+, \w+,? and \w+\b", body))}
 
 
+def python_prose(source: str) -> str:
+    """What a person reads in a Python file, on the lines it stands on: the comments, the docstrings and the longer
+    messages (strings of six words or more). Everything else is blank, so :func:`findings` reports real line numbers.
+    The checker's own word lists and the test sentences that are bad on purpose are code, and are left out by
+    whoever calls this (see ``CODE_SKIP``)."""
+    import ast
+    import io
+    import tokenize
+
+    lines = [""] * (source.count("\n") + 2)
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+            if tok.type == tokenize.COMMENT:
+                text = tok.string.lstrip("#").strip()
+                if not text.startswith(("noqa", "type:", "ruff:", "pragma", "!")):
+                    lines[tok.start[0]] += " " + text
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value.split()) >= 6:
+                for k, part in enumerate(node.value.split("\n")):
+                    if node.lineno + k < len(lines):
+                        lines[node.lineno + k] += " " + part.strip()
+    except (SyntaxError, tokenize.TokenError):
+        return ""
+    # reST roles and literals are names, not prose
+    text = "\n".join(lines[1:])
+    text = re.sub(r":\w+:`[^`]*`", "``", text)
+    return re.sub(r"``[^`\n]*``", "``", text)
+
+
+#: Python files whose strings are word lists or deliberately bad examples
+CODE_SKIP = ("scripts/check_style.py", "tests/test_docs.py")
+
+
 def main(argv) -> int:
     paths = [Path(p) for p in argv] or sorted(p for pattern in DEFAULT for p in ROOT.glob(pattern))
     bad = 0
     for path in paths:
         text = path.read_text(encoding="utf-8")
+        if path.suffix == ".py":
+            name = path.relative_to(ROOT) if path.is_absolute() and ROOT in path.parents else path
+            if str(name) in CODE_SKIP:
+                continue
+            found = [f for f in findings(python_prose(text)) if not f[2].startswith(("title-case", "bold phrase"))]
+            bad += len(found)
+            for line, check, what in found:
+                print(f"{name}:{line}  {check:9s} {what}")
+            continue
         found, r = findings(text), rhythm(text)
         bad += len(found)
         name = path.relative_to(ROOT) if path.is_absolute() and ROOT in path.parents else path

@@ -27,15 +27,15 @@ BRANCH = "claude/linear-context-architecture-a35c6h"
 INCLUDE = ["pluvium/**", "tests/**", "scripts/**", "notebooks/**", "docs/**", "hub/upload_to_hub.py", "pyproject.toml",
            "pytest.ini", "LICENSE", "README.md", "CHANGELOG.md"]
 IGNORE = ["**/__pycache__/**", "**/*.pyc", "**/.pytest_cache/**", "**/.ruff_cache/**", "dist/**", "**/*.egg-info/**"]
-COLLECTION_NOTE = "Rain forecasts for any country and hurricane tracks, from six operational systems. Code, papers and benchmarks."
-MODEL_NOTE = ("The model, all its code, four papers, the benchmarks with losses beside wins, and copies of the "
-              "upstream AI models' weights.")
+COLLECTION_NOTE = "The rain model, made for Jamaica first and any other country too, and the hurricane tracks. Code, papers, benchmarks."
+MODEL_NOTE = ("The model and all the code used to build it, the four papers, the benchmarks with the losses left in, "
+              "and copies of the weights of the AI weather models it reads.")
 # papers Pluvium builds on that have a page on the Hub (checked on 15 November 2026): arXiv id -> why it is here
 PAPERS = {
-    "2212.12794": "GraphCast. NOAA runs a fine-tuned GraphCast every six hours; it is one of the six systems Pluvium reads.",
-    "2406.01465": "AIFS, ECMWF's AI forecast model: another of the six systems Pluvium reads.",
+    "2212.12794": "GraphCast. NOAA runs it every six hours, it is one of the six forecasts Pluvium reads.",
+    "2406.01465": "AIFS, the AI forecast model from ECMWF, another one of the six.",
     "2509.18994": "The update that made AIFS operational at ECMWF.",
-    "2604.25559": "The surface ocean in AIFS 2.0, the version ECMWF has run since May 2026.",
+    "2604.25559": "The ocean surface in AIFS 2.0, the version ECMWF runs since May 2026.",
 }
 
 
@@ -71,6 +71,18 @@ def make_collection(api) -> str | None:
             added += 1
         except Exception as error:
             print(f"  paper {paper} not added ({type(error).__name__}: {str(error)[:120]})")
+    # a collection made by an earlier run keeps the words it was made with unless they are written again
+    try:
+        notes = {HF_REPO: MODEL_NOTE, **PAPERS}
+        current = api.get_collection(collection.slug)
+        if (current.description or "") != COLLECTION_NOTE[:150]:
+            api.update_collection_metadata(collection.slug, description=COLLECTION_NOTE[:150])
+        for item in current.items:
+            note = notes.get(item.item_id)
+            if note and (item.note or "") != note[:500]:
+                api.update_collection_item(collection.slug, item.item_object_id, note=note[:500])
+    except Exception as error:
+        print(f"  the collection's notes were not refreshed ({type(error).__name__}: {str(error)[:120]})")
     where = f"https://huggingface.co/collections/{collection.slug}"
     print(f"collection: {where} (the model and {added} papers)")
     return where

@@ -1,11 +1,11 @@
-# Pluvium, everything in one cell: the newest package, the Hugging Face repository (code, papers, a collection, the
-# upstream AI models' weights), the hourly network on a GPU, your country's 14-day rain forecast and hurricane tracks.
-# Paste into one notebook cell (Colab, Kaggle, Jupyter, a rented GPU box) or run as `python pluvium_everything.py`.
+# Pluvium, the full code to run, all in one cell. Copy it into a notebook cell (Colab, Kaggle, Jupyter, a rented GPU
+# box) and run it, or run it as `python pluvium_everything.py`.
 #
-# With nothing changed it needs no account and no GPU: it sets the country up, gets a trained blend (downloads one
-# if the repository has it, otherwise trains one in about an hour and a half) and prints the forecast.
-# With a token pasted in, it also builds the repository. On a GPU of 24 GB or more it also trains the network.
-# Every step can be run again: what is already downloaded, uploaded or trained is not done twice.
+# If you change nothing it needs no account and no GPU, it sets up the country, gets the trained blend (downloads it
+# if the repository has one, if not it trains one, about an hour and a half) and prints the forecast.
+# With your token pasted in it also builds the Hugging Face repository, the code, the papers, the collection and the
+# weights of the AI weather models. On a GPU with 24 GB or more it also trains Pluvium-500.
+# You can run it again any time. What is already downloaded, uploaded or trained is not done twice.
 
 COUNTRY = "JM"                              # ISO codes: "JM", "TT", "DO,HT", "PH", "KE" ...
 ROOT = "~/pluvium-JM"                       # the country's working folder; 41 MB for Jamaica, a few GB for a large country
@@ -93,7 +93,7 @@ def step(what: str, action, skip: str = "") -> bool:
 # 1. the package: from PyPI, or from the source tree when PyPI cannot be reached
 def install() -> None:
     try:
-        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.5.2"])
+        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.5.3"])
     except RuntimeError:
         run([sys.executable, "-m", "pip", "install", "-q", "git+https://github.com/Wisk-inc/transformers.git"
              "@claude/linear-context-architecture-a35c6h#subdirectory=pluvium"])

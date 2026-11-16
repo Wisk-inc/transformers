@@ -1,6 +1,6 @@
 # Copyright 2026 Nathan. Apache-2.0.
 """
-Scores for scenario fields: do they have the right structure, not just the right chances at each place?
+Scores for scenario fields: do they have the right structure as well as the right chances at each place?
 
 Scores computed place by place cannot tell a coherent ensemble from the same values shuffled in space. These can:
 

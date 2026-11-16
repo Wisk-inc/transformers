@@ -1,6 +1,6 @@
 # Copyright 2026 Nathan. Apache-2.0.
 """The training program's settings: the years it trains on and holds out follow what the reanalysis archive really
-holds, and the GPU memory settings are read from the environment and checked. No network, no GPU."""
+holds, and the GPU memory settings are read from the environment and checked. Needs neither a network nor a GPU."""
 
 import numpy as np
 import pytest

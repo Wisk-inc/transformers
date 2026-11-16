@@ -115,7 +115,7 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/prob/scores.py` | 88 | Scores that a single mean error hides. |
 | `pluvium/products.py` | 192 | From the heads' raw outputs to what a person asks: will it rain here, when will it start, how hard, will there be thunder, how long will it last, how much will fall, and why. |
 | `pluvium/program.py` | 837 | Pluvium-500 from nothing on one GPU, in stages that each finish or resume: |
-| `pluvium/quick.py` | 616 | From nothing to a forecast in one call. |
+| `pluvium/quick.py` | 617 | From nothing to a forecast in one call. |
 | `pluvium/render/__init__.py` | 16 | Forecasts in the forms people and agencies use: |
 | `pluvium/render/alerts.py` | 77 | Alerts in the Common Alerting Protocol (OASIS CAP 1.2). |
 | `pluvium/render/bulletin.py` | 105 | A national rain bulletin. |
@@ -126,7 +126,7 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/scenarios/fss.py` | 89 | The fractions skill score: is the rain in the right neighbourhood, and at what scale does the forecast become useful? |
 | `pluvium/scenarios/pmm.py` | 43 | One sharp map from many scenarios: the probability-matched mean and the medoid. |
 | `pluvium/scenarios/schaake.py` | 47 | The Schaake shuffle: spatial structure from past observed days, when no ensemble is at hand. |
-| `pluvium/scenarios/scores.py` | 108 | Scores for scenario fields: do they have the right structure, not just the right chances at each place? |
+| `pluvium/scenarios/scores.py` | 108 | Scores for scenario fields: do they have the right structure as well as the right chances at each place? |
 | `pluvium/scenarios/spectra.py` | 72 | Power spectra: at which scales does a forecast still have detail? |
 | `pluvium/schedule.py` | 67 | The forecast's clock: which hours each frame stands for, shared by training, live input and the products. |
 | `pluvium/sources/__init__.py` | 3 | Where the data comes from: ERA5 (training predictors), CMORPH and airport reports (truth), GFS/ECMWF and GOES (live). |
@@ -165,11 +165,11 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/training/fit.py` | 228 | Sizing a training step to the GPU's memory. |
 | `pluvium/upstream/__init__.py` | 22 | The published weights of the AI weather models whose forecasts Pluvium reads, and how to keep a copy of them. |
 | `pluvium/upstream/fetch.py` | 215 | Copy a published set of weights to a local folder, unchanged, with its licence and a record of where it came from. |
-| `pluvium/upstream/mirror.py` | 132 | Keep a copy of the upstream weights inside a Hugging Face model repository, under ``upstream/<name>/``. |
+| `pluvium/upstream/mirror.py` | 133 | Keep a copy of the upstream weights inside a Hugging Face model repository, under ``upstream/<name>/``. |
 | `pluvium/upstream/registry.py` | 205 | The AI weather models behind two of the six systems Pluvium reads, and where their weights are published. |
 | `pluvium/util.py` | 182 | Small shared pieces: logging, HTTP with retries and byte ranges, parallel fetching, and the hour clock. |
 | `pluvium/verify.py` | 218 | Scoring forecasts against what fell, and against the forecasts a person could have used instead. |
 | `pluvium/weather.py` | 283 | What the weather *is*, in the words people use: intensity classes, drizzle versus rain versus showers, thunder. |
 | `pluvium/zarrlite.py` | 166 | A minimal reader for consolidated Zarr v2 stores over HTTPS (the public ERA5 stores on Google Cloud). |
 
-167 modules, 24,851 lines.
+167 modules, 24,853 lines.

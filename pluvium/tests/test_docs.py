@@ -86,11 +86,13 @@ def test_cells_compile_and_call_commands_that_exist():
 
 def test_papers_and_card_have_none_of_the_signs_the_style_check_lists():
     """``scripts/check_style.py`` encodes Wikipedia's field guide to signs of AI writing: its word lists, the
-    formulas it describes and its formatting habits. The papers, the model card and the readme carry none."""
+    formulas it describes and its formatting habits. The papers, the model card, the readme and the two long pages
+    behind them carry none."""
     spec = importlib.util.spec_from_file_location("check_style", ROOT / "scripts" / "check_style.py")
     style = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(style)
-    pages = sorted(ROOT.glob("docs/papers/*.md")) + [ROOT / "hub" / "README.md", ROOT / "README.md"]
+    pages = sorted(ROOT.glob("docs/papers/*.md")) + [ROOT / "hub" / "README.md", ROOT / "README.md",
+                                                     ROOT / "docs" / "GUIDE.md", ROOT / "docs" / "MODEL_CARD.md"]
     assert len(pages) >= 7
     for page in pages:
         found = style.findings(page.read_text())
@@ -106,12 +108,45 @@ def test_papers_and_card_have_none_of_the_signs_the_style_check_lists():
     assert style.findings("It stands as a testament, not just a tool.\n- **Speed:** fast\n## A Title In Title Case Here")
 
 
+def test_code_comments_docstrings_and_messages_carry_none_of_the_signs():
+    """The same check on what a person reads in the code: every comment, docstring and longer message."""
+    spec = importlib.util.spec_from_file_location("check_style", ROOT / "scripts" / "check_style.py")
+    style = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(style)
+    files = [p for folder in ("pluvium", "tests", "notebooks", "scripts", "hub") for p in sorted((ROOT / folder).rglob("*.py"))
+             if str(p.relative_to(ROOT)) not in style.CODE_SKIP]
+    assert len(files) > 150
+    found = []
+    for path in files:
+        prose = style.python_prose(path.read_text())
+        found += [(str(path.relative_to(ROOT)), line, what) for line, check, what in style.findings(prose)
+                  if not what.startswith(("title-case", "bold phrase"))]
+    assert not found, found[:8]
+    assert style.findings(style.python_prose('x = 1  # this is not just a number, it is a testament\n'))
+
+
+def test_the_readme_is_short_and_the_card_on_the_hub_is_the_same_text():
+    """The readme is three short pieces in the author's own words and tables for the rest; the long version is
+    ``docs/GUIDE.md``. The card on the Hub is that same text under its front matter, so the two cannot drift."""
+    readme = (ROOT / "README.md").read_text()
+    card = (ROOT / "hub" / "README.md").read_text()
+    assert card.startswith("---\n") and card.split("\n---\n", 1)[1].lstrip("\n") == readme
+    prose = [line for line in re.sub(r"```.*?```", "", readme, flags=re.S).split("\n")
+             if line.strip() and not line.startswith(("#", "|"))]
+    words = sum(len(line.split()) for line in prose)
+    assert 250 <= words <= 450, words
+    assert readme.count("```") == 2                                        # one block: how to install and run it
+    for page in ("docs/GUIDE.md", "docs/TRAINING.md", "CHANGELOG.md"):
+        assert f"]({page})" in readme and (ROOT / page).exists()
+
+
 def test_headline_results_are_the_same_text_wherever_they_appear():
-    """The README and the model card carry the benchmark page's headline results between markers, written there by
-    ``scripts/doc_frontier.py``, so the three cannot drift apart."""
+    """The manual and the long model card carry the benchmark page's headline results between markers, written there
+    by ``scripts/doc_frontier.py``, so the three cannot drift apart. (The readme and the card on the Hub are short
+    and point at them.)"""
     page = (ROOT / "docs" / "FRONTIER_BENCHMARK.md").read_text()
     blocks = []
-    for doc in (ROOT / "README.md", ROOT / "hub" / "README.md"):
+    for doc in (ROOT / "docs" / "GUIDE.md", ROOT / "docs" / "MODEL_CARD.md"):
         text = doc.read_text()
         assert text.count("<!-- frontier-summary:start -->") == 1 and text.count("<!-- frontier-summary:end -->") == 1
         block = text.split("<!-- frontier-summary:start -->")[1].split("<!-- frontier-summary:end -->")[0].strip()

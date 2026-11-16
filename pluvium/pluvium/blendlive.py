@@ -118,7 +118,7 @@ class BlendModel:
 
     @staticmethod
     def grid_climatology(area, truth, lat, lon, start: str, end: str) -> dict:
-        """The climatology on the whole grid (every cell, not only the scored ones), by month."""
+        """The climatology on the whole grid (every cell, the scored ones and the rest), by month."""
         from .benchmarks.fullyear import CellSet
 
         full = CellSet(np.repeat(lat, lon.size), np.tile(lon, lat.size),

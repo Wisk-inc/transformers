@@ -70,7 +70,7 @@ from .weather import OBS_FEATURES
 #: mixer, lead modulation, experts or head dropout)
 VERSION_2 = dict(physics_channels=False, point_physics=False, terrain_patch=False, refine_layers=0, temporal_layers=0,
                  lead_film=False, lead_shrink=False, experts=0, head_dropout=0.0, version=2)
-#: and version 1 (two states, no thunder/kind heads, no convective inputs, no advection, no airport assimilation)
+#: and version 1 (two states; without thunder/kind heads, convective inputs, advection or airport assimilation)
 VERSION_1 = dict(VERSION_2, states=2, thunder=False, precip_type=False, convective_channels=False, advection=False,
                  station_assimilation=False, version=1)
 #: which output keys carry the point axis where (everything else: axis 2)

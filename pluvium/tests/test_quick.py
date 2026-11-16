@@ -374,5 +374,5 @@ def test_blend_card_says_what_the_staged_storms_decided(model):
         model.meta.update(saved)
     assert "kept here" in kept and "the 2 wettest days (2025-10-28, 2025-10-18)" in kept
     assert "49.4% lower, 0.131 against 0.259. Lower is better." in kept and "[" not in kept
-    assert "switched off here" in off and "the 4 wettest days were withheld" in off and "1.5% higher." in off
+    assert "switched off here" in off and "the 4 wettest days were held back" in off and "1.5% higher." in off
     assert "°N" in kept and (" E." not in kept)                                 # a letter for the hemisphere, no signed "E"

@@ -214,11 +214,12 @@ def blend_card(model) -> str:
     s, n, w, e = area["target_box"]
     trained = meta.get("trained", ["?", "?"])
     lines = [f"# Pluvium Blend for {', '.join(area.get('countries', {}).values()) or area['name']}", "",
-             f"A trained Pluvium Blend for the box from {_degrees(s, 'NS')} to {_degrees(n, 'NS')} and from "
+             f"This is the trained blend for the box from {_degrees(s, 'NS')} to {_degrees(n, 'NS')} and from "
              f"{_degrees(w, 'EW')} to {_degrees(e, 'EW')}. "
-             f"`pluvium now --country {','.join(area.get('iso2', []))}` downloads it and forecasts with it.", "",
-             f"It was trained on {meta.get('runs', '?')} runs of each system from {trained[0][:10]} to {trained[1][:10]}, "
-             f"on {meta.get('cells', '?')} grid cells, with {len(meta.get('components', []))} components pooled."]
+             f"`pluvium now --country {','.join(area.get('iso2', []))}` downloads it by itself and forecasts with it, "
+             "you do not have to do anything with these files.", "",
+             f"It was trained on {meta.get('runs', '?')} runs of each of the six forecasts, from {trained[0][:10]} to "
+             f"{trained[1][:10]}, on {meta.get('cells', '?')} grid cells, {len(meta.get('components', []))} components pooled."]
     verdict = meta.get("handover")
     if verdict:
         staged = verdict.get("staged", {})
@@ -232,11 +233,11 @@ def blend_card(model) -> str:
             before, after = staged.get("calibrated"), staged.get("handed")
             scores = (f", {after:.3f} against {before:.3f}"
                       if all(isinstance(v, (int, float)) and np.isfinite(v) for v in (before, after)) else "")
-            why = (f" At training, the {count} wettest days{days} were withheld and then forecast unseen. With the "
+            why = (f" At training the {count} wettest days{days} were held back and then forecast unseen, with the "
                    f"hand-over their Brier score at {staged.get('amount', 50):g} mm was {100 * abs(gain):.1f}% "
                    f"{'lower' if gain >= 0 else 'higher'}{scores}. Lower is better.")
         lines += ["", f"The hand-over of record storms to the raw systems is {how} here.{why}"]
-    lines += ["", "The file `blend.pt` holds tensors and plain values only. Pluvium opens it without running any code "
+    lines += ["", "The file `blend.pt` holds tensors and plain values only, Pluvium opens it without running any code "
               "in it.", ""]
     return "\n".join(lines)
 

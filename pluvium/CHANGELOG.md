@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.3 (November 2026)
+
+No change to the forecast. The pages were rewritten.
+
+- The readme is short now and in my own words: what it is, is it standalone, can it tell the time, and tables for
+  the rest. The page on PyPI and the card on the Hub are that same text.
+- The old readme is `docs/GUIDE.md`, the long manual, and the old card is `docs/MODEL_CARD.md`. Nothing was thrown away.
+- The readme says plainly that Pluvium-500 is not finished: the first GPU run stopped at 138 minutes and the hour
+  by hour forecast is not published yet.
+- `scripts/check_style.py` also reads Python files now (comments, docstrings, messages), and the tests run it on
+  all of them. It found six phrases in 215 files, they are reworded.
+- `docs/STYLE.md` has the rules the pages are written by.
+
 ## 0.5.2 (November 2026)
 
 - The staged data went up to the Hub one commit per file, about 150 at once. The Hub takes at most 128 commits an

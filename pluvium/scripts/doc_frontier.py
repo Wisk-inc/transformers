@@ -1,7 +1,7 @@
 # Copyright 2026 Nathan. Apache-2.0.
 """Write docs/FRONTIER_BENCHMARK.md from the benchmark's own output, so every number in it is the data's.
 
-    python scripts/doc_frontier.py RESULTS FIRST EXPERIMENTS docs/FRONTIER_BENCHMARK.md [README.md hub/README.md ...]
+    python scripts/doc_frontier.py RESULTS FIRST EXPERIMENTS docs/FRONTIER_BENCHMARK.md [docs/GUIDE.md docs/MODEL_CARD.md ...]
 
 ``RESULTS`` holds, per place, ``{place}.json`` (from :func:`pluvium.frontier.evaluate.evaluate`), ``{place}_tail.json``,
 ``{place}_scenarios.json`` and, for the US places, ``{place}_winter_DJF.json``. ``FIRST`` holds the first benchmark's
@@ -439,7 +439,7 @@ for place in ORDER:
 out.write_text("\n".join(lines) + "\n")
 print("wrote", out, len(lines), "lines;", n_places, "places")
 
-# the same headline results, written into any other page that carries the markers (the README, the model card)
+# the same headline results, written into any other page that carries the markers (the manual, the long model card)
 START, END = "<!-- frontier-summary:start -->", "<!-- frontier-summary:end -->"
 block = [f"On the test year, in {n_places} places (the same year the first Blend was scored on):", ""] + summary
 for page in (Path(p) for p in sys.argv[5:]):
