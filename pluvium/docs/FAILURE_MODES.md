@@ -1,7 +1,8 @@
-# Failure modes: what can go wrong when Pluvium runs, and what it does about it
+# What can go wrong when Pluvium runs
 
-A forecast system fails in operation in ways no benchmark shows. This table lists the failures that matter for
-Pluvium. For each it gives how the failure is detected and what the system does, with the module responsible.
+Things go wrong when it runs for real that no benchmark is going to show you, a download fails, a forecast comes
+late, the satellite goes down. The tables here are the ones I know about. Each row says how Pluvium notices it, what
+it does then, and which file does it.
 
 ## Inputs
 
@@ -69,15 +70,18 @@ Pluvium. For each it gives how the failure is detected and what the system does,
 | A return period quoted far beyond what the record can support | The record's length | Beyond four times the record the wording is only "rarer than once in N years" | `tails/returns.py` |
 | A hurricane track read as a line | The spread of the systems and their members | A circle sized to hold the centre two times in three, and the chance of the centre passing within 150 km of each place | `cyclone/cone.py`, `cyclone/approach.py` |
 
-## Known limits that are not handled
+## What it does not handle
 
-* Truth is satellite rain at 8 km and airport reports. Neither sees every shower, and mountain rain is
-  under-reported by the satellite.
-* The flood rule and its thresholds are not verified against flood reports.
-* Driving models' own biases in a new season are only corrected as fast as airport reports reveal them.
-* Live "rain now" outside radar coverage comes from GOES infrared, which is cruder than the CMORPH used in training.
-* Where a place's staged storms switch the record-storm hand-over off, a storm beyond the training record is
-  forecast by the calibration alone, which shrinks it. The table still flags it and counts the raw systems that
-  call for 50 mm. The verdict rests on four storms of one training period and can be wrong either way.
-* Pluvium Cyclone forecasts the track only: no intensity, size, wind, surge or rain. It follows storms that already
-  exist and are named in the National Hurricane Center's decks; it does not forecast formation.
+Some things are not handled at all and you should know them.
+
+* The truth is rain from the satellite at 8 km and the airport reports. Neither one sees every shower, and the
+  satellite reports less rain in the mountains than what really falls.
+* The flood rule was never checked against real flood reports.
+* When the big models are wrong in a new season it only gets corrected as fast as the airport reports show it.
+* Rain now, outside of radar, comes from the GOES infrared picture and that is cruder than the CMORPH it was
+  trained on.
+* In a place where the staged storms switched the record storm hand-over off, a storm bigger than the training
+  record is forecast by the calibration alone and that shrinks it. The table still flags it and counts how many raw
+  systems call for 50 mm. That decision comes from four storms in one training period, so it can be wrong both ways.
+* Pluvium Cyclone does the track only. It does not do strength, size, wind, surge or rain. It follows storms the
+  National Hurricane Center already named, it does not say when a new one will form.
