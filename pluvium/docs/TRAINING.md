@@ -65,7 +65,7 @@ def sh(cmd, check=True):
     print(f"$ {cmd}", flush=True)
     return subprocess.run(cmd, shell=True, check=check).returncode
 
-sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.5.3'")
+sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.5.4'")
 root = os.path.expanduser(ROOT)
 pluvium = f"{sys.executable} -m pluvium.cli"
 if not os.path.exists(f"{root}/area.json"):
@@ -175,6 +175,10 @@ If the run stops on the GPU anyway, `pluvium program` starts it again by itself 
 steps sized to 85% of the card, then with the batch rule of 0.4.2, then with one forecast per step. A run started
 with the batch rule of 0.4.2 (`VRAM = "fastest"`) goes straight to the last two. The data are on disk by then, so
 the second try is training again within minutes. `PLUVIUM_RETRIES=0` turns this off.
+
+It is started again in the same way when it was killed (the machine ran out of RAM) or printed nothing for two hours
+(`PLUVIUM_STALL_MINUTES` changes that). The last 400 lines of every run that stopped are kept in
+`logs/attempt-N.txt`, in the working folder and in the Hub repository, so the error can be read afterwards.
 
 On an RTX PRO 6000 (96 GB), one Pluvium-500 forecast took 38.6 GB at its peak and trained at 0.24 forecasts a second,
 so a step holds two forecasts at most and the rest of the card goes to more target cells.

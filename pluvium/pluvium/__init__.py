@@ -11,7 +11,7 @@ whose forecasts Pluvium reads (:mod:`pluvium.upstream`).
 See :mod:`pluvium.model` for the architecture and its experimental components.
 """
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"
 
 from .domain import Gazetteer, Geography, PointSet  # noqa: E402
 from .model import PluviumConfig, PluviumModel  # noqa: E402

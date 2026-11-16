@@ -39,6 +39,10 @@ OUT_OF_MEMORY = ("out of memory", "CUBLAS_STATUS_ALLOC_FAILED", "CUBLAS_STATUS_N
                  "CUDNN_STATUS_ALLOC_FAILED", "CUDNN_STATUS_NOT_INITIALIZED")
 #: hours of rain looked at when finding the rainiest issue time to size a step on (a forecast's three days)
 PROBE_HOURS = 72
+#: the file beside a checkpoint that remembers which step sizes stopped a run
+SIZES = "sizes.json"
+#: training steps in a row that may fail (for a reason other than memory) before the run stops
+MAX_BAD_STEPS = 5
 
 
 def out_of_memory(error: BaseException) -> bool:
@@ -426,6 +430,9 @@ class Trainer:
         per second (:class:`pluvium.training.fit.Probe`). Running out of memory is an answer, not an error."""
         from .training.fit import Probe
 
+        size = [int(batch), round(float(scale), 3), bool(checkpointing)]
+        if self._size_crashed(size):                          # a run before this one died while trying this size
+            return Probe(batch, scale, checkpointing, None)
         self._apply(scale, checkpointing)
         key = round(float(scale), 3)
         if key not in self._probe_examples:
@@ -433,6 +440,7 @@ class Trainer:
             self._probe_examples[key] = self.builder.example(self._probe_start(), True, targets)
         example = self._probe_examples[key]
         moved = None
+        self._size_note(trying=size)
         try:
             self.meter.start(batch, scale, checkpointing)
             moved = to_device(collate([example] * batch), self.device)
@@ -446,14 +454,51 @@ class Trainer:
             self.meter.sync()
             rate = self.cfg.probe_steps * batch / max(time.time() - began, 1e-9)
             return Probe(batch, scale, checkpointing, self.meter.peak() + self._optimizer_bytes(), rate)
-        except (torch.OutOfMemoryError, RuntimeError) as error:
-            if not out_of_memory(error):
+        except Exception as error:
+            if out_of_memory(error):
+                return Probe(batch, scale, checkpointing, None)
+            if batch <= 1 and scale <= 1.0:                   # the smallest step there is: this is a real fault
                 raise
+            # a large step can fail in other ways than running out of memory (a CUDA library refusing a tensor that
+            # size, for one). It is a size that does not work, and the next run is told so too
+            self._size_note(crashed=size)
+            log(f"  batch {batch}, cells x{scale:.2f}: did not work ({type(error).__name__}: {str(error)[:160]}); "
+                "taken as too large")
             return Probe(batch, scale, checkpointing, None)
         finally:
             del moved
             self.optimizer.zero_grad(set_to_none=True)
             self.meter.release()
+            self._size_note(trying=None)
+
+    # sizes that stopped a run are remembered beside the checkpoint, so that the run started after it skips them
+    def _sizes(self) -> dict:
+        try:
+            return json.loads((self.out / SIZES).read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def _size_note(self, trying="keep", crashed=None) -> None:
+        """Record the size being measured (``trying``) or one that failed (``crashed``). Written before a
+        measurement starts, so a process that dies in the middle of it leaves the size behind."""
+        try:
+            note = self._sizes()
+            if trying != "keep":
+                note["trying"] = trying
+            if crashed is not None and crashed not in note.setdefault("crashed", []):
+                note["crashed"].append(crashed)
+            self.out.mkdir(parents=True, exist_ok=True)
+            (self.out / SIZES).write_text(json.dumps(note))
+        except OSError:
+            pass
+
+    def _size_crashed(self, size: list) -> bool:
+        note = self._sizes()
+        if note.get("trying") == size:                        # the run before this one never got past it
+            self._size_note(trying=None, crashed=size)
+            log(f"  batch {size[0]}, cells x{size[1]:.2f}: the run before this one stopped while trying it; skipped")
+            return True
+        return size in note.get("crashed", [])
 
     def _fill_memory(self) -> int:
         """Size the step to ``cfg.memory_share`` of the GPU's memory: gradient checkpointing on or off, the largest
@@ -486,9 +531,21 @@ class Trainer:
         total = torch.cuda.get_device_properties(self.device).total_memory
         best, best_rate = 1, 0.0
         state = {k: v.detach().clone() for k, v in self.model.state_dict().items()}
+        per_forecast = 0.0                                    # memory one more forecast costs, from the sizes that ran
         for b in candidates:
-            batch = to_device(collate([example] * b), self.device)
+            size = [int(b), 1.0, "fastest"]
+            if self._size_crashed(size):
+                break
+            # a size that cannot fit is not tried. Until 0.5.4 it was, and the batch was moved to the GPU outside
+            # the lines that catch running out of memory: on a 96 GB card where one forecast takes 38.6 GB, batch 3
+            # ended the run there
+            if per_forecast and b * per_forecast > 0.9 * total:
+                log(f"  batch {b:>2}: would need about {b * per_forecast / 2**30:.0f} GB; not tried")
+                break
+            batch = None
+            self._size_note(trying=size)
             try:
+                batch = to_device(collate([example] * b), self.device)
                 torch.cuda.reset_peak_memory_stats(self.device)
                 torch.cuda.synchronize()
                 for k in range(3):
@@ -500,20 +557,26 @@ class Trainer:
                 torch.cuda.synchronize()
                 rate = 2 * b / (time.time() - began)
                 peak = torch.cuda.max_memory_allocated(self.device)
+                per_forecast = max(per_forecast, peak / b)
                 log(f"  batch {b:>2}: {rate:.2f} forecasts/s, peak memory {peak / 2**30:.1f} GB")
                 if peak > 0.9 * total:
                     break
                 if rate > best_rate * 1.03:
                     best, best_rate = b, rate
-            except (torch.OutOfMemoryError, RuntimeError) as error:
-                if not out_of_memory(error):
+            except Exception as error:
+                if out_of_memory(error):
+                    log(f"  batch {b:>2}: out of memory")
+                    break
+                if b <= 1:                                    # one forecast: this is a real fault
                     raise
-                log(f"  batch {b:>2}: out of memory")
+                self._size_note(crashed=size)
+                log(f"  batch {b:>2}: did not work ({type(error).__name__}: {str(error)[:160]}); taken as too large")
                 break
             finally:
                 del batch
                 self.optimizer.zero_grad(set_to_none=True)
                 torch.cuda.empty_cache()
+                self._size_note(trying=None)
         self.model.load_state_dict(state)
         self.cfg.batch_size = best
         log(f"batch size {best} ({best_rate:.2f} forecasts/s)")
@@ -734,12 +797,29 @@ class Trainer:
             f"{len(self.train_starts):,} issue times, {cfg.hours - self.elapsed / 3600:.2f} h left of {cfg.hours:.2f} h")
         last_save = last_eval = last_log = time.time()
         window, waited, began = [], 0.0, time.time()
-        t_prev, first = time.time(), True
+        t_prev, first, bad = time.time(), True, 0
         for batch in loader:
             got = time.time()
             waited += got - t_prev
-            batch = to_device(batch, self.device)
-            metrics = self.train_step(batch)
+            try:
+                batch = to_device(batch, self.device)
+                metrics = self.train_step(batch)
+                bad = 0
+            except Exception as error:
+                # one batch that cannot be trained on must not end a run of many hours: it is left out and said.
+                # Running out of memory is not this (the step is made smaller, in run), and neither is a fault
+                # that comes back on every batch
+                if out_of_memory(error):
+                    raise
+                bad += 1
+                self.optimizer.zero_grad(set_to_none=True)
+                log(f"step {self.step + 1:,}: this batch was left out ({type(error).__name__}: {str(error)[:200]})"
+                    + (f"; that is {bad} in a row, stopping" if bad >= MAX_BAD_STEPS else ""))
+                if bad >= MAX_BAD_STEPS:
+                    raise
+                self.step += 1
+                t_prev = time.time()
+                continue
             now = time.time()
             self.elapsed += now - t_prev
             t_prev = now

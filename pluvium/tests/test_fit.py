@@ -2,8 +2,10 @@
 """Sizing a training step to the GPU's memory: the search on made-up cards, and a real (tiny) training run on the
 CPU whose memory is reported by a stand-in meter."""
 
+import json
 import math
 import sys
+import time
 
 import numpy as np
 import pytest
@@ -269,3 +271,124 @@ def test_a_batch_given_by_hand_and_the_old_rule_are_left_alone(world, tmp_path):
     hopeless = Meter(Card(capacity=1.5, base=1.0, forecast=3.4))
     stuck, _ = make_trainer(world, tmp_path / "d", hopeless)
     assert stuck.pick_batch_size() == 2 and stuck.fit is None and math.isclose(stuck.scale, 1.0)
+
+
+def test_a_killed_or_silent_run_is_started_again_and_its_last_lines_are_kept(tmp_path):
+    """The first GPU runs stopped with an error whose last line nobody saw. Now the end of a stopped run's output is
+    kept on disk and on the Hub, and a run that is killed or goes silent is started again like one that fails."""
+    from pluvium.program import supervise
+
+    class Api:
+        def __init__(self):
+            self.files = {}
+
+        def upload_file(self, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message):
+            self.files[path_in_repo] = open(path_or_fileobj).read()
+
+    def child(body: str) -> list:
+        return [sys.executable, "-u", "-c", "import os, signal, sys, time\nfirst = os.environ['PLUVIUM_ATTEMPT'] == '1'\n" + body]
+
+    # killed outright on the first try (as when the machine runs out of RAM), fine on the second
+    api = Api()
+    killed = child("print('step 1', flush=True)\nif first:\n    os.kill(os.getpid(), signal.SIGKILL)\nprint('done')")
+    assert supervise([], 0.95, command=killed, root=tmp_path / "a", repo="org/repo", api=api) == 0
+    assert "was killed (signal 9)" in api.files["logs/attempt-1.txt"] and "step 1" in api.files["logs/attempt-1.txt"]
+    assert (tmp_path / "a" / "logs" / "attempt-1.txt").exists() and len(api.files) == 1
+    # silent for longer than allowed on the first try: stopped, and started again
+    silent = child("print('started', flush=True)\nif first:\n    time.sleep(120)\nprint('done')")
+    began = time.time()
+    assert supervise([], 0.95, command=silent, root=tmp_path / "b", stall_minutes=0.03) == 0
+    assert time.time() - began < 60
+    assert "printed nothing" in (tmp_path / "b" / "logs" / "attempt-1.txt").read_text()
+    # a fault that comes back every time: every try is kept, the error can be read, and a token never gets out
+    api = Api()
+    token = "hf_" + "a1B2" * 9
+    broken = child(f"print('RuntimeError: CUDA error: device-side assert {token}', file=sys.stderr)\nsys.exit(3)")
+    assert supervise([], 0.95, command=broken, root=tmp_path / "c", repo="org/repo", api=api) == 3
+    assert sorted(api.files) == [f"logs/attempt-{k}.txt" for k in (1, 2, 3, 4)]
+    last = api.files["logs/attempt-4.txt"]
+    assert "attempt 4 of 4 (fastest, share 0.95, batch 1)" in last and "RuntimeError: CUDA error: device-side assert" in last
+    assert token not in last and "[token]" in last
+
+
+def test_a_size_that_stops_a_run_is_taken_as_too_large_and_not_tried_again(world, tmp_path):
+    # a card on which 3 forecasts would fit by memory, but a step of 3 fails in a CUDA library (not out of memory)
+    card = Card(capacity=20.0, base=1.0, forecast=3.4, cells=1.0, saved=1.0)
+
+    class Fussy(Meter):
+        def start(self, batch=0, scale=1.0, checkpointing=False):
+            super().start(batch, scale, checkpointing)
+            if batch >= 3:
+                raise RuntimeError("CUDA error: CUBLAS_STATUS_EXECUTION_FAILED when calling `cublasSgemmStridedBatched`")
+
+    trainer, _ = make_trainer(world, tmp_path / "s", Fussy(card))
+    assert trainer.pick_batch_size() == 2 and trainer.fit["policy"] == "fill"       # sized below what failed
+    note = json.loads((tmp_path / "s" / "sizes.json").read_text())
+    assert any(size[0] >= 3 for size in note["crashed"]) and note.get("trying") is None
+    # the run started after it is told: it does not try that size again
+    again_meter = Fussy(card)
+    again, _ = make_trainer(world, tmp_path / "s", again_meter)
+    tried = []
+    real = again_meter.start
+    again_meter.start = lambda batch=0, scale=1.0, checkpointing=False: tried.append(batch) or real(batch, scale, checkpointing)
+    assert again.pick_batch_size() == 2 and all(b < 3 for b in tried)
+    # a process that died in the middle of a measurement left the size behind: it is skipped too
+    (tmp_path / "t").mkdir()
+    (tmp_path / "t" / "sizes.json").write_text(json.dumps({"trying": [2, 1.0, False]}))
+    dead, _ = make_trainer(world, tmp_path / "t", Meter(card))
+    probe = dead._measure(2, 1.0, False)
+    assert probe.peak is None and [2, 1.0, False] in json.loads((tmp_path / "t" / "sizes.json").read_text())["crashed"]
+    # the smallest step failing for another reason than memory is a real fault, and is raised
+    hopeless = Fussy(card)
+    hopeless.start = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("CUDA error: device-side assert triggered"))
+    broken, _ = make_trainer(world, tmp_path / "u", hopeless)
+    with pytest.raises(RuntimeError, match="device-side assert"):
+        broken._measure(1, 1.0, False)
+
+
+def test_the_old_batch_rule_never_tries_a_batch_that_cannot_fit(world, tmp_path, monkeypatch):
+    """On the 96 GB card one forecast took 38.6 GB. The old rule went on to try three, moved that batch to the GPU
+    outside the lines that catch running out of memory, and the run ended there."""
+    import pluvium.train as T
+
+    gb = 2**30
+    trainer, _ = make_trainer(world, tmp_path / "f", memory="fastest")
+    moved = []
+    real_to_device = T.to_device
+
+    def to_device(batch, device):
+        b = int(batch["truth"].shape[0])
+        moved.append(b)
+        if b >= 3:
+            raise torch.OutOfMemoryError("CUDA out of memory")
+        return real_to_device(batch, device)
+
+    monkeypatch.setattr(T, "to_device", to_device)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: type("P", (), {"total_memory": 96 * gb})())
+    for name in ("reset_peak_memory_stats", "synchronize", "empty_cache"):
+        monkeypatch.setattr(torch.cuda, name, lambda *a, **k: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device=None: 38.6 * gb * moved[-1])
+    assert trainer._fastest_batch() in (1, 2) and moved == [1, 2]                 # three was not even moved there
+    # a card where the estimate says three fits and moving it there runs out: handled, the run goes on
+    moved.clear()
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device=None: 10 * gb * moved[-1])
+    assert trainer._fastest_batch() in (1, 2) and moved == [1, 2, 3]
+
+
+def test_one_batch_that_cannot_be_trained_on_is_left_out_and_five_in_a_row_stop_the_run(world, tmp_path, monkeypatch):
+    trainer, _ = make_trainer(world, tmp_path / "g", batch_size=2, max_steps=4)
+    real, calls = trainer.train_step, {"n": 0}
+
+    def sometimes(batch):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise ValueError("a batch with something wrong in it")
+        return real(batch)
+
+    monkeypatch.setattr(trainer, "train_step", sometimes)
+    assert trainer.run()["step"] == 4 and calls["n"] == 4                         # the run went on past it
+    always, _ = make_trainer(world, tmp_path / "h", batch_size=2, max_steps=20)
+    monkeypatch.setattr(always, "train_step", lambda batch: (_ for _ in ()).throw(ValueError("every batch fails")))
+    with pytest.raises(ValueError, match="every batch fails"):
+        always.run()
+    assert always.step == 4                                                       # four left out, the fifth stopped it

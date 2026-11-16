@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.4 (November 2026)
+
+The GPU run is made hard to stop.
+
+- The second GPU run stopped as well, right after it measured one forecast at 38.6 GB on the 96 GB card. The old
+  batch rule then tried three forecasts, and it moved that batch to the GPU outside the lines that catch running out
+  of memory. Now a batch that cannot fit is not tried at all, and the move is inside those lines.
+- A step size that fails for another reason than memory (a CUDA library refusing a tensor that large) is taken as
+  too large. It is written down beside the checkpoint, so the run started after it does not try that size again.
+- One batch that cannot be trained on is left out and said, the run goes on. Five in a row stop it.
+- `pluvium program` now also starts the run again when it was killed (the machine ran out of RAM) or when it
+  printed nothing for two hours. A run started again draws its batches differently, so it does not meet the batch
+  that stopped it at the same step.
+- The last 400 lines of a run that stopped are kept in `logs/attempt-N.txt` in the working folder and in the Hub
+  repository, with anything that looks like a token blanked. Both earlier runs stopped with an error nobody saw the
+  last line of.
+
 ## 0.5.3 (November 2026)
 
 No change to the forecast. The pages were rewritten.

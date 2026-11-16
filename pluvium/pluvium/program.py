@@ -27,6 +27,7 @@ import hashlib
 import json
 import multiprocessing
 import os
+import re
 import shutil
 import sys
 import threading
@@ -305,6 +306,9 @@ class Program:
 
         v3 = not self.cfg.size.endswith(("-v1", "-v2"))
         kw = {"ema_decay": 0.999 if v3 else 0.0, "curriculum": v3, **kw}
+        # a run that was started again (see supervise) draws its batches differently, so that a batch which
+        # stopped the run before it is not met again at the same step
+        kw.setdefault("seed", max(0, int(os.environ.get("PLUVIUM_ATTEMPT") or 1) - 1))
         if self.cfg.vram not in ("fill", "fastest"):
             raise ValueError(f"vram must be 'fill' or 'fastest', not {self.cfg.vram!r}")
         if not 0.3 <= self.cfg.vram_share <= 0.99:
@@ -696,7 +700,8 @@ def main(argv=None) -> None:
     if args.box:
         cfg.box = tuple(float(x) for x in args.box.split(","))
     if _supervised(cfg):
-        raise SystemExit(supervise(sys.argv[1:] if argv is None else list(argv), cfg.vram_share, vram=cfg.vram))
+        raise SystemExit(supervise(sys.argv[1:] if argv is None else list(argv), cfg.vram_share, vram=cfg.vram,
+                                   root=cfg.root, repo=cfg.hub_repo, token=cfg.hf_token))
     Program(cfg).run()
 
 
@@ -783,53 +788,127 @@ def retry_plan(vram: str, share: float) -> list:
     return tries + [("fastest", share, 0), ("fastest", share, 1)]
 
 
-def supervise(argv: list, share: float, command: list | None = None, vram: str = "fill") -> int:
-    """Run the program in a child process; if it stops with an error, start it again from its last checkpoint with
-    a smaller step each time (:func:`retry_plan`). The first GPU run of 0.5.0 stopped in its training after
-    downloading for an hour, and the cell only said that it had failed. A fresh process starts with a fresh CUDA
-    context, which some GPU errors leave unusable; the data and the checkpoints are on disk, so a second try is
-    training again within minutes. Returns the last child's exit code. A child stopped by a signal (the notebook's
-    stop button) is not started again."""
+#: a run that prints nothing for this many minutes is taken to have hung; it is stopped and started again
+STALL_MINUTES = 120.0
+#: lines of a stopped run's output that are kept, on disk and on the Hub, so that its error can be read afterwards
+TAIL_LINES = 400
+_SECRET = re.compile(r"hf_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}")
+
+
+def save_attempt(root, repo, token, number: int, how: str, tail: list, api=None) -> Path | None:
+    """Write the end of a stopped run's output to ``<root>/logs/attempt-<number>.txt`` and, with a repository and a
+    token, put the file on the Hub under ``logs/``, where it can be read from any machine. Anything that looks like
+    a token is blanked first. Returns the local file; never raises."""
+    try:
+        folder = Path(root).expanduser() / "logs"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"attempt-{number}.txt"
+        path.write_text(_SECRET.sub("[token]", f"{how}\n\n" + "".join(tail)), encoding="utf-8")
+    except Exception:
+        return None
+    try:
+        if repo and (token or api is not None):
+            if api is None:
+                from huggingface_hub import HfApi
+
+                api = HfApi(token=token)
+            api.upload_file(path_or_fileobj=str(path), path_in_repo=f"logs/{path.name}", repo_id=repo, repo_type="model",
+                            commit_message=f"log of a run that stopped ({path.name})")
+    except Exception as error:
+        log(f"the stopped run's log was not put on the Hub ({type(error).__name__}: {str(error)[:120]}); it is in {path}")
+    return path
+
+
+def supervise(argv: list, share: float, command: list | None = None, vram: str = "fill", root=None, repo=None,
+              token=None, stall_minutes: float | None = None, api=None) -> int:
+    """Run the program in a child process and keep it going. If the child stops with an error, is killed (the
+    machine ran out of RAM, say), or prints nothing for ``stall_minutes``, it is started again from its last
+    checkpoint with a smaller step each time (:func:`retry_plan`). A fresh process starts with a fresh CUDA context,
+    which some GPU errors leave unusable; the data and the checkpoints are on disk, so the next try is training
+    again within minutes.
+
+    The end of each stopped run's output is kept in ``<root>/logs`` and put on the Hub (:func:`save_attempt`): the
+    first GPU runs stopped with an error nobody saw the last line of. Returns 0, or the last child's exit code.
+    Stopping this process (the notebook's stop button) stops the child and nothing is started again."""
     import signal
     import subprocess
+    from collections import deque
 
     command = command or [sys.executable, "-u", "-m", "pluvium.program"]
     tries = retry_plan(vram, share)
-    child = None
+    limit = 60.0 * float(stall_minutes if stall_minutes is not None else os.environ.get("PLUVIUM_STALL_MINUTES") or STALL_MINUTES)
+    state = {"child": None}
 
-    def stop(signum, frame):                                  # stopping this process stops the training too
+    def end_child() -> None:
+        child = state["child"]
         if child is not None and child.poll() is None:
             child.terminate()
-            child.wait()
+            try:
+                child.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+
+    def stop(signum, frame):                                  # stopping this process stops the training too
+        end_child()
         raise SystemExit(128 + signum)
 
     previous = signal.signal(signal.SIGTERM, stop)
     code = 1
     try:
         for k, (rule, cut, batch) in enumerate(tries):
-            env = dict(os.environ, PLUVIUM_ATTEMPT=str(k + 1), PLUVIUM_VRAM=rule, PLUVIUM_VRAM_SHARE=str(cut))
+            env = dict(os.environ, PLUVIUM_ATTEMPT=str(k + 1), PLUVIUM_VRAM=rule, PLUVIUM_VRAM_SHARE=str(cut),
+                       PYTHONUNBUFFERED="1")
             extra = ["--vram", rule, "--vram-share", str(cut)]
             if batch:
                 env["PLUVIUM_BATCH"] = str(batch)
                 extra += ["--batch", str(batch)]
-            child = subprocess.Popen([*command, *argv, *extra], env=env)
-            code = child.wait()
-            if code == 0 or code < 0:
-                return code
+            tail, seen = deque(maxlen=TAIL_LINES), [time.time()]
+            child = state["child"] = subprocess.Popen([*command, *argv, *extra], env=env, stdout=subprocess.PIPE,
+                                                      stderr=subprocess.STDOUT, text=True, bufsize=1, errors="replace")
+
+            def relay(stream=child.stdout, tail=tail, seen=seen) -> None:
+                for line in stream:                           # shown as it comes, and the end of it kept
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    tail.append(line)
+                    seen[0] = time.time()
+
+            reader = threading.Thread(target=relay, daemon=True)
+            reader.start()
+            hung = False
+            while child.poll() is None:
+                time.sleep(min(2.0, max(0.05, limit / 20)))
+                if time.time() - seen[0] > limit:
+                    hung = True
+                    end_child()
+            reader.join(timeout=15)
+            code = child.returncode
+            if code == 0 and not hung:
+                return 0
+            what = (f"printed nothing for {limit / 60:.0f} minutes and was stopped" if hung else
+                    f"was killed (signal {-code})" if code < 0 else f"stopped with exit code {code}")
+            settings = f"{rule}, share {cut}" + (f", batch {batch}" if batch else "")
+            saved = save_attempt(root, repo, token, k + 1, f"attempt {k + 1} of {len(tries)} ({settings}): the program {what}",
+                                 list(tail), api=api) if root else None
+            code = code if code > 0 else 1
             if k + 1 < len(tries):
                 then, then_cut, then_batch = tries[k + 1]
                 how = (f"with one forecast per step (--batch {then_batch})" if then_batch else
                        f"with each training step sized to {then_cut:.0%} of the GPU's memory" if then == "fill" else
                        "with the batch rule of 0.4.2 (--vram fastest)")
-                log(f"the program stopped (exit code {code}; the error is just above). Starting it again from its last "
-                    f"checkpoint, {how}")
+                log(f"the program {what}" + (f"; the end of its output is in {saved}" if saved else "")
+                    + f". Starting it again from its last checkpoint, {how}")
         return code
+    except KeyboardInterrupt:
+        end_child()
+        raise
     finally:
         signal.signal(signal.SIGTERM, previous)
 
 
-__all__ = ["DEFAULT_REPO", "FILES_PER_COMMIT", "Program", "ProgramConfig", "RETRY_SHARE_DROP", "choose_years", "main",
-           "mirror_files", "retry_plan", "supervise"]
+__all__ = ["DEFAULT_REPO", "FILES_PER_COMMIT", "Program", "ProgramConfig", "RETRY_SHARE_DROP", "STALL_MINUTES",
+           "choose_years", "main", "mirror_files", "retry_plan", "save_attempt", "supervise"]
 
 # ``python -m pluvium.program`` is how the notebook cells start a training run. Until 0.4.3 these two lines were
 # missing: the command imported this module and ended at once with exit code 0, having trained nothing.
