@@ -114,7 +114,7 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/prob/extremes.py` | 91 | The tail: cloudbursts and their return periods. |
 | `pluvium/prob/scores.py` | 88 | Scores that a single mean error hides. |
 | `pluvium/products.py` | 192 | From the heads' raw outputs to what a person asks: will it rain here, when will it start, how hard, will there be thunder, how long will it last, how much will fall, and why. |
-| `pluvium/program.py` | 916 | Pluvium-500 from nothing on one GPU, in stages that each finish or resume: |
+| `pluvium/program.py` | 935 | Pluvium-500 from nothing on one GPU, in stages that each finish or resume: |
 | `pluvium/quick.py` | 617 | From nothing to a forecast in one call. |
 | `pluvium/render/__init__.py` | 16 | Forecasts in the forms people and agencies use: |
 | `pluvium/render/alerts.py` | 77 | Alerts in the Common Alerting Protocol (OASIS CAP 1.2). |
@@ -132,7 +132,7 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/sources/__init__.py` | 3 | Where the data comes from: ERA5 (training predictors), CMORPH and airport reports (truth), GFS/ECMWF and GOES (live). |
 | `pluvium/sources/archive.py` | 291 | Every operational system's rain, read once per run and cut to many regions at the same time. |
 | `pluvium/sources/baselines.py` | 233 | The operational systems Pluvium is measured against, read exactly as their producers publish them. |
-| `pluvium/sources/cmorph.py` | 235 | The truth Pluvium learns rain from: NOAA's CMORPH Climate Data Record, 8 km every 30 minutes since 1998 (``noaa-cdr-precip-cmorph-pds`` on AWS Open Data, about 1.6 MB an hour for the whole band 60 S - 60 N). |
+| `pluvium/sources/cmorph.py` | 244 | The truth Pluvium learns rain from: NOAA's CMORPH Climate Data Record, 8 km every 30 minutes since 1998 (``noaa-cdr-precip-cmorph-pds`` on AWS Open Data, about 1.6 MB an hour for the whole band 60 S - 60 N). |
 | `pluvium/sources/cmorph_daily.py` | 193 | Daily rain truth for any region of the world between 60 S and 60 N: CMORPH, summed over each UTC day and averaged onto the 0.25-degree grid the operational systems publish. |
 | `pluvium/sources/cmorph_parts.py` | 152 | Rain truth for parts of the day: CMORPH summed over each six-hour period of the UTC day (00-06, 06-12, 12-18, 18-24) and averaged onto the 0.25-degree grid, the same way :mod:`pluvium.sources.cmorph_daily` makes daily totals. |
 | `pluvium/sources/era5.py` | 237 | Training predictors: ERA5 reanalysis from the public ARCO and WeatherBench 2 stores on Google Cloud. |
@@ -156,7 +156,7 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/tails/twcrps.py` | 45 | Scoring the tail on its own: the threshold-weighted CRPS. |
 | `pluvium/tails/withheld.py` | 189 | What happens when the storm is bigger than anything in training? |
 | `pluvium/timing.py` | 234 | When in the day it rains: the first three days of the forecast, split into six-hour periods. |
-| `pluvium/train.py` | 963 | Training on one GPU: batches built on every CPU core, bf16 on the GPU, a step sized by measuring to fill the GPU's memory (:mod:`pluvium.training.fit`), a learning-rate schedule that ends when the time budget does, checkpoints that resume exactly, and (optionally) a mirror of every checkpoint on the Hugging Face Hub so a rented machine that stops loses nothing. |
+| `pluvium/train.py` | 981 | Training on one GPU: batches built on every CPU core, bf16 on the GPU, a step sized by measuring to fill the GPU's memory (:mod:`pluvium.training.fit`), a learning-rate schedule that ends when the time budget does, checkpoints that resume exactly, and (optionally) a mirror of every checkpoint on the Hugging Face Hub so a rented machine that stops loses nothing. |
 | `pluvium/training/__init__.py` | 23 | How the network is taught, beyond the loss: |
 | `pluvium/training/augment.py` | 53 | Perturbations with a physical meaning, applied to training examples. |
 | `pluvium/training/curriculum.py` | 58 | Showing the network the rare events. |
@@ -172,4 +172,4 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/weather.py` | 283 | What the weather *is*, in the words people use: intensity classes, drizzle versus rain versus showers, thunder. |
 | `pluvium/zarrlite.py` | 166 | A minimal reader for consolidated Zarr v2 stores over HTTPS (the public ERA5 stores on Google Cloud). |
 
-167 modules, 25,012 lines.
+167 modules, 25,058 lines.

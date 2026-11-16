@@ -189,7 +189,15 @@ def test_training_is_sized_to_the_card_resumes_at_that_size_and_survives_running
 
     monkeypatch.setattr(again, "train_step", step_once_out_of_memory)
     assert again.run()["step"] == 3
-    assert again.scale < fit["scale"] and again.cfg.batch_size == fit["batch"] - 1   # forecasts and cells, together
+    # one failure: memory is freed and the same step is tried again, nothing is given up
+    assert again.scale == pytest.approx(fit["scale"]) and again.cfg.batch_size == fit["batch"]
+    # a second failure in a row gives up the extra cells and keeps both forecasts
+    state["left"] = 2
+    twice, _ = make_trainer(world, tmp_path / "a", Meter(card), max_steps=4)
+    real = twice.train_step
+    monkeypatch.setattr(twice, "train_step", step_once_out_of_memory)
+    assert twice.run()["step"] == 4
+    assert twice.scale == 1.0 and twice.cfg.batch_size == fit["batch"]
     # a session on a different card measures again
     other = Meter(Card(capacity=20.0, base=1.0, forecast=3.4, cells=1.0, saved=1.0))
     moved, _ = make_trainer(world, tmp_path / "a", other, max_steps=3)
@@ -226,11 +234,13 @@ def test_steps_are_sized_on_the_rainiest_issue_time_and_every_kind_of_out_of_mem
     assert not out_of_memory(ValueError("out of memory"))
     # a step that runs out in the encoder: giving up target cells alone would not help, so forecasts go too
     trainer._adopt(10, 1.5, False, trainer.fit)
-    for k in range(1, 4):
-        assert trainer._shrink(k)
-    assert trainer.cfg.batch_size < 10 and trainer.scale == pytest.approx(1.0 + 0.5 * 0.6 ** 3)
+    assert trainer._shrink(1) and (trainer.cfg.batch_size, trainer.scale) == (10, 1.5)      # freed, tried once more
+    assert trainer._shrink(2) and (trainer.cfg.batch_size, trainer.scale) == (10, 1.0)      # the extra cells go first
+    assert trainer._shrink(3) and trainer.cfg.batch_size == 8 and 1.0 < trainer.scale <= 1.25   # then forecasts,
+    trainer._adopt(2, 1.0, False, trainer.fit)                                # and the room they leave goes to cells
+    assert trainer._shrink(2) and trainer.cfg.batch_size == 1 and trainer.scale > 1.0
     trainer._adopt(1, 1.0, False, trainer.fit)
-    assert not trainer._shrink(1)                                             # nothing left to give up
+    assert trainer._shrink(1) and not trainer._shrink(2)                      # nothing left to give up
 
 
 def test_a_run_that_stops_is_started_again_with_smaller_steps_then_the_old_rule(tmp_path):

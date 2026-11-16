@@ -193,7 +193,16 @@ def stage_cmorph(root, targets: PointSet, mesh: PointSet, years=None, period=Non
         paths = {k: root / f"{k}_{year}.npy" for k in ("targets", "mesh")}
         arrays = {k: (np.load(p) if p.exists() else np.full((end - first, n), MISSING, np.uint16))
                   for (k, p), n in zip(paths.items(), (len(targets), len(mesh)))}
-        todo = [h for h in range(a, b) if (arrays["targets"][h - first] == MISSING).all()]
+        # an hour is still to do when either array lacks it. Until 0.5.5 only the targets were asked: a folder that
+        # held ``targets_2016.npy`` and no ``mesh_2016.npy`` (half a year copied from the Hub) was taken as staged,
+        # the mesh file was never made, and training stopped when it first needed it
+        lacking = ((arrays["targets"][a - first: b - first] == MISSING).all(1)
+                   | (arrays["mesh"][a - first: b - first] == MISSING).all(1))
+        todo = [a + int(k) for k in np.nonzero(lacking)[0]]
+        if not todo and not all(p.exists() for p in paths.values()):
+            for k, p in paths.items():                         # nothing to fetch for this period, but a file to make
+                if not p.exists():
+                    atomic_save(p, lambda q, arr=arrays[k]: np.save(q, arr))
         if todo:
             args = (template, window, targets.extra["row"], targets.extra["col"], op)
             if workers <= 1:

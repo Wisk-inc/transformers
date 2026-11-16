@@ -115,3 +115,48 @@ def test_staged_data_go_up_in_a_few_commits_and_only_what_the_hub_lacks(tmp_path
     assert "data/f0.npy" not in pushed and "data/f1.npy" in pushed and "data/missing.npy" not in pushed
     assert mirror_files(mirror, files, "data", api=Api(fail=True)) == 0                    # refused: said, not raised
     assert mirror_files(SimpleNamespace(can_push=False), files, "data", api=Api()) == 0    # no token: nothing to do
+
+
+def test_a_year_with_only_one_of_its_two_rain_files_is_staged_again(tmp_path, monkeypatch):
+    """The Hub once held ``targets_2016.npy`` without ``mesh_2016.npy`` (the uploads of an earlier run were refused
+    half way). The stager asked only the targets file, took 2016 as done, and a training run on a 96 GB card stopped
+    when it first needed the file that was never made."""
+    import pluvium.sources.cmorph as C
+    from pluvium.util import year_hours
+
+    class Points:
+        def __init__(self, n):
+            self.n, self.extra = n, {"row": np.zeros(n, int), "col": np.zeros(n, int)}
+
+        def __len__(self):
+            return self.n
+
+    targets, mesh, fetched = Points(3), Points(5), []
+    for name in ("cmorph_window", "mesh_operator", "default_half_widths", "_init"):
+        monkeypatch.setattr(C, name, lambda *a, **k: None)
+    monkeypatch.setattr(C, "_one_hour", lambda hour: (fetched.append(hour) or hour, np.full(3, 7, np.uint16), np.full(5, 9, np.uint16)))
+    first, _ = year_hours(2016)
+    period = (first, first + 48)
+    folder = tmp_path / "cmorph"
+    C.stage_cmorph(tmp_path, targets, mesh, period=period, workers=1, verbose=False)
+    assert len(fetched) == 48 and (folder / "targets_2016.npy").exists() and (folder / "mesh_2016.npy").exists()
+    fetched.clear()
+    C.stage_cmorph(tmp_path, targets, mesh, period=period, workers=1, verbose=False)
+    assert fetched == []                                                      # a whole year is not fetched twice
+    (folder / "mesh_2016.npy").unlink()                                       # half the year, as it came from the Hub
+    cache = C.stage_cmorph(tmp_path, targets, mesh, period=period, workers=1, verbose=False)
+    assert len(fetched) == 48 and (folder / "mesh_2016.npy").exists()
+    assert cache.mesh(np.arange(first, first + 3)).shape == (3, 5) and np.isfinite(cache.mesh(np.arange(first, first + 3))).all()
+
+
+def test_the_background_fetch_does_not_keep_a_finished_run_alive(tmp_path):
+    import multiprocessing
+    import time
+
+    prog = Program(ProgramConfig(root=str(tmp_path), hub_repo=None))
+    prog.stop_prefetch()                                                      # nothing running: nothing to do
+    prog._prefetch = multiprocessing.get_context("spawn").Process(target=time.sleep, args=(120,))
+    prog._prefetch.start()
+    began = time.time()
+    prog.stop_prefetch()
+    assert not prog._prefetch.is_alive() and time.time() - began < 30

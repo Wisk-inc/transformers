@@ -257,6 +257,11 @@ class Program:
         files += [(era5_dir / "era5.json", "data/era5/era5.json"),
                   (cm_dir / "cmorph" / "cmorph.json", "data/cmorph/cmorph.json"),
                   (st_dir / "stations" / "stations.json", "data/stations2/stations.json")]
+        gone = [str(local) for local, _ in files if not Path(local).exists()]
+        if gone:
+            raise RuntimeError(f"{len(gone)} data files are missing after staging, the first is {gone[0]}. Running the "
+                               "program again stages them; if it comes back, delete that source's folder under "
+                               f"{d} and run again")
         self.push_many(files, "data")
         from .sources.cmorph import CMORPHCache
         from .sources.era5 import ERA5Cache
@@ -299,6 +304,16 @@ class Program:
                                      args=(str(self.root), grids, self.stage_b_inits(), list(self.cfg.stage_b_period)))
         self._prefetch.start()
         log(f"stage B: fetching {len(self.stage_b_inits())} GFS runs in the background")
+
+    def stop_prefetch(self) -> None:
+        """End the background fetch if it is still going. A run that had failed used to wait for it at exit, an hour
+        and a half the first time it happened."""
+        fetch = self._prefetch
+        if fetch is not None and fetch.is_alive():
+            fetch.terminate()
+            fetch.join(timeout=30)
+            if fetch.is_alive():
+                fetch.kill()
 
     # -------------------------------------------------------------------------------------- train --
     def train_cfg(self, hours: float, **kw):
@@ -702,7 +717,11 @@ def main(argv=None) -> None:
     if _supervised(cfg):
         raise SystemExit(supervise(sys.argv[1:] if argv is None else list(argv), cfg.vram_share, vram=cfg.vram,
                                    root=cfg.root, repo=cfg.hub_repo, token=cfg.hf_token))
-    Program(cfg).run()
+    program = Program(cfg)
+    try:
+        program.run()
+    finally:
+        program.stop_prefetch()
 
 
 #: files mirrored per commit. The Hub takes at most 128 commits an hour in a repository. Until 0.5.2 the staged

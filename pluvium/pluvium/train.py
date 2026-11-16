@@ -11,6 +11,7 @@ Stage A trains on ERA5 (perfect prognosis, with forecast-error emulation); stage
 
 from __future__ import annotations
 
+import gc
 import json
 import math
 import os
@@ -97,6 +98,7 @@ class CudaMeter:
         return float(free + torch.cuda.memory_reserved(self.device))
 
     def start(self, batch: int = 0, scale: float = 1.0, checkpointing: bool = False) -> None:
+        gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(self.device)
         torch.cuda.synchronize(self.device)
@@ -116,6 +118,10 @@ class CudaMeter:
         return float(total - free), float(total)
 
     def release(self) -> None:
+        """Give back what is no longer used. A step that failed can leave tensors behind in reference cycles, and
+        the allocator cannot free those until Python has collected them. On the first full GPU run a step measured
+        at 83.9 GB ran out of memory on a 94 GB card, right after three larger sizes had been tried and failed."""
+        gc.collect()
         torch.cuda.empty_cache()
 
 
@@ -642,10 +648,10 @@ class Trainer:
             except (torch.OutOfMemoryError, RuntimeError) as error:
                 if b == 1 or not out_of_memory(error):
                     raise
-                b = max(1, b // 2)
-                if self.meter is not None:
-                    self.meter.release()
-                log(f"held out: out of memory; scoring {b} forecasts at a time")
+            b = max(1, b // 2)                                 # outside those lines, so the memory can be freed
+            if self.meter is not None:
+                self.meter.release()
+            log(f"held out: out of memory; scoring {b} forecasts at a time")
 
     def _evaluate(self, starts: np.ndarray, targets: np.ndarray, b: int) -> dict:
         sums, n = {}, 0
@@ -721,21 +727,32 @@ class Trainer:
             return ""
         return f"  VRAM {used / 2**30:.1f}/{total / 2**30:.1f} GB"
 
-    def _shrink(self, times: int) -> bool:
-        """A training step ran out of memory: make the step smaller, so that the run carries on. Fewer forecasts
-        and fewer extra target cells together: the batch shrinks every part of the step, the cells only the decoder
-        and the loss. Until 0.5.1 the extra cells went first and alone, which does not help when the encoder is what
-        ran out, and the run stopped after eight tries. False when there is nothing left to give up."""
+    def _shrink(self, times: int, said: str = "") -> bool:
+        """A training step ran out of memory: make room, so that the run carries on. In order: free what the failed
+        step left behind and try the same step once more; give up the extra target cells; give up a forecast, and
+        score the forecasts that are left at more cells with the room that makes. False when there is nothing left
+        to give up.
+
+        On a card where one forecast takes 40 GB a forecast is a large thing to give up, so it goes last: 0.5.1 to
+        0.5.4 gave up a forecast at the first failure and trained at half the card."""
         self.optimizer.zero_grad(set_to_none=True)
         if self.meter is not None:
             self.meter.release()
         batch, scale = self.cfg.batch_size, self.scale
-        if times > 16 or (batch <= 1 and scale <= 1.0):
+        if said:                                              # PyTorch's own account: asked for, in use, kept aside
+            log(f"stage {self.stage}: out of memory, as PyTorch put it: {said}")
+        if times > 16 or (times > 1 and batch <= 1 and scale <= 1.0):
             return False
-        if batch > 1:
-            batch = max(1, min(batch - 1, int(batch * 0.85)))
+        if times == 1:
+            log(f"stage {self.stage}: a step ran out of memory at batch {batch} and {scale:.2f} times the usual target "
+                "cells; memory is freed and the same step is tried once more")
+            return True
         if scale > 1.0:
-            scale = 1.0 + 0.6 * (scale - 1.0) if scale > 1.1 else 1.0
+            scale = 1.0
+        else:
+            smaller = max(1, min(batch - 1, int(batch * 0.85)))
+            most = max(1.0, self.builder.land_idx.size / max(self._usual_cells[0], 1))
+            scale, batch = min(most, batch / smaller), smaller
         log(f"stage {self.stage}: a step ran out of memory at batch {self.cfg.batch_size} and {self.scale:.2f} times "
             f"the usual target cells; carrying on at batch {batch} and {scale:.2f} times")
         self._adopt(batch, scale, bool(self.model.gradient_checkpointing), self.fit)
@@ -769,9 +786,12 @@ class Trainer:
                 except (torch.OutOfMemoryError, RuntimeError) as error:
                     if not out_of_memory(error):
                         raise
-                    ran_out += 1
-                    if not self._shrink(ran_out):
-                        raise
+                    said = " ".join(str(error).split())[:360]
+                # outside the lines above on purpose: while the error is being handled it still holds the failed
+                # step's tensors, and nothing can be freed
+                ran_out += 1
+                if not self._shrink(ran_out, said):
+                    raise torch.OutOfMemoryError(f"one forecast at the usual target cells does not fit on this GPU ({said})")
         finally:                                       # whoever uses the builder next gets its usual target cells
             self.builder.max_land, self.builder.ocean_targets = self._usual_cells
         self._eval_and_keep()
@@ -896,8 +916,12 @@ def hindcast(model: PluviumModel, builder: SampleBuilder, starts, batch_size: in
             "p_moderate": [], "y_moderate": [], "p_heavy": [], "y_heavy": [], "driving": [], "clim_wet": [],
             "thunder_p": [], "thunder_obs": [], "thunder_known": [], "station_hours": []}
     starts = np.asarray(starts)
+    told = time.time()
     for k in range(0, starts.size, batch_size):
         chunk = starts[k: k + batch_size]
+        if time.time() - told > 300:                          # a long pass says where it is every five minutes
+            told = time.time()
+            log(f"  {k:,} of {starts.size:,} forecasts done")
         exs = [builder.example(int(t), False, targets, emulate=emulate) for t in chunk]
         batch = to_device(collate(exs), device)
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.5 (November 2026)
+
+The third GPU run trained, then stopped on a missing file. Its log was on the Hub this time, so the cause is known.
+
+- Training ran on the 96 GB card for the first time: steps were sized by measuring (one forecast 41.9 GB, two
+  81.4 GB), a step that ran out of memory was made smaller, and steps were logged. Then a data loader asked for
+  `mesh_2016.npy` and it was not there.
+- An earlier run's uploads had been refused half way, so the Hub held 2016's `targets` file and not its `mesh`
+  file. The stager asked only the targets file whether a year was done. It now asks both, and the program checks
+  that every data file is there before training starts.
+- After that failure the run did not end for an hour and a half, it waited for the background fetch of stage B.
+  That fetch is stopped now when a run ends or fails.
+- The first real step ran out of memory at a size that had measured 83.9 GB on a 94 GB card, right after three
+  larger sizes had been tried and failed, and the run went on with one forecast at a time. I think the failed
+  tries had not given their memory back yet, the log does not prove it. Memory is now collected and freed before
+  anything is given up, the same step is tried once more, then the extra target cells go, and a forecast goes
+  last. What PyTorch says about a step that runs out of memory is written to the log from now on.
+- A long scoring pass at the end says where it is every five minutes.
+
 ## 0.5.4 (November 2026)
 
 The GPU run is made hard to stop.
