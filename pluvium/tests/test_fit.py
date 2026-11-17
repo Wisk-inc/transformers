@@ -248,11 +248,12 @@ def test_a_run_that_stops_is_started_again_with_smaller_steps_then_the_old_rule(
 
     log = tmp_path / "tries.txt"
 
-    def child(succeed_at: int) -> list:
+    def child(succeed_at: int, says: str = "torch.OutOfMemoryError: CUDA out of memory.") -> list:
         return [sys.executable, "-c",
                 "import os, sys; open(sys.argv[1], 'a').write(os.environ['PLUVIUM_VRAM'] + ' ' + "
                 "os.environ['PLUVIUM_VRAM_SHARE'] + ' ' + os.environ.get('PLUVIUM_BATCH', '-') + ' ' + "
-                f"' '.join(sys.argv[2:]) + '\\n'); sys.exit(0 if os.environ['PLUVIUM_ATTEMPT'] == '{succeed_at}' else 1)",
+                f"' '.join(sys.argv[2:]) + '\\n'); ok = os.environ['PLUVIUM_ATTEMPT'] == '{succeed_at}'; "
+                f"print('' if ok else {says!r}); sys.exit(0 if ok else 1)",
                 str(log)]
 
     assert supervise(["--hours", "1"], 0.95, command=child(3)) == 0
@@ -264,6 +265,12 @@ def test_a_run_that_stops_is_started_again_with_smaller_steps_then_the_old_rule(
     assert supervise(["--hours", "1"], 0.95, command=child(9), vram="fastest") == 1
     assert log.read_text().splitlines() == ["fastest 0.95 - --hours 1 --vram fastest --vram-share 0.95",
                                             "fastest 0.95 1 --hours 1 --vram fastest --vram-share 0.95 --batch 1"]
+    log.unlink()
+    # an error that has nothing to do with memory is tried again at the same size. 0.5.5 stopped on such an error
+    # (the averaged weights on the CPU) and every try after it had less of the card
+    same = child(2, "RuntimeError: Expected all tensors to be on the same device, but found at least two devices")
+    assert supervise(["--hours", "1"], 0.95, command=same) == 0
+    assert log.read_text().splitlines() == ["fill 0.95 - --hours 1 --vram fill --vram-share 0.95"] * 2
     once = [sys.executable, "-c", "import sys; sys.exit(0)"]
     assert supervise([], 0.95, command=once) == 0                              # a run that works is run once
     always = [sys.executable, "-c", "import sys; sys.exit(3)"]
@@ -402,3 +409,28 @@ def test_one_batch_that_cannot_be_trained_on_is_left_out_and_five_in_a_row_stop_
     with pytest.raises(ValueError, match="every batch fails"):
         always.run()
     assert always.step == 4                                                       # four left out, the fifth stopped it
+
+
+def test_averaged_weights_read_from_a_checkpoint_follow_the_model_to_its_device(world, tmp_path):
+    """0.5.5 read a checkpoint onto the CPU and left the averaged weights there. On the GPU the resumed run stopped
+    at its first step (8,626, after 11.6 hours) with "Expected all tensors to be on the same device". The meta
+    device stands in for the GPU: it does not raise that error, but it shows where the averages are."""
+    import torch
+
+    from pluvium.training import EMA
+
+    model = torch.nn.Linear(3, 2)
+    saved = EMA(model, 0.9).state_dict()                                       # on the CPU, as a checkpoint is read
+    model = model.to("meta")
+    ema = EMA(model, 0.9)
+    ema.load_state_dict(saved)
+    assert {v.device.type for v in ema.shadow.values()} == {"meta"} and ema.updates == 0
+    stray = EMA(torch.nn.Linear(3, 2), 0.9)                                    # made on the CPU, the model moved after
+    stray.update(model)
+    assert {v.device.type for v in stray.shadow.values()} == {"meta"} and stray.updates == 1
+    # and a trainer that resumes keeps its averages where its model is
+    trainer, _ = make_trainer(world, tmp_path / "a", ema_decay=0.99)
+    trainer.run()
+    again, _ = make_trainer(world, tmp_path / "a", ema_decay=0.99)
+    where = {p.device for p in again.model.parameters()}
+    assert again.step == 2 and again.ema.updates == 2 and {v.device for v in again.ema.shadow.values()} == where

@@ -93,7 +93,7 @@ def step(what: str, action, skip: str = "") -> bool:
 # 1. the package: from PyPI, or from the source tree when PyPI cannot be reached
 def install() -> None:
     try:
-        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.5.5"])
+        run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pluvium>=0.5.6"])
     except RuntimeError:
         run([sys.executable, "-m", "pip", "install", "-q", "git+https://github.com/Wisk-inc/transformers.git"
              "@claude/linear-context-architecture-a35c6h#subdirectory=pluvium"])

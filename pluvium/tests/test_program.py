@@ -160,3 +160,54 @@ def test_the_background_fetch_does_not_keep_a_finished_run_alive(tmp_path):
     began = time.time()
     prog.stop_prefetch()
     assert not prog._prefetch.is_alive() and time.time() - began < 30
+
+
+def test_a_molab_session_is_planned_to_be_published_before_molab_stops_it(tmp_path, monkeypatch):
+    """molab stops a notebook 12 hours after it starts. The first full run there trained for 11.6 of its 24 hours and
+    was stopped before it was scored and published. A run there now plans to be done before the session ends."""
+    import time
+
+    from pluvium import program as P
+
+    for name in ("PLUVIUM_SESSION_HOURS", "PLUVIUM_SESSION_START", "PLUVIUM_SESSION_WHY"):
+        monkeypatch.delenv(name, raising=False)
+    molab = "/tmp/uv-venv/lib/python3.13/site-packages/pluvium/program.py"            # as the tracebacks there show
+    assert P.on_molab({}, places=[molab], commands=[])
+    assert P.on_molab({}, places=["/usr/lib"], commands=["/usr/bin/python -m marimo edit notebook.py"])
+    assert P.on_molab({"MARIMO_MANAGE_SCRIPT_METADATA": "true"}, places=["/usr/lib"], commands=[])
+    assert not P.on_molab({"HOME": "/root"}, places=["/usr/lib"], commands=["bash", "python -m pluvium.program"])
+    assert P.session_limit({"PLUVIUM_SESSION_HOURS": "6"}) == (6.0, "PLUVIUM_SESSION_HOURS")
+    assert P.session_limit({"PLUVIUM_SESSION_HOURS": "0"})[0] is None                  # 0: no end, even on molab
+    began = time.time() - 40 * 60
+    assert P.session_start(12, {"PLUVIUM_SESSION_START": str(began)}) == began
+    found = P.session_start(12, {})                                     # the earliest process of this session
+    assert time.time() - 12 * 3600 < found <= time.time()
+
+    monkeypatch.setattr(P, "on_molab", lambda env=None, places=None, commands=None: True)
+    assert P.session_limit({}) == (12.0, "molab stops a notebook after 12 hours")
+    # the notebook started 40 minutes before the program: published 11.5 hours after that, not 24 hours after
+    monkeypatch.setenv("PLUVIUM_SESSION_START", str(began))
+    prog = Program(ProgramConfig(root=str(tmp_path), hub_repo=None, gpu_hours=24))
+    assert prog.session is not None and abs(prog.deadline - (began + 11.5 * 3600)) < 1
+    assert 10.7 < prog.left() < 10.9 and prog.reserve() == 1.5
+    # no end known: 24 hours from the program's start, as before
+    monkeypatch.setattr(P, "on_molab", lambda env=None, places=None, commands=None: False)
+    prog = Program(ProgramConfig(root=str(tmp_path), hub_repo=None, gpu_hours=24))
+    assert prog.session is None and 23.9 < prog.left() <= 24 and prog.reserve() == 1.0
+
+
+def test_the_supervisor_finds_the_session_once_and_every_try_gets_it(tmp_path, monkeypatch):
+    import sys
+    import time
+
+    from pluvium.program import supervise
+
+    seen = tmp_path / "env.txt"
+    child = [sys.executable, "-c", "import os, sys; open(sys.argv[1], 'a').write(os.environ['PLUVIUM_SESSION_HOURS'] "
+             "+ ' ' + os.environ['PLUVIUM_SESSION_START'] + '\\n'); sys.exit(0 if os.environ['PLUVIUM_ATTEMPT'] == '2' "
+             "else 1)", str(seen)]
+    monkeypatch.delenv("PLUVIUM_SESSION_START", raising=False)
+    monkeypatch.setenv("PLUVIUM_SESSION_HOURS", "12")
+    assert supervise([], 0.95, command=child) == 0
+    first, second = seen.read_text().splitlines()
+    assert first == second and first.split()[0] == "12" and float(first.split()[1]) <= time.time()

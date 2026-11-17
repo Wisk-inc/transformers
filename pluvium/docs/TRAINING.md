@@ -65,7 +65,7 @@ def sh(cmd, check=True):
     print(f"$ {cmd}", flush=True)
     return subprocess.run(cmd, shell=True, check=check).returncode
 
-sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.5.5'")
+sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.5.6'")
 root = os.path.expanduser(ROOT)
 pluvium = f"{sys.executable} -m pluvium.cli"
 if not os.path.exists(f"{root}/area.json"):
@@ -162,6 +162,7 @@ is unchanged up to a batch of 8 and grows with the square root of the batch abov
 | `PLUVIUM_VRAM_SHARE=0.95` | The share of the card a step may need. The rest is a margin. |
 | `PLUVIUM_VRAM=fastest` | The rule used before 0.4.3: keep the batch that is fastest per forecast. On a 90 GB card that can leave most of the memory unused. |
 | `PLUVIUM_BATCH=6` | A batch given by hand. Nothing is measured. |
+| `PLUVIUM_SESSION_HOURS=12` | How long one session of the machine may run. The run is published half an hour before the end. On molab it is 12 without being set, and 0 means no end. |
 
 A fuller card is not a faster one by itself. Forecasts per second stay about the same; each step holds more
 forecasts and more cells, so there are fewer and steadier steps in the same time. If a step ever needs more than the
@@ -179,6 +180,11 @@ the second try is training again within minutes. `PLUVIUM_RETRIES=0` turns this 
 It is started again in the same way when it was killed (the machine ran out of RAM) or printed nothing for two hours
 (`PLUVIUM_STALL_MINUTES` changes that). The last 400 lines of every run that stopped are kept in
 `logs/attempt-N.txt`, in the working folder and in the Hub repository, so the error can be read afterwards.
+
+molab stops a notebook 12 hours after it starts. The program sees when it runs there and plans the run to be scored
+and published half an hour before that, so on molab a run of `GPU_HOURS = 24` trains for about 10 hours in one
+session. A run that is stopped anyway goes on from its last checkpoint when the cell is run again. On another machine
+that stops its sessions, `PLUVIUM_SESSION_HOURS=12` says so.
 
 On an RTX PRO 6000 (96 GB), one Pluvium-500 forecast took 38.6 GB at its peak and trained at 0.24 forecasts a second,
 so a step holds two forecasts at most and the rest of the card goes to more target cells.

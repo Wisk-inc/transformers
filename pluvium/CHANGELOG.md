@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.6 (November 2026)
+
+The GPU run trained on molab for 11.6 hours, to step 8,625, and its best held-out loss was 0.734. Then two things
+stopped it.
+
+- molab shuts a notebook down 12 hours after it starts and the run was planned for 24, so it was stopped while it
+  was still training, before it was scored and published. On molab the run now ends half an hour before the 12
+  hours are up, counted from when the notebook started, with 1.5 hours kept for scoring and publishing.
+  `PLUVIUM_SESSION_HOURS` sets the limit on other machines.
+- Run again, it went on from step 8,625 and stopped at the next step with "Expected all tensors to be on the same
+  device". The checkpoint is read onto the CPU and the averaged weights stayed there while the model was on the
+  GPU. They are put on the model's device now.
+- The three restarts after that came back to the same error, each with less of the card. Only a stop that has to
+  do with memory makes the next try smaller now. Any other error is tried again at the same size.
+
 ## 0.5.5 (November 2026)
 
 The third GPU run trained, then stopped on a missing file. Its log was on the Hub this time, so the cause is known.

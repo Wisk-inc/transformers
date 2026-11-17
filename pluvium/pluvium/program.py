@@ -19,6 +19,8 @@ forecast              the live forecast for every town, if the driving models ar
 Everything expensive is mirrored to the Hugging Face Hub as soon as it exists (``HF_REPO``, ``HF_TOKEN``), so a
 second session -- or a machine that was stopped -- pulls it back in minutes and continues where the last one ended.
 The time budget (``GPU_HOURS``) is wall clock from the program's start: training gets whatever the other stages leave.
+On a machine that stops a session after a fixed time (molab: 12 hours) the budget ends before that, so the run is
+scored and published while the session is still up.
 """
 
 from __future__ import annotations
@@ -100,11 +102,106 @@ def choose_years(gpu_hours: float, holdout: int = 2021) -> tuple:
     return tuple(range(holdout - n, holdout))
 
 
+# ------------------------------------------------------------------------------------- sessions --
+#: molab, where these runs are made, stops a notebook 12 hours after it starts ("Notebooks can run for as long as 12
+#: hours before molab shuts them down", docs.marimo.io/guides/molab). The first full run there trained for 11.6 of
+#: its 24 hours and was stopped before it was scored and published.
+MOLAB_HOURS = 12.0
+#: how long before a session's end the run means to be done
+SESSION_MARGIN_HOURS = 0.5
+#: the least time kept for calibration, scoring, publishing and the forecast when the session has an end
+SESSION_RESERVE_HOURS = 1.5
+#: where molab keeps a notebook's packages (the tracebacks of the runs there show it)
+MOLAB_PACKAGES = "/tmp/uv-venv"
+
+
+def _proc_stat(pid: int) -> list:
+    """The fields of ``/proc/<pid>/stat`` after the command name, so that field 3 (the state) is the first."""
+    return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+
+
+def _ancestors(most: int = 16) -> list:
+    """This process and the ones above it, nearest first: the program, its supervisor, the notebook, ..."""
+    out, pid = [], os.getpid()
+    while pid > 0 and len(out) < most:
+        out.append(pid)
+        try:
+            pid = int(_proc_stat(pid)[1])
+        except (OSError, ValueError, IndexError):
+            break
+    return out
+
+
+def _began(pid: int) -> float | None:
+    """When a process started, in seconds since 1970, or None where there is no ``/proc``."""
+    try:
+        boot = next(float(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
+                    if line.startswith("btime"))
+        return boot + int(_proc_stat(pid)[19]) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+
+
+def _command(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+    except OSError:
+        return ""
+
+
+def on_molab(env=None, places=None, commands=None) -> bool:
+    """Whether this runs in a molab notebook: the packages are where molab keeps them, a process above this one is
+    marimo, or marimo's settings are in the environment."""
+    env = os.environ if env is None else env
+    places = [sys.prefix, __file__] if places is None else places
+    commands = [_command(pid) for pid in _ancestors()[1:]] if commands is None else commands
+    return (any(str(p).startswith(MOLAB_PACKAGES) for p in places) or any("marimo" in c for c in commands)
+            or any(k.startswith("MARIMO") or "MOLAB" in k for k in env))
+
+
+def session_limit(env=None) -> tuple:
+    """``(hours, why)``: how long one session on this machine may run, or ``(None, why)`` when nothing says it ends.
+    ``PLUVIUM_SESSION_HOURS`` says so (0 for no end); otherwise a molab notebook has 12 hours."""
+    env = os.environ if env is None else env
+    given = str(env.get("PLUVIUM_SESSION_HOURS", "")).strip()
+    if given:
+        hours, why = float(given), env.get("PLUVIUM_SESSION_WHY") or "PLUVIUM_SESSION_HOURS"
+        return (hours, why) if hours > 0 else (None, why)
+    if on_molab(env):
+        return MOLAB_HOURS, "molab stops a notebook after 12 hours"
+    return None, "nothing says this machine stops its sessions"
+
+
+def session_start(hours: float, env=None, now: float | None = None) -> float:
+    """When this session began: ``PLUVIUM_SESSION_START`` when the supervisor passes it on, otherwise the earliest
+    start among this process and the ones above it (the notebook, its server, the container) that is less than
+    ``hours`` ago. A process older than that was there before the session."""
+    env = os.environ if env is None else env
+    now = time.time() if now is None else now
+    if env.get("PLUVIUM_SESSION_START"):
+        return float(env["PLUVIUM_SESSION_START"])
+    times = [t for t in map(_began, _ancestors()) if t is not None and now - hours * 3600.0 < t <= now]
+    return min(times, default=now)
+
+
+def _clock(seconds: float) -> str:
+    return time.strftime("%H:%M", time.gmtime(seconds))
+
+
 class Program:
     def __init__(self, cfg: ProgramConfig) -> None:
         self.cfg = cfg
         self.started = time.time()
         self.deadline = self.started + cfg.gpu_hours * 3600.0
+        #: ``(began, hours, why)`` when this machine stops its sessions after a fixed time. The run is planned to be
+        #: published half an hour before then; a run stopped before that publishes nothing
+        self.session = None
+        hours, why = session_limit()
+        if hours:
+            began = session_start(hours)
+            end = began + (hours - SESSION_MARGIN_HOURS) * 3600.0
+            if end < self.deadline:
+                self.deadline, self.session = end, (began, hours, why)
         self.root = Path(cfg.root).expanduser()
         self.root.mkdir(parents=True, exist_ok=True)
         self.state_path = self.root / "program.json"
@@ -120,6 +217,12 @@ class Program:
     def left(self) -> float:
         """Hours left in the budget."""
         return (self.deadline - time.time()) / 3600.0
+
+    def reserve(self) -> float:
+        """Hours kept for calibration, scoring, publishing and the forecast. More when the session has an end: none
+        of these has run at full size on a GPU yet, and a session stopped in the middle of them publishes nothing."""
+        base = 0.9 + 0.1 * self.cfg.gpu_hours / 24
+        return max(base, SESSION_RESERVE_HOURS) if self.session else base
 
     def mark(self, stage: str, **info) -> None:
         self.state[stage] = {"done": time.strftime("%Y-%m-%d %H:%M"), **info}
@@ -364,6 +467,13 @@ class Program:
             log(f"GPU: {props.name}, {props.total_memory / 2**30:.0f} GB ({how}); {os.cpu_count()} CPU cores")
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
+        if self.session:
+            began, hours, why = self.session
+            log(f"this session began at {_clock(began)} UTC and ends {hours:g} hours later ({why}): the network is "
+                f"trained, scored and published by {_clock(self.deadline)} UTC")
+            if self.left() < self.reserve() + 1.0:
+                log(f"only {self.left():.1f} hours of this session are left, so training gets little of them; a "
+                    f"session started fresh has all {hours:g}")
         geo, towns = self.geography()
         era5, cmorph, stations = self.data(geo, self.years + (cfg.holdout_year,))
         clim = self.climatology(geo, cmorph)
@@ -385,7 +495,7 @@ class Program:
             f"{test_starts.size} for scoring")
         model = build_model(geo, grids, cfg.size, st_points, **cfg.overrides)
         loss = PluviumLoss(states=model.config.states)
-        reserve = 0.9 + 0.1 * cfg.gpu_hours / 24          # calibration, scoring, publishing, forecast
+        reserve = self.reserve()                           # calibration, scoring, publishing, forecast
         train_hours_total = max(0.25, self.left() - reserve)
         share_a = train_hours_total * (0.85 if self.stage_b else 1.0)
         trainer = Trainer(model, loss, builder, train_starts, val_starts, self.root / "stage_a",
@@ -554,7 +664,7 @@ class Program:
             return None
         cut = int(starts.size * 0.75)
         train_b, held_b = starts[:cut], starts[cut:]
-        hours_b = max(0.2, self.left() - (0.9 + 0.1 * self.cfg.gpu_hours / 24))
+        hours_b = max(0.2, self.left() - self.reserve())
         cfg_b = self.train_cfg(hours_b, warmup_steps=50)
         cfg_b.lr = self.cfg.lr / 3
         # stage B's forecasts are built differently, so its step is sized afresh, unless a batch was given by hand
@@ -809,6 +919,13 @@ def retry_plan(vram: str, share: float) -> list:
 
 #: a run that prints nothing for this many minutes is taken to have hung; it is stopped and started again
 STALL_MINUTES = 120.0
+#: words in a stopped run's last lines that say the step was too large for the GPU, so the next try is smaller
+SIZE_SIGNS = ("out of memory", "OutOfMemoryError", "CUBLAS_STATUS", "CUDNN_STATUS", "CUDA error", "cudaError")
+
+
+def about_size(tail) -> bool:
+    """Whether a stopped run's last lines say its step was too large for the GPU."""
+    return any(sign in line for line in list(tail)[-60:] for sign in SIZE_SIGNS)
 #: lines of a stopped run's output that are kept, on disk and on the Hub, so that its error can be read afterwards
 TAIL_LINES = 400
 _SECRET = re.compile(r"hf_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}")
@@ -842,7 +959,9 @@ def supervise(argv: list, share: float, command: list | None = None, vram: str =
               token=None, stall_minutes: float | None = None, api=None) -> int:
     """Run the program in a child process and keep it going. If the child stops with an error, is killed (the
     machine ran out of RAM, say), or prints nothing for ``stall_minutes``, it is started again from its last
-    checkpoint with a smaller step each time (:func:`retry_plan`). A fresh process starts with a fresh CUDA context,
+    checkpoint, with a smaller step (:func:`retry_plan`) when the stop could have come from the step's size. Any other
+    error is tried again at the same size: 0.5.5 stopped on a bug that had nothing to do with memory, and every try
+    after it had less of the card. A fresh process starts with a fresh CUDA context,
     which some GPU errors leave unusable; the data and the checkpoints are on disk, so the next try is training
     again within minutes.
 
@@ -857,6 +976,9 @@ def supervise(argv: list, share: float, command: list | None = None, vram: str =
     tries = retry_plan(vram, share)
     limit = 60.0 * float(stall_minutes if stall_minutes is not None else os.environ.get("PLUVIUM_STALL_MINUTES") or STALL_MINUTES)
     state = {"child": None}
+    hours, why = session_limit()                              # found once, so that every try plans the same end
+    session = {"PLUVIUM_SESSION_HOURS": f"{hours or 0:g}", "PLUVIUM_SESSION_WHY": why,
+               "PLUVIUM_SESSION_START": f"{session_start(hours) if hours else time.time():.0f}"}
 
     def end_child() -> None:
         child = state["child"]
@@ -873,11 +995,12 @@ def supervise(argv: list, share: float, command: list | None = None, vram: str =
         raise SystemExit(128 + signum)
 
     previous = signal.signal(signal.SIGTERM, stop)
-    code = 1
+    code, level = 1, 0
     try:
-        for k, (rule, cut, batch) in enumerate(tries):
-            env = dict(os.environ, PLUVIUM_ATTEMPT=str(k + 1), PLUVIUM_VRAM=rule, PLUVIUM_VRAM_SHARE=str(cut),
-                       PYTHONUNBUFFERED="1")
+        for k in range(len(tries)):
+            rule, cut, batch = tries[level]
+            env = dict(os.environ, **session, PLUVIUM_ATTEMPT=str(k + 1), PLUVIUM_VRAM=rule,
+                       PLUVIUM_VRAM_SHARE=str(cut), PYTHONUNBUFFERED="1")
             extra = ["--vram", rule, "--vram-share", str(cut)]
             if batch:
                 env["PLUVIUM_BATCH"] = str(batch)
@@ -910,10 +1033,13 @@ def supervise(argv: list, share: float, command: list | None = None, vram: str =
             settings = f"{rule}, share {cut}" + (f", batch {batch}" if batch else "")
             saved = save_attempt(root, repo, token, k + 1, f"attempt {k + 1} of {len(tries)} ({settings}): the program {what}",
                                  list(tail), api=api) if root else None
+            smaller = hung or code < 0 or about_size(tail)
             code = code if code > 0 else 1
             if k + 1 < len(tries):
-                then, then_cut, then_batch = tries[k + 1]
-                how = (f"with one forecast per step (--batch {then_batch})" if then_batch else
+                level = min(level + 1, len(tries) - 1) if smaller else level
+                then, then_cut, then_batch = tries[level]
+                how = ("with the same settings, since the error was not about memory" if not smaller else
+                       f"with one forecast per step (--batch {then_batch})" if then_batch else
                        f"with each training step sized to {then_cut:.0%} of the GPU's memory" if then == "fill" else
                        "with the batch rule of 0.4.2 (--vram fastest)")
                 log(f"the program {what}" + (f"; the end of its output is in {saved}" if saved else "")
@@ -926,8 +1052,9 @@ def supervise(argv: list, share: float, command: list | None = None, vram: str =
         signal.signal(signal.SIGTERM, previous)
 
 
-__all__ = ["DEFAULT_REPO", "FILES_PER_COMMIT", "Program", "ProgramConfig", "RETRY_SHARE_DROP", "STALL_MINUTES",
-           "choose_years", "main", "mirror_files", "retry_plan", "save_attempt", "supervise"]
+__all__ = ["DEFAULT_REPO", "FILES_PER_COMMIT", "MOLAB_HOURS", "Program", "ProgramConfig", "RETRY_SHARE_DROP",
+           "SESSION_MARGIN_HOURS", "SESSION_RESERVE_HOURS", "STALL_MINUTES", "about_size", "choose_years", "main",
+           "mirror_files", "on_molab", "retry_plan", "save_attempt", "session_limit", "session_start", "supervise"]
 
 # ``python -m pluvium.program`` is how the notebook cells start a training run. Until 0.4.3 these two lines were
 # missing: the command imported this module and ended at once with exit code 0, having trained nothing.

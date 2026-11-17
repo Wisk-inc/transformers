@@ -27,6 +27,8 @@ class EMA:
         d = min(self.decay, (1 + self.updates) / (10 + self.updates))       # warm-up: short memory at the start
         for k, v in model.state_dict().items():
             if k in self.shadow:
+                if self.shadow[k].device != v.device:                       # the averages follow the weights
+                    self.shadow[k] = self.shadow[k].to(v.device)
                 self.shadow[k].mul_(d).add_(v.detach().float(), alpha=1 - d)
 
     @contextlib.contextmanager
@@ -43,8 +45,12 @@ class EMA:
         return {"decay": self.decay, "updates": self.updates, "shadow": self.shadow}
 
     def load_state_dict(self, state: dict) -> None:
+        """The averages are put where the model's weights are. A checkpoint is read onto the CPU, and until 0.5.6
+        they stayed there: a run resumed on a GPU stopped at its first step with "Expected all tensors to be on the
+        same device", after 11.6 hours of training had been saved."""
         self.decay, self.updates = state["decay"], state["updates"]
-        self.shadow = {k: v.float() for k, v in state["shadow"].items()}
+        self.shadow = {k: v.float().to(self.shadow[k].device if k in self.shadow else v.device)
+                       for k, v in state["shadow"].items()}
 
 
 __all__ = ["EMA"]
