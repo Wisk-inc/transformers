@@ -65,7 +65,7 @@ def sh(cmd, check=True):
     print(f"$ {cmd}", flush=True)
     return subprocess.run(cmd, shell=True, check=check).returncode
 
-sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.5.6'")
+sh(f"{sys.executable} -m pip install -q --upgrade 'pluvium>=0.5.7'")
 root = os.path.expanduser(ROOT)
 pluvium = f"{sys.executable} -m pluvium.cli"
 if not os.path.exists(f"{root}/area.json"):

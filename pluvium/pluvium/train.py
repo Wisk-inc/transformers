@@ -891,14 +891,17 @@ class Trainer:
 @torch.no_grad()
 def hindcast(model: PluviumModel, builder: SampleBuilder, starts, batch_size: int = 2, device=None,
              emulate: bool = False, calibrator: Calibrator | None = None, samples: int = 100,
-             max_points: int | None = None, stations: bool = False) -> tuple[Scoreboard, dict]:
+             max_points: int | None = None, stations: bool = False, until: float | None = None,
+             least: int = 16) -> tuple[Scoreboard, dict]:
     """
     Run the model on held-out issue times and score it (:class:`pluvium.verify.Scoreboard`). Also returns the pooled
     raw chances and outcomes that :meth:`pluvium.calibrate.Calibrator.fit` needs, and (``stations=True``) the
     airports' thunder chances and reports.
 
     ``emulate=True`` gives the driving fields forecast-like errors (a fairer stand-in for live skill than the
-    reanalysis itself, which knows where the rain went).
+    reanalysis itself, which knows where the rain went). ``max_points`` scores each forecast at that many cells,
+    spread evenly. With ``until`` (seconds since 1970) no new forecast is started after that time once ``least`` are
+    done, so a pass ends when its time is spent.
     """
     from .products import _window_any, component
 
@@ -919,6 +922,9 @@ def hindcast(model: PluviumModel, builder: SampleBuilder, starts, batch_size: in
     told = time.time()
     for k in range(0, starts.size, batch_size):
         chunk = starts[k: k + batch_size]
+        if until is not None and k >= least and time.time() > until:
+            log(f"  stopped after {k:,} of {starts.size:,} forecasts, to keep to the time")
+            break
         if time.time() - told > 300:                          # a long pass says where it is every five minutes
             told = time.time()
             log(f"  {k:,} of {starts.size:,} forecasts done")

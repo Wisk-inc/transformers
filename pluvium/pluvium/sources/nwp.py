@@ -20,7 +20,7 @@ import numpy as np
 
 from ..features import HOURLY_SHORT, LEVELS, UPPER_SHORT
 from ..schedule import DEFAULT, Schedule
-from ..util import fetch, hour_to_datetime64, log, parallel_map
+from ..util import atomic_save, fetch, hour_to_datetime64, log, parallel_map
 
 GFS = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.{day}/{hour:02d}/atmos/gfs.t{hour:02d}z.pgrb2.0p25.f{lead:03d}"
 ECMWF = "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/{day}/{hour:02d}z/{model}/0p25/oper/{day}{hour:02d}0000-{lead}h-oper-fc.grib2"
@@ -252,10 +252,14 @@ class NWPReader:
         stamp = str(hour_to_datetime64(init))[:13].replace(':', '')
         path = self.cache / f"{self.model}_{stamp}{f'+{offset}' if offset else ''}.npz"
         if path.exists():
-            z = np.load(path, allow_pickle=False)
-            return {"fields": {k[2:]: z[k] for k in z.files if k.startswith("f_")},
-                    "upper": {k[2:]: z[k] for k in z.files if k.startswith("u_")},
-                    "notes": json.loads(str(z["notes"]))}
+            try:
+                z = np.load(path, allow_pickle=False)
+                return {"fields": {k[2:]: z[k] for k in z.files if k.startswith("f_")},
+                        "upper": {k[2:]: z[k] for k in z.files if k.startswith("u_")},
+                        "notes": json.loads(str(z["notes"]))}
+            except Exception as error:                  # torn by a process stopped while writing it: fetched again
+                log(f"{self.model}: the cached {path.name} could not be read ({type(error).__name__}); fetching it again")
+                path.unlink(missing_ok=True)
         sch = self.schedule
         step, horizon = STEPS[family(self.model)]
         need = offset + sch.three_hourly_until
@@ -363,8 +367,12 @@ class NWPReader:
                "upper": {k: np.stack(v).astype(np.float32) for k, v in uppers.items()}, "notes": notes}
         if out["fields"]["tcc"].max() > 1.5:
             out["fields"]["tcc"] = out["fields"]["tcc"] / 100.0
-        np.savez_compressed(path, notes=json.dumps(notes), **{f"f_{k}": v for k, v in out["fields"].items()},
-                            **{f"u_{k}": v for k, v in out["upper"].items()})
+        def write(target) -> None:                      # through a file, so that NumPy adds no ".npz" to the name
+            with open(target, "wb") as f:
+                np.savez_compressed(f, notes=json.dumps(notes), **{f"f_{k}": v for k, v in out["fields"].items()},
+                                    **{f"u_{k}": v for k, v in out["upper"].items()})
+
+        atomic_save(path, write)                        # until 0.5.7 written in place, and torn when stopped
         return out
 
 

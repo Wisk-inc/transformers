@@ -237,7 +237,7 @@ def stage_cmorph(root, targets: PointSet, mesh: PointSet, years=None, period=Non
             log(f"  CMORPH {year}: {b - a:,} hours staged ({missing:,} missing in the archive)")
         meta["years"] = sorted(set(meta.get("years", [])) | {year})
     meta.update({"n_targets": len(targets), "n_mesh": len(mesh)})
-    meta_path.write_text(json.dumps(meta))
+    atomic_save(meta_path, lambda p: Path(p).write_text(json.dumps(meta)))
     return CMORPHCache(root.parent)
 
 

@@ -40,7 +40,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from .util import hour_of, hour_to_iso, log, year_hours
+from .util import atomic_save, hour_of, hour_to_iso, log, year_hours
 
 DEFAULT_REPO = "CorxLabs/Pluvium-500"
 
@@ -113,6 +113,12 @@ SESSION_MARGIN_HOURS = 0.5
 SESSION_RESERVE_HOURS = 1.5
 #: where molab keeps a notebook's packages (the tracebacks of the runs there show it)
 MOLAB_PACKAGES = "/tmp/uv-venv"
+#: cells each held-out forecast is scored at in calibration and the scores. Scoring one forecast took 12.2 s at 7,220
+#: cells on a CPU and grows in step with them: the network's 7,500 would have needed about 2.2 hours for the four
+#: passes, more than a molab session has left for them
+SCORE_POINTS = 2000
+#: hours kept after the scores for the release itself: its extras, the card and the upload
+PUBLISH_HOURS = 0.3
 
 
 def _proc_stat(pid: int) -> list:
@@ -184,6 +190,16 @@ def session_start(hours: float, env=None, now: float | None = None) -> float:
     return min(times, default=now)
 
 
+def _read_state(path: Path) -> dict:
+    """What the runs before this one in the folder finished. A file torn by a stop counts as nothing finished: every
+    stage checks its own files, so the run goes on from them."""
+    try:
+        return json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError):
+        log(f"{path.name} could not be read, so it is written again as the stages finish")
+        return {}
+
+
 def _clock(seconds: float) -> str:
     return time.strftime("%H:%M", time.gmtime(seconds))
 
@@ -205,7 +221,7 @@ class Program:
         self.root = Path(cfg.root).expanduser()
         self.root.mkdir(parents=True, exist_ok=True)
         self.state_path = self.root / "program.json"
-        self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
+        self.state = _read_state(self.state_path)
         self.years = tuple(cfg.train_years or choose_years(cfg.gpu_hours, cfg.holdout_year))
         self.stage_b = cfg.stage_b if cfg.stage_b is not None else cfg.gpu_hours >= 12
         from naturev1.mirror import HubMirror
@@ -226,7 +242,7 @@ class Program:
 
     def mark(self, stage: str, **info) -> None:
         self.state[stage] = {"done": time.strftime("%Y-%m-%d %H:%M"), **info}
-        self.state_path.write_text(json.dumps(self.state, indent=1))
+        atomic_save(self.state_path, lambda p: Path(p).write_text(json.dumps(self.state, indent=1)))
 
     def check_years(self) -> None:
         """Make sure the years asked for are in the hourly ERA5 archive, whose first and last year are read from the
@@ -526,24 +542,35 @@ class Program:
                 got = None
             if got is not None:
                 model, loss, live_builder, live_starts = got
-        # calibration and scores
+        # calibration and scores. Each pass may use a share of the time left before the release has to start and
+        # stops early when that is spent, so that the run is published within its time whatever the scoring costs
+        publish_by = self.deadline - PUBLISH_HOURS * 3600.0
+
+        def until(share: float) -> float:
+            return time.time() + share * max(0.0, publish_by - time.time())
+
         log("calibration: hindcasts on the held-out year (with forecast-like errors) ...")
-        cal_board, cal_data = hindcast(model, builder, cal_starts, batch_size=2, emulate=True)
+        cal_board, cal_data = hindcast(model, builder, cal_starts, batch_size=2, emulate=True, max_points=SCORE_POINTS,
+                                       until=until(0.4))
         calibrator = fit_calibration(cal_data)
         scores = {}
         log("scores: held-out year, driving fields = reanalysis (an upper bound on live skill)")
-        board, _ = hindcast(model, builder, test_starts, batch_size=2, emulate=False, calibrator=calibrator)
+        board, _ = hindcast(model, builder, test_starts, batch_size=2, emulate=False, calibrator=calibrator,
+                            max_points=SCORE_POINTS, until=until(0.4))
         scores["reanalysis_driven"] = board.report()
         log(format_report(scores["reanalysis_driven"]))
         log("scores: held-out year, reanalysis with emulated forecast errors (closer to live)")
-        board, _ = hindcast(model, builder, test_starts, batch_size=2, emulate=True, calibrator=calibrator)
+        board, _ = hindcast(model, builder, test_starts, batch_size=2, emulate=True, calibrator=calibrator,
+                            max_points=SCORE_POINTS, until=until(0.6))
         scores["emulated_errors"] = board.report()
         log(format_report(scores["emulated_errors"]))
         if live_builder is not None and live_starts is not None and live_starts.size:
             half = live_starts.size // 2
-            _, live_cal = hindcast(model, live_builder, live_starts[:half], batch_size=2)
+            _, live_cal = hindcast(model, live_builder, live_starts[:half], batch_size=2, max_points=SCORE_POINTS,
+                                   until=until(0.5))
             calibrator = fit_calibration(live_cal)
-            board, _ = hindcast(model, live_builder, live_starts[half:], batch_size=2, calibrator=calibrator)
+            board, _ = hindcast(model, live_builder, live_starts[half:], batch_size=2, calibrator=calibrator,
+                                max_points=SCORE_POINTS, until=until(1.0))
             scores["gfs_driven"] = board.report()
             log("scores: held-out GFS runs (the live situation)")
             log(format_report(scores["gfs_driven"]))
@@ -567,7 +594,9 @@ class Program:
                                      for k, v in scores.items()})
         if self.mirror is not None and self.mirror.can_push:
             self.publish(out)
-        if cfg.forecast:
+        if cfg.forecast and self.left() <= 0:
+            log("the live forecast is left out: the run's time is up")
+        elif cfg.forecast:
             try:
                 from .forecast import Forecaster
 
@@ -740,7 +769,10 @@ def _stage_stations_job(root: str, years: list, box: list | None = None) -> None
 
 
 def _prefetch_job(root: str, grids: dict, inits: list, period: list) -> None:
-    """Stage B's data: CMORPH and airports for the period, then each GFS run (cached as it arrives)."""
+    """Stage B's data: CMORPH and airports for the period, then each GFS run (cached as it arrives). It stops when the
+    program that started it is gone: a program killed outright left it running, and the one started after it began
+    a second download of the same files."""
+    parent = os.getppid()
     try:
         from .domain import Geography
         from .sources.cmorph import stage_cmorph
@@ -765,6 +797,9 @@ def _prefetch_job(root: str, grids: dict, inits: list, period: list) -> None:
         reader = NWPReader("gfs", lat1, lon1, lat2, lon2, r / "stage_b_data" / "nwp", workers=16)
         done = 0
         for init in inits:
+            if os.getppid() != parent:
+                log("stage B: the program that started this download is gone; stopping it")
+                return
             try:
                 reader.frames(int(init), offset=6)
                 done += 1

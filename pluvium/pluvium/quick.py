@@ -435,15 +435,16 @@ def usual_at(root, lat, lon, day0: int, days: int) -> np.ndarray | None:
     return np.stack([given[m - 1][:, i, j] for m in months])
 
 
-def periods_of(model, root, result: dict, lat, lon, days: int | None = None) -> dict | None:
+def periods_of(model, root, result: dict, lat, lon, days: int | None = None, issued: int | None = None) -> dict | None:
     """When in the day it rains, for the first days of a forecast (:mod:`pluvium.timing`). Returns None when the
     blend has no record of when it usually rains (``timing.npz``, :func:`add_timing`) or no system's six-hour
     fields can be read, otherwise
 
     * ``labels``  what each period is called in the area's clock, e.g. ``Sun 1 pm to 7 pm``;
-    * ``starts``  the UTC hour each period begins, as text;
+    * ``starts``  the UTC hour each period begins, as text, and ``hours`` the same as hours since 1970;
     * ``chance``  ``(days, 4, places)`` the chance of at least 1 mm in the period;
-    * ``systems`` the systems whose six-hour fields went in, ``zone`` the clock, ``days`` how many days are split.
+    * ``systems`` the systems whose six-hour fields went in, ``zone`` the clock, ``days`` how many days are split;
+    * ``issued``  the hour the forecast is made (now unless given): a period that ended before it is over.
     """
     from . import timing as T
     from .sources.archive import ArchiveReader
@@ -463,9 +464,20 @@ def periods_of(model, root, result: dict, lat, lon, days: int | None = None) -> 
     given = T.mixed(T.conditional(shares, usual), usual)
     daily = np.stack([np.asarray(result["days"][d]["p_ge_1"], np.float64) for d in range(days)])
     zone = zone_of(root)
+    hours = [day0 + T.HOURS * k for k in range(T.PERIODS * days)]
+    if issued is None:
+        issued = int(datetime.now(timezone.utc).timestamp() // 3600)
     return {"labels": T.labels(day0, zone, days), "chance": T.chances(daily, given),
-            "starts": [str(hour_to_datetime64(day0 + T.HOURS * k))[:13] for k in range(T.PERIODS * days)],
+            "starts": [str(hour_to_datetime64(h))[:13] for h in hours], "hours": hours, "issued": int(issued),
             "systems": sorted(members), "zone": zone, "days": days}
+
+
+def _over(periods: dict, k: int) -> bool:
+    """Whether period ``k`` ended before the forecast was made. A day of the forecast is a UTC day, so in Jamaica its
+    first period is the evening before (7 pm to 1 am), already over when the forecast is read in the morning."""
+    from . import timing as T
+
+    return "hours" in periods and periods["hours"][k] + T.HOURS <= periods.get("issued", -1)
 
 
 def write_periods(periods: dict, names, path, areas=None) -> Path:
@@ -488,10 +500,12 @@ def write_periods(periods: dict, names, path, areas=None) -> Path:
 
 def _when(periods: dict | None, d: int, index, least: float = 0.2) -> str:
     """``most likely Sun 1 pm to 7 pm (48%)`` for day ``d`` at the places ``index`` (their median), or nothing when
-    the day has no periods or rain is unlikely in all of them."""
+    the day has no periods or rain is unlikely in all of them. A period that is already over is never named: until
+    0.5.7 a Jamaica forecast read on Tuesday morning could say Tuesday's rain was most likely "Mon 7 pm to 1 am"."""
     if periods is None or d >= periods["days"]:
         return ""
     chance = np.median(periods["chance"][d][:, index].reshape(4, -1), axis=1)
+    chance = np.where([_over(periods, 4 * d + j) for j in range(4)], -1.0, chance)
     j = int(np.argmax(chance))
     if chance[j] < least:
         return ""
@@ -570,7 +584,9 @@ def brief(result: dict, names: list, population: np.ndarray, top: int = 5, days:
                          + (f"   [{flags}]" if flags else ""))
             if when and periods is not None and number < periods["days"]:
                 for j in range(4):
-                    lines.append(f"      {periods['labels'][4 * number + j]:<22} rain {100 * periods['chance'][number, j, k]:3.0f}%")
+                    label = periods["labels"][4 * number + j]
+                    lines.append(f"      {label:<22} over" if _over(periods, 4 * number + j) else
+                                 f"      {label:<22} rain {100 * periods['chance'][number, j, k]:3.0f}%")
     return "\n".join(lines)
 
 
@@ -603,7 +619,7 @@ def forecast(country, root=None, repo: str | None = DEFAULT_REPO, time=None, lea
     periods, periods_table = None, None
     if when:
         try:                                                    # the daily forecast stands without it
-            periods = periods_of(model, root, result, lat, lon)
+            periods = periods_of(model, root, result, lat, lon, issued=now)
         except Exception as error:
             say(f"the time of day was not worked out ({type(error).__name__}: {str(error)[:160]})")
         if periods is not None:

@@ -114,8 +114,8 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/prob/extremes.py` | 91 | The tail: cloudbursts and their return periods. |
 | `pluvium/prob/scores.py` | 88 | Scores that a single mean error hides. |
 | `pluvium/products.py` | 192 | From the heads' raw outputs to what a person asks: will it rain here, when will it start, how hard, will there be thunder, how long will it last, how much will fall, and why. |
-| `pluvium/program.py` | 1062 | Pluvium-500 from nothing on one GPU, in stages that each finish or resume: |
-| `pluvium/quick.py` | 617 | From nothing to a forecast in one call. |
+| `pluvium/program.py` | 1081 | Pluvium-500 from nothing on one GPU, in stages that each finish or resume: |
+| `pluvium/quick.py` | 633 | From nothing to a forecast in one call. |
 | `pluvium/render/__init__.py` | 16 | Forecasts in the forms people and agencies use: |
 | `pluvium/render/alerts.py` | 77 | Alerts in the Common Alerting Protocol (OASIS CAP 1.2). |
 | `pluvium/render/bulletin.py` | 105 | A national rain bulletin. |
@@ -138,7 +138,7 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/sources/era5.py` | 237 | Training predictors: ERA5 reanalysis from the public ARCO and WeatherBench 2 stores on Google Cloud. |
 | `pluvium/sources/glm.py` | 81 | Lightning now: flashes seen by GOES-East's Geostationary Lightning Mapper in the last minutes (``noaa-goes19``, ``GLM-L2-LCFA``, one file per 20 seconds), counted around every town. |
 | `pluvium/sources/goes.py` | 162 | Rain already falling, live, from GOES (the forecast's "history" frames). |
-| `pluvium/sources/metar.py` | 80 | Live airport reports: the last hours of METARs from every Caribbean airport, from the Aviation Weather Center's open API (``aviationweather.gov``), turned into the same per-hour codes the model was trained on (:mod:`pluvium.weather`). |
+| `pluvium/sources/metar.py` | 90 | Live airport reports: the last hours of METARs from every Caribbean airport, from the Aviation Weather Center's open API (``aviationweather.gov``), turned into the same per-hour codes the model was trained on (:mod:`pluvium.weather`). |
 | `pluvium/sources/mrms.py` | 84 | Radar where the Caribbean has it: NOAA's Multi-Radar Multi-Sensor system, Caribbean domain (``noaa-mrms-pds``, ``CARIB/``), covering Puerto Rico, the Virgin Islands and the waters around them. |
 | `pluvium/sources/mrms_daily.py` | 106 | A second truth for the United States: MRMS radar and gauge rain. |
 | `pluvium/sources/nwp.py` | 382 | Live driving fields: GFS (NOAA, hourly to 5 days), ECMWF IFS and AIFS (ECMWF open data, CC-BY-4.0), read by byte range from their public buckets and averaged onto the exact grids the model was trained on (ERA5's 1 degree hourly and 1.5 degree upper-air), so live input looks like training input. |
@@ -156,7 +156,7 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/tails/twcrps.py` | 45 | Scoring the tail on its own: the threshold-weighted CRPS. |
 | `pluvium/tails/withheld.py` | 189 | What happens when the storm is bigger than anything in training? |
 | `pluvium/timing.py` | 234 | When in the day it rains: the first three days of the forecast, split into six-hour periods. |
-| `pluvium/train.py` | 987 | Training on one GPU: batches built on every CPU core, bf16 on the GPU, a step sized by measuring to fill the GPU's memory (:mod:`pluvium.training.fit`), a learning-rate schedule that ends when the time budget does, checkpoints that resume exactly, and (optionally) a mirror of every checkpoint on the Hugging Face Hub so a rented machine that stops loses nothing. |
+| `pluvium/train.py` | 993 | Training on one GPU: batches built on every CPU core, bf16 on the GPU, a step sized by measuring to fill the GPU's memory (:mod:`pluvium.training.fit`), a learning-rate schedule that ends when the time budget does, checkpoints that resume exactly, and (optionally) a mirror of every checkpoint on the Hugging Face Hub so a rented machine that stops loses nothing. |
 | `pluvium/training/__init__.py` | 23 | How the network is taught, beyond the loss: |
 | `pluvium/training/augment.py` | 53 | Perturbations with a physical meaning, applied to training examples. |
 | `pluvium/training/curriculum.py` | 58 | Showing the network the rare events. |
@@ -172,4 +172,4 @@ Every module of the package, what it is for, and its size. Generated from the mo
 | `pluvium/weather.py` | 283 | What the weather *is*, in the words people use: intensity classes, drizzle versus rain versus showers, thunder. |
 | `pluvium/zarrlite.py` | 166 | A minimal reader for consolidated Zarr v2 stores over HTTPS (the public ERA5 stores on Google Cloud). |
 
-167 modules, 25,197 lines.
+167 modules, 25,248 lines.

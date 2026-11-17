@@ -173,7 +173,7 @@ def stage_stations(root, years, box=TARGET_BOX, workers: int = 16, verbose: bool
         stations = json.loads(meta_path.read_text())["stations"]
     else:
         stations = station_list(fetch(HISTORY).decode("utf-8", "replace"), box, min(years), max(years))
-        meta_path.write_text(json.dumps({"stations": stations, "format": FORMAT}))
+        atomic_save(meta_path, lambda p: Path(p).write_text(json.dumps({"stations": stations, "format": FORMAT})))
     for year in sorted(years):
         path = root / f"{year}.npy"
         if path.exists():

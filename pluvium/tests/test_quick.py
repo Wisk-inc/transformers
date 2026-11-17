@@ -283,6 +283,32 @@ def test_first_days_say_when_in_the_day_and_each_period_can_be_listed(tmp_path):
     assert quick.zone_of(tmp_path) == "UTC" and quick.usual_at(tmp_path, [18.0], [-77.0], 0, 3) is None
 
 
+def test_a_period_that_is_over_is_never_the_most_likely_one():
+    """A day of the forecast is a UTC day, so in Jamaica its first period is the evening before. A forecast read on
+    Tuesday morning said Tuesday's rain was most likely "Mon 7 pm to 1 am", which was over by then."""
+    names, population = ["Montego Bay"], np.array([110_000])
+    day = {"date": "2026-11-17", "p_ge_1": np.array([0.48]), "p_ge_25": np.array([0.01]), "mean_mm": np.array([2.8])}
+    result = {"days": [day, dict(day, date="2026-11-18")]}
+    chance = np.zeros((2, 4, 1))
+    chance[0, :, 0] = [0.27, 0.10, 0.12, 0.21]                          # the evening before is the wettest period
+    chance[1, :, 0] = [0.05, 0.05, 0.10, 0.28]
+    day0 = hour_of("2026-11-17T00")
+    labels = ["Mon 7 pm to 1 am", "Tue 1 am to 7 am", "Tue 7 am to 1 pm", "Tue 1 pm to 7 pm",
+              "Tue 7 pm to 1 am", "Wed 1 am to 7 am", "Wed 7 am to 1 pm", "Wed 1 pm to 7 pm"]
+    periods = {"labels": labels, "starts": [""] * 8, "hours": [day0 + 6 * k for k in range(8)], "chance": chance,
+               "systems": ["ens"], "zone": "America/Jamaica", "days": 2, "issued": day0 + 14}   # 9 am in Jamaica
+    lines = quick.brief(result, names, population, top=1, days=2, periods=periods).splitlines()
+    assert lines[1].endswith("most likely Tue 1 pm to 7 pm (21%)") and "Mon 7 pm" not in lines[1]
+    assert lines[2].endswith("most likely Wed 1 pm to 7 pm (28%)")
+    listed = quick.brief(result, names, population, top=1, days=1, periods=periods, when=True).splitlines()
+    assert listed[2] == "      Mon 7 pm to 1 am       over" and listed[3] == "      Tue 1 am to 7 am       over"
+    assert listed[5] == "      Tue 1 pm to 7 pm       rain  21%"
+    late = dict(periods, issued=day0 + 24)                               # the whole first day is over
+    assert "most likely" not in quick.brief(result, names, population, top=1, days=1, periods=late)
+    assert quick.brief(result, names, population, top=1, days=1, periods=dict(periods, issued=day0 - 6)).splitlines()[1] \
+        .endswith("most likely Mon 7 pm to 1 am (27%)")                   # made the evening before: nothing is over
+
+
 def test_usual_timing_is_read_at_places_by_month_and_fetched_for_a_blend_that_lacks_it(tmp_path):
     from pluvium.util import hour_of
 

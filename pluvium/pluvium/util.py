@@ -161,10 +161,11 @@ def parallel_map(function, items, workers: int = 16, progress: str | None = None
 
 
 def atomic_save(path: str | Path, writer) -> Path:
-    """Write through a temporary sibling and rename, so an interrupted save never leaves a torn file."""
+    """Write through a temporary sibling and rename, so an interrupted save never leaves a torn file. The sibling is
+    named after the process, so two processes saving the same file do not write into one sibling."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     writer(tmp)
     if not tmp.exists() and Path(str(tmp) + ".npy").exists():  # np.save appends .npy to a name without it
         tmp = Path(str(tmp) + ".npy")

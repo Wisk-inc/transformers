@@ -10,6 +10,7 @@ they are the truth :mod:`pluvium.online` checks past forecasts against.
 from __future__ import annotations
 
 import json
+import math
 
 import numpy as np
 
@@ -20,10 +21,19 @@ from ..weather import UNKNOWN, code_from_metar, merge
 API = "https://aviationweather.gov/api/data/metar?bbox={s},{w},{n},{e}&format=json&hours={hours}"
 
 
+def bbox(box) -> dict:
+    """The box as the API takes it: two decimals, rounded outwards so that no airport on its edge is left out. With
+    the full decimals of a country's own extent the API answers HTTP 400, and until 0.5.7 every live forecast for an
+    area set by its countries ran without airport reports."""
+    s, n, w, e = (float(v) for v in box)
+    down = lambda v: math.floor(v * 100) / 100                             # noqa: E731
+    up = lambda v: math.ceil(v * 100) / 100                                # noqa: E731
+    return {"s": f"{down(s):.2f}", "w": f"{down(w):.2f}", "n": f"{up(n):.2f}", "e": f"{up(e):.2f}"}
+
+
 def fetch_metars(box=TARGET_BOX, hours: int = 4) -> list[dict]:
     """Reports in ``box`` from the last ``hours``: ``[{"icao", "lat", "lon", "time" (unix s), "raw"}]``."""
-    s, n, w, e = box
-    blob = fetch(API.format(s=s, w=w, n=n, e=e, hours=int(hours)), timeout=60.0, attempts=3)
+    blob = fetch(API.format(**bbox(box), hours=int(hours)), timeout=60.0, attempts=3)
     rows = json.loads(blob.decode("utf-8", "replace") or "[]")
     out = []
     for r in rows:

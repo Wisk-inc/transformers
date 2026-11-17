@@ -434,3 +434,17 @@ def test_averaged_weights_read_from_a_checkpoint_follow_the_model_to_its_device(
     again, _ = make_trainer(world, tmp_path / "a", ema_decay=0.99)
     where = {p.device for p in again.model.parameters()}
     assert again.step == 2 and again.ema.updates == 2 and {v.device for v in again.ema.shadow.values()} == where
+
+
+def test_a_scoring_pass_stops_when_its_time_is_spent(world, tmp_path):
+    """Scoring one forecast took 12 s at 7,220 cells on a CPU, and the four passes at the end of a run would have
+    needed more time than a molab session had left. A pass now stops at its time, after a least number."""
+    import time
+
+    from pluvium.train import hindcast
+
+    trainer, builder = make_trainer(world, tmp_path / "a")
+    starts = builder.valid_starts(world[1].hours()[::24])[:6]
+    _, all_of = hindcast(trainer.model, builder, starts, batch_size=1, max_points=5)
+    _, cut = hindcast(trainer.model, builder, starts, batch_size=1, max_points=5, until=time.time() - 1, least=2)
+    assert all_of["p"].shape[0] == 5 * starts.size and cut["p"].shape[0] == 5 * 2

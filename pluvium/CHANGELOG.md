@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.7 (November 2026)
+
+A wide check for faults before the GPU run goes on. The stages after training were run on a CPU with the GPU's
+bfloat16, the daily commands on today's data, and the whole program with a stop and a resume in the middle.
+
+- Scoring one held-out forecast took 12.2 s at 7,220 cells on a CPU, and the time grows in step with the cells. At
+  the network's 7,500 cells, calibration and the three scoring passes would have needed about 2.2 hours, more than
+  the 2 hours a molab session keeps for them, so the session would have been stopped before the model was
+  published. Each forecast is scored at 2,000 cells spread evenly now, and each pass stops when its share of the
+  time is spent. When the time is up, the live forecast at the end is left out.
+- Airport reports were never read for an area set by its countries. The Aviation Weather Center answers HTTP 400 to
+  a box with all the decimals of the countries' extent, so the box is sent with two decimals, rounded outwards.
+- A day of the 14-day forecast is a UTC day, so in Jamaica its first six hours are the evening before. A forecast
+  read on Tuesday morning said Tuesday's rain was most likely "Mon 7 pm to 1 am". A period that is over is never
+  named as the most likely one now, and `--when` marks it over.
+- Stage B's GFS runs were cached with a plain write, so a run stopped in the middle of one left a torn file that
+  failed every later read of that run. They are written through a temporary file now and a torn one is fetched
+  again. The background download stops when the program that started it is gone: a killed program left it
+  running beside the next one's, both writing the same files. `program.json` and the data's record files are
+  written the same way, and a torn `program.json` counts as nothing finished.
+
 ## 0.5.6 (November 2026)
 
 The GPU run trained on molab for 11.6 hours, to step 8,625, and its best held-out loss was 0.734. Then two things

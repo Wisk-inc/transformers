@@ -211,3 +211,36 @@ def test_the_supervisor_finds_the_session_once_and_every_try_gets_it(tmp_path, m
     assert supervise([], 0.95, command=child) == 0
     first, second = seen.read_text().splitlines()
     assert first == second and first.split()[0] == "12" and float(first.split()[1]) <= time.time()
+
+
+def test_a_torn_cached_gfs_run_is_fetched_again_and_a_new_one_is_written_whole(tmp_path):
+    """Stage B's GFS runs were cached with a plain write. A process stopped in the middle of one (molab's 12 hours, a
+    restart, the end of a run) left a torn file, and every later read of that run failed."""
+    from pluvium.sources.nwp import NWPReader
+    from pluvium.util import atomic_save
+
+    reader = NWPReader("gfs", [17.0, 18.0], [-78.0, -77.0], [17.0, 18.0], [-78.0, -77.0], cache=tmp_path, workers=1)
+    torn = tmp_path / "gfs_2025-01-01T00+6.npz"
+    torn.write_bytes(b"PK\x03\x04 cut off here")
+
+    class Fetching(Exception):
+        pass
+
+    def fetch(*args, **kwargs):
+        raise Fetching
+
+    reader._surface_at = fetch
+    with pytest.raises(Fetching):                                          # it went past the cache to fetch the run
+        reader.frames(hour_of("2025-01-01T00"), offset=6)
+    assert not torn.exists()
+    atomic_save(tmp_path / "x.npz", lambda q: np.save(q, np.ones(3)))       # a sibling per process, gone after
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.npz"]
+
+
+def test_a_torn_record_of_finished_stages_does_not_stop_the_next_run(tmp_path):
+    (tmp_path / "program.json").write_text('{"geography": {"done": "2026-11-17 1')        # stopped while writing it
+    prog = Program(ProgramConfig(root=str(tmp_path), hub_repo=None))
+    assert prog.state == {}
+    prog.mark("geography", mesh=3)
+    assert Program(ProgramConfig(root=str(tmp_path), hub_repo=None)).state["geography"]["mesh"] == 3
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["program.json"]                  # no sibling left behind

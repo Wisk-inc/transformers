@@ -230,7 +230,7 @@ def stage_era5(root, years=None, box=DOMAIN, workers: int = 32, include_upper: b
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {"years": []}
     meta.update({"lat1": lat1.tolist(), "lon1": lon1.tolist(), "lat2": lat2.tolist(), "lon2": lon2.tolist(),
                  "years": sorted(set(meta.get("years", [])) | set(staged))})
-    meta_path.write_text(json.dumps(meta))
+    atomic_save(meta_path, lambda p: Path(p).write_text(json.dumps(meta)))
     return ERA5Cache(root)
 
 

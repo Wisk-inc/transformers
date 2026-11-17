@@ -41,3 +41,15 @@ def test_isd_parsing_assigns_report_to_previous_hour():
     d = decode(out)
     assert d["wet"][h13] and d["intensity"][h13] == 1
     assert d["known"][h13 + 1] and not d["wet"][h13 + 1]
+
+
+def test_the_airport_box_is_sent_with_two_decimals_and_rounded_outwards():
+    """The Aviation Weather Center answers HTTP 400 to a box with all the decimals of a country's own extent; every
+    live forecast for an area set by its countries ran without airport reports until 0.5.7."""
+    from pluvium.sources.metar import API, bbox
+
+    box = (16.4012383430461, 19.825031116881735, -79.66832347975166, -74.88458317352918)       # south, north, west, east
+    got = bbox(box)
+    assert got == {"s": "16.40", "w": "-79.67", "n": "19.83", "e": "-74.88"}
+    assert float(got["s"]) <= box[0] and float(got["n"]) >= box[1] and float(got["w"]) <= box[2] and float(got["e"]) >= box[3]
+    assert API.format(**bbox((10, 25, -90, -60)), hours=3).endswith("bbox=10.00,-90.00,25.00,-60.00&format=json&hours=3")
