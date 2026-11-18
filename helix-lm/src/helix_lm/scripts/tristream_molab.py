@@ -57,6 +57,10 @@ from pathlib import Path
 
 DEFAULT_REPO = "CorxLabs/Tristream-V2-SVS"
 LAST_PUSH = 0.0
+#: the notebook session this run is in (:mod:`helix_lm.molab`); main() finds it. No end until then
+SESSION = None
+#: the same failure this many times in a row stops the run instead of trying again (2.3 tried 1,000 times)
+SAME_FAILURE_LIMIT = 3
 
 AUDIO_SUFFIXES = (".wav", ".flac", ".mp3", ".ogg", ".m4a")
 
@@ -73,6 +77,30 @@ def token() -> str | None:
     if not tok and Path("/root/hf_token").exists():
         tok = Path("/root/hf_token").read_text().strip()
     return tok or None
+
+
+def session():
+    from helix_lm.molab import Session
+
+    global SESSION
+    if SESSION is None:
+        SESSION = Session(None)
+    return SESSION
+
+
+def keep_going(budget, root: Path) -> bool:
+    """A training loop goes on while its hours last, no stop file is there and the session is not about to end."""
+    return not budget.over() and not (root / "stop").exists() and not session().wrap_up()
+
+
+def stop_if_session_ends(args, what: str) -> None:
+    """After a stage saved its checkpoint: when the session is about to end, push everything and stop the run.
+    The next session pulls it back and goes on."""
+    from helix_lm.molab import SessionEnding
+
+    if session().wrap_up():
+        hub_push(args, force=True, reason="session end")
+        raise SessionEnding(f"{what}: saved and pushed before the session ends")
 
 
 def done(root: Path, stage: str) -> bool:
@@ -213,7 +241,9 @@ def save_checkpoint(obj: dict, path: Path) -> None:
         "hours": float(obj.get("hours", 0.0)),
         "saved": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    path.with_suffix(".json").write_text(json.dumps(side))
+    side_tmp = path.with_suffix(f".json.{os.getpid()}.tmp")
+    side_tmp.write_text(json.dumps(side))
+    os.replace(side_tmp, path.with_suffix(".json"))
 
 
 def checkpoint_meta(path: Path) -> dict:
@@ -1155,6 +1185,7 @@ def stage_data(args) -> None:
                 continue
             fetched = 0
             for f in kept:
+                stop_if_session_ends(args, f"data ({name})")
                 if archive_extracted(raw / name, f["name"]):
                     log(f"  {f['name']}: already unpacked on disk, not downloaded again")
                     fetched += 1
@@ -1269,7 +1300,11 @@ def stage_prepare(args) -> None:
         if (out / "manifest.json").exists() and not args.force:
             manifests[folder] = json.loads((out / "manifest.json").read_text())
             continue
-        log(f"preparing {folder}: {len(find_audio([path]))} files")
+        from helix_lm.music.prepare_cache import progress
+
+        files = find_audio([path])
+        ready, _ = progress(out, files)
+        log(f"preparing {folder}: {len(files)} files" + (f", {ready} done by an earlier run" if ready else ""))
         manifests[folder] = prepare_uploads(
             [path],
             out,
@@ -1284,6 +1319,7 @@ def stage_prepare(args) -> None:
             workers=loader_workers(args.prepare_workers),
             singer_of=singer_of,
             domain=domain,
+            should_stop=session().wrap_up,
         )
         log(f"  {folder}: {manifests[folder]['accepted']} clips accepted, {manifests[folder]['hours']:.1f} h")
     hours = sum(m.get("hours", 0) for m in manifests.values())
@@ -1387,7 +1423,7 @@ def stage_codec(args) -> None:
                           seed=step, device=device, mode=args.loader_mode)  # fmt: skip
     log(f"codec: {prefetch.workers} {prefetch.kind} build the batches")
     last_save = time.time()
-    while not budget.over() and not (root / "stop").exists():
+    while keep_going(budget, root):
         wave = prefetch.get().to(device, non_blocking=True)
         disc_on = clips_seen > 5000 * 96
         try:
@@ -1467,6 +1503,7 @@ def stage_codec(args) -> None:
         ckpt,
     )
     log(f"codec saved at step {step}")
+    stop_if_session_ends(args, "codec")
     mark(root, "codec")
 
 
@@ -1586,7 +1623,7 @@ def stage_refiner(args) -> None:
     prefetch = Prefetcher(make_batch, lambda: sizer.size, chunk=8, workers=loader_workers(args.loader_workers),
                           seed=step, device=device, mode=args.loader_mode)  # fmt: skip
     log(f"refiner: {prefetch.workers} {prefetch.kind} build the batches and their pitch tracks")
-    while not budget.over() and not (root / "stop").exists():
+    while keep_going(budget, root):
         wave, f0_fine = prefetch.get()
         wave = wave.to(device, non_blocking=True)
         f0_fine = f0_fine.to(device, non_blocking=True)
@@ -1628,6 +1665,7 @@ def stage_refiner(args) -> None:
     prefetch.close()
     save()
     log(f"refiner saved at step {step}")
+    stop_if_session_ends(args, "refiner")
     mark(root, "refiner")
 
 
@@ -1667,7 +1705,7 @@ def stage_air(args) -> None:
     need = int(2.0 * 48000)
     ratio = 48000 // args.sample_rate
     batch_size = max(2, (args.batch if args.batch > 0 else 16) // 2)
-    while not budget.over() and not (root / "stop").exists():
+    while keep_going(budget, root):
         waves = []
         for _ in range(batch_size):
             wave = read_wave(files[int(torch.randint(0, len(files), (), generator=g))], 48000)
@@ -1692,6 +1730,7 @@ def stage_air(args) -> None:
             hub_push(args, reason=f"air step {step}")
     save_checkpoint({"air": air.state_dict(), "step": step, "config": config.__dict__, "hours": budget.elapsed}, ckpt)
     log(f"air band saved at step {step}")
+    stop_if_session_ends(args, "air")
     mark(root, "air")
 
 
@@ -1803,7 +1842,7 @@ def stage_train(args) -> None:
                           seed=step, device=device, mode=args.loader_mode)  # fmt: skip
     log(f"train: {prefetch.workers} {prefetch.kind} build the batches")
     last_share = -1.0
-    while not budget.over() and not (root / "stop").exists():
+    while keep_going(budget, root):
         share = speech_share_at(
             budget.elapsed / max(budget.hours, 1e-6), args.speech_share_start, args.speech_share_end
         )
@@ -1879,6 +1918,7 @@ def stage_train(args) -> None:
         ckpt,
     )
     log(f"saved at step {step}")
+    stop_if_session_ends(args, "train")
     mark(root, "train")
 
 
@@ -2117,13 +2157,22 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"unknown stage {args.stage}")
     if not take_lock(root):
         return 3
+    from helix_lm.molab import Session, SessionEnding
+
+    global SESSION
+    SESSION = Session.find()
+    log(SESSION.describe())
     gpu_max()
     hub_pull(args)
     if args.stage != "all":
         log(f"== stage {args.stage}")
-        globals()[f"stage_{args.stage}"](args)
+        try:
+            globals()[f"stage_{args.stage}"](args)
+        except SessionEnding as ending:
+            log(f"{ending}. Run the cell again in a new session to go on from here")
+            return 0
         return 0
-    attempt = 0
+    attempt, last_failure, repeats = 0, "", 0
     while True:
         try:
             for stage in STAGES[:-1]:
@@ -2138,17 +2187,28 @@ def main(argv: list[str] | None = None) -> int:
                     return 0
             log("all stages done")
             return 0
+        except SessionEnding as ending:
+            log(f"{ending}. Everything is on the Hub; run the cell again in a new session to go on from here")
+            return 0
         except KeyboardInterrupt:
             log("interrupted: saving the state to the Hub")
             hub_push(args, force=True, reason="interrupted")
             return 130
         except Exception as error:
             attempt += 1
-            log(f"!! stage failed ({type(error).__name__}: {str(error)[:120]}); attempt {attempt} of {args.retries}")
+            failure = f"{type(error).__name__}: {str(error)[:200]}"
+            repeats = repeats + 1 if failure == last_failure else 1
+            last_failure = failure
+            log(f"!! stage failed ({failure[:160]}); attempt {attempt} of {args.retries}")
             traceback.print_exc()
             hub_push(args, force=True, reason=f"after failure {attempt}")
-            if attempt >= args.retries:
+            if attempt >= args.retries or repeats >= SAME_FAILURE_LIMIT:
+                if repeats >= SAME_FAILURE_LIMIT:
+                    log(f"!! the same failure came back {repeats} times in a row; stopping instead of trying again")
                 raise
+            if session().wrap_up():
+                log("the session is about to end; everything is on the Hub, run the cell again to go on")
+                return 0
             time.sleep(args.retry_wait)
             hub_pull(args)
 

@@ -14,6 +14,7 @@ evaluation sets, never training sets, for the same reason. The research behind e
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -173,7 +174,23 @@ class ClipRecord:
     reason: str = ""
 
 
-def prepare_clip(
+def prepare_clip(path: Path, out_dir: Path, *args, **kwargs) -> ClipRecord:
+    """:func:`measure_clip`, reusing the clip's finished record when it and the clip's outputs are on disk
+    (:mod:`helix_lm.music.prepare_cache`), and leaving a record when it is done."""
+    import contextlib
+
+    from .prepare_cache import load_record, save_record
+
+    cached = load_record(Path(out_dir), Path(path))
+    if cached is not None:
+        return ClipRecord(**cached)
+    record = measure_clip(Path(path), Path(out_dir), *args, **kwargs)
+    with contextlib.suppress(OSError):                 # a full disk must not lose the clip already measured
+        save_record(Path(out_dir), asdict(record))
+    return record
+
+
+def measure_clip(
     path: Path,
     out_dir: Path,
     sample_rate: int,
@@ -278,18 +295,28 @@ def prepare_uploads(
     singer_of=None,
     language: str = "en",
     domain: str = "singing",
+    should_stop=None,
 ) -> dict:
     """
     Many files or folders -> ``manifest.json`` with one record per clip and the data gaps. ``singer_of(path)``
     names the singer per file (one corpus, many voices); ``workers`` threads overlap file reading and writing
-    with the measurements; ``device`` puts the measurements on a GPU.
+    with the measurements; ``device`` puts the measurements on a GPU. Clips finished by an earlier run are read
+    back, not measured again. ``should_stop()`` True stops before the next clip and raises
+    :class:`helix_lm.molab.SessionEnding`, with no manifest written: the next run goes on from the clips done.
     """
     from concurrent.futures import ThreadPoolExecutor
 
+    from .prepare_cache import duplicate_stems
+
     out_dir = Path(out_dir)
     files = find_audio(paths)
+    twins = duplicate_stems(files)
 
-    def one(f: Path) -> ClipRecord:
+    def one(f: Path) -> ClipRecord | None:
+        if f in twins:                                 # its outputs would overwrite the first file's
+            return ClipRecord(str(f), 0.0, {}, {}, "", False, f"same file name as {twins[f]}")
+        if should_stop is not None and should_stop():
+            return None
         return prepare_clip(
             f, out_dir, sample_rate, singer_of(f) if singer_of else singer, accent, emotion, language,
             is_mixture=mixtures, separate=separate, log=log, device=device, analysis=analysis, domain=domain,
@@ -300,6 +327,11 @@ def prepare_uploads(
             records = list(pool.map(one, files))
     else:
         records = [one(f) for f in files]
+    if any(r is None for r in records):
+        from ..molab import SessionEnding
+
+        done = sum(r is not None for r in records)
+        raise SessionEnding(f"{out_dir.name}: stopped at {done} of {len(records)} clips; the rest are done next time")
     from .regularize import report_gaps
 
     tags = [ClipTags(**r.tags) for r in records if r.tags]
@@ -311,7 +343,9 @@ def prepare_uploads(
         "hours": sum(r.seconds for r in records) / 3600,
         "gaps": report_gaps(tags) if tags else ["no clips"],
     }
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=1, default=str))
+    tmp = out_dir / f"manifest.json.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps(manifest, indent=1, default=str))
+    os.replace(tmp, out_dir / "manifest.json")
     log(
         f"[data] {manifest['accepted']}/{len(records)} clips accepted, {manifest['hours']:.2f} h; "
         f"gaps: {manifest['gaps']}"
