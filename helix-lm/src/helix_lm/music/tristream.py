@@ -39,7 +39,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from ..anansi import AnansiConfig, AnansiModel
-from ..audio.singing import PITCH_BINS, TECHNIQUES, hz_to_bins
+from ..audio.singing import PITCH_BINS, TECHNIQUES
 from .regularize import ACCENTS, EMOTIONS, AccentAdversary
 
 REGISTERS = ("chest", "mixed", "head", "falsetto", "whistle", "fry")
@@ -91,6 +91,7 @@ class TriStreamConfig:
     cfg_dropout: float = 0.1  # classifier-free guidance: drop the speaker and the sliders this often in training
     formant_invariance_weight: float = 0.05  # the envelope must not move when the pitch is shifted (0 = off)
     sustain_sigma_gain: float = 3.0  # the alignment prior widens up to (1 + gain)x on sustained notes (melismas)
+    pitch_blur_bins: float = 1.2  # pitch target: a Gaussian this wide over the 21-cent bins (0 = the old one-hot)
     formant_smoothness_weight: float = 0.02  # the envelope may not jump between frames of a held pitch
     transition_lookahead_blocks: int = 2  # extra look-ahead, gated by upcoming downbeats and section changes
     name: str = "tristream"
@@ -530,11 +531,11 @@ class TriStreamForSinging(nn.Module):
 
         # predictors (pitch per frame from the fused state, durations per phoneme from the lyric states)
         if batch.get("f0_hz") is not None:
+            from .objectives.pitch_loss import pitch_distribution_loss
+
             pitch = self.pitch_head(hidden)
-            bins = hz_to_bins(batch["f0_hz"])
-            per_frame = F.cross_entropy(
-                pitch[..., : PITCH_BINS + 1].reshape(-1, PITCH_BINS + 1), bins.reshape(-1), reduction="none"
-            ).reshape(b, t)
+            blur = getattr(self.config, "pitch_blur_bins", 0.0)
+            per_frame = pitch_distribution_loss(pitch, batch["f0_hz"], blur).reshape(b, t)
             losses["pitch"] = (per_frame * sample_weight[:, None]).sum() / (sample_weight.sum() * t).clamp(min=1e-6)
         if batch.get("durations") is not None:
             pred = self.duration_head(lyric_states)[..., 0]
@@ -649,7 +650,6 @@ class TriStreamForSinging(nn.Module):
     @torch.no_grad()
     def predict_pitch(self, batch: dict, num_loops: int | None = None) -> torch.Tensor:
         """F0 in Hz per frame from the controls alone (notes, lyrics, style): the melody when no curve is given."""
-        from ..audio.singing import bins_to_hz
 
         lyric_states, lyric_pad = self.encode_lyrics(batch["phonemes"])
         source = self.encode_source(batch["source"])
@@ -661,8 +661,10 @@ class TriStreamForSinging(nn.Module):
         )
         noise = self.encode_noise(batch["noise"])
         hidden = self.fuse_streams(source, filt, noise, lyric_states, lyric_pad, num_loops, batch.get("events"))
-        bins = self.pitch_head(hidden)[..., : PITCH_BINS + 1].argmax(-1)
-        return bins_to_hz(bins)
+        from .objectives.pitch_loss import decode_pitch
+
+        # the peak's neighbours averaged in log frequency: sub-bin pitch, where the argmax rounded to 21 cents
+        return decode_pitch(self.pitch_head(hidden))
 
     @torch.no_grad()
     def sketch_bands(self, batch: dict, num_loops: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
