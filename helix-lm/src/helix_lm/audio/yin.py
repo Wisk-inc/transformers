@@ -17,7 +17,6 @@ import torch
 F0_MIN, F0_MAX = 50.0, 1100.0
 THRESHOLD = 0.12           # the first dip of the normalised difference under this is the period
 VOICED = 0.35              # a frame whose best dip stays above this is unvoiced
-SUBHARMONIC_MARGIN = 0.05  # how much deeper a multiple of the lag must dip to be taken as the period
 
 
 def _difference(frames: torch.Tensor, window: int, max_lag: int) -> torch.Tensor:
@@ -65,16 +64,6 @@ def yin_f0(wave: torch.Tensor, sample_rate: int, frame_rate: float, f_min: float
     first = torch.where(dip.any(-1), dip.float().argmax(-1), search.argmin(-1))
     best = first + min_lag
     value = cmnd.gather(-1, best[..., None])[..., 0]
-    # a strong harmonic (a formant on it) can make a fraction of the period dip first: when a multiple of the lag
-    # found dips clearly deeper, that multiple is the period
-    for k in (3, 2):
-        multiple = best * k
-        ok = multiple + 1 <= max_lag
-        near = torch.stack([cmnd.gather(-1, (multiple + o).clamp(1, max_lag)[..., None])[..., 0] for o in (-1, 0, 1)])
-        deeper, where = near.min(0)
-        take = ok & (deeper < value - SUBHARMONIC_MARGIN)
-        best = torch.where(take, (multiple + where - 1).clamp(1, max_lag), best)
-        value = torch.where(take, deeper, value)
     # parabolic interpolation of the dip for a sub-sample period
     lo = cmnd.gather(-1, (best - 1).clamp(min=1)[..., None])[..., 0]
     hi = cmnd.gather(-1, (best + 1).clamp(max=max_lag)[..., None])[..., 0]
@@ -89,4 +78,4 @@ def yin_f0(wave: torch.Tensor, sample_rate: int, frame_rate: float, f_min: float
     return (f0, (1 - value).clamp(0, 1)) if return_confidence else f0
 
 
-__all__ = ["F0_MAX", "F0_MIN", "SUBHARMONIC_MARGIN", "THRESHOLD", "VOICED", "yin_f0"]
+__all__ = ["F0_MAX", "F0_MIN", "THRESHOLD", "VOICED", "yin_f0"]
