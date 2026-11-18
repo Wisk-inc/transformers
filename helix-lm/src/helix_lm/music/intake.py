@@ -290,9 +290,10 @@ def reference_embedding(
     assessment = assess_input(reference, sample_rate)
     cleaned, applied = clean_input(reference, sample_rate, assessment) if clean else (reference, [])
     windows, selection = reference_windows(cleaned, sample_rate)
-    embeddings = torch.cat([speaker_encoder(codec.listen(cleaned[a:z][None])) for a, z in windows])
+    device = next(codec.parameters()).device  # the audio may be on the CPU and the codec on a GPU
+    embeddings = torch.cat([speaker_encoder(codec.listen(cleaned[a:z][None].to(device))) for a, z in windows])
     robust = trimmed_mean_embedding(embeddings)
-    naive = F.normalize(speaker_encoder(codec.listen(reference[None])), dim=-1)
+    naive = F.normalize(speaker_encoder(codec.listen(reference[None].to(device))), dim=-1)
     contamination = float(1 - (naive * robust).sum(-1))
     report = {
         **assessment,

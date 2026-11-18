@@ -625,7 +625,10 @@ class TriStreamForSinging(nn.Module):
             hidden_u = self.fuse_streams(source, filt_u, noise, lyric_states, lyric_pad, num_loops, events, bias)
             sketch_u, _, _ = self.sketch(hidden_u, batch["source"], batch.get("tract_ratio"))
         times = sway_schedule(steps, sway, device)
-        x = torch.randn(b, t, c.frame_dim, device=device, generator=generator)
+        # the noise is drawn where the generator lives and then moved: a seeded CPU generator (the fail-safe loop's)
+        # gives the same noise on any card, where drawing it on the GPU with a CPU generator is an error
+        noise_device = generator.device if generator is not None else device
+        x = torch.randn(b, t, c.frame_dim, device=noise_device, generator=generator).to(device)
         previous, settled, used = None, 0, steps
         for i in range(steps):
             tt = times[i].expand(b)

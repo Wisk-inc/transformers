@@ -13,8 +13,10 @@ measured on.
 
 ## Splits
 
-VocalSet's test singers are f2, f8, m3, m5 and m10 (`vocalset.TEST_SINGERS`). The molab program trains on the
-others, so the benchmark never hears a singer the model learned. Conversion pairs never pair a singer with
+VocalSet's test singers are f2, f8, m3, m5 and m10 (`vocalset.TEST_SINGERS`). From 2.4.1 the molab program
+holds them out of every training stage (codec, refiner and singing model) and evaluates on them, so the benchmark
+never hears a singer the model learned. (2.4.0 split singers by a hash of their names and would have trained on
+most of the five.) The suites take their items from all singers in turn, not the first ones in file order. Conversion pairs never pair a singer with
 themself. The research sets are only read when their folders are given (`--data opencpop=/path`).
 
 ## The synthetic set

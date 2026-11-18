@@ -174,6 +174,68 @@ class ClipRecord:
     reason: str = ""
 
 
+#: the pitch tracker a manifest's ``<stem>.f0.pt`` files were made with; manifests from before 2.4 have none
+PITCH_TRACKER = "yin"
+
+
+def _write_json(path: Path, data) -> None:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, indent=1, default=str))
+    os.replace(tmp, path)
+
+
+def refresh_pitch(out_dir: Path, manifest: dict, sample_rate: int, device=None, should_stop=None, log=print) -> dict:
+    """
+    The pitch files of a source prepared before 2.4, made again with YIN from each accepted clip's vocal (on disk
+    as ``<stem>.vocal.wav``): the old autocorrelation tracker put 29% of a low voice's frames an octave off, and
+    training learns its pitch head from these files. The separation and the other measurements stay; each clip's
+    pitch range is measured again too (it picks the high-register clips). ``should_stop()`` True saves the
+    progress (``pitch_refresh.json``) and raises :class:`helix_lm.molab.SessionEnding`; the next run goes on.
+    """
+    out_dir = Path(out_dir)
+    progress_file = out_dir / "pitch_refresh.json"
+    measured_ranges: dict = json.loads(progress_file.read_text()) if progress_file.exists() else {}  # stem: range
+    clips = [c for c in manifest.get("clips", []) if c.get("accepted")]
+    todo = [c for c in clips if Path(c["path"]).stem not in measured_ranges]
+    log(f"[data] {out_dir.name}: pitch files from an older tracker; {len(todo)} of {len(clips)} to redo with YIN")
+    for k, clip in enumerate(todo):
+        if should_stop is not None and should_stop():
+            _write_json(progress_file, measured_ranges)
+            from ..molab import SessionEnding
+
+            raise SessionEnding(f"{out_dir.name}: pitch redone for {len(measured_ranges)} of {len(clips)} clips; "
+                                "the rest next time")
+        stem = Path(clip["path"]).stem
+        vocal = out_dir / f"{stem}.vocal.wav"
+        if vocal.exists():
+            wave = read_wave(vocal, sample_rate)
+            measured = wave.to(device) if device is not None else wave
+            with torch.no_grad():
+                f0 = estimate_f0(measured[None], sample_rate, frame_rate=25)[0].cpu()
+                low, high = f0_range(measured, sample_rate)
+            tmp = out_dir / f"{stem}.f0.pt.{os.getpid()}.tmp"
+            torch.save(f0, tmp)
+            os.replace(tmp, out_dir / f"{stem}.f0.pt")
+            measured_ranges[stem] = [low, high]
+        else:
+            measured_ranges[stem] = None                     # nothing to measure: the clip stays as it was
+        if k % 500 == 499:
+            _write_json(progress_file, measured_ranges)
+    # every clip's new range, including those measured by an earlier, interrupted run
+    for clip in manifest.get("clips", []):
+        found = measured_ranges.get(Path(clip["path"]).stem) if clip.get("accepted") else None
+        if found is not None:
+            low, high = found
+            clip.setdefault("tags", {}).update(f0_low=low, f0_high=high)
+            if high <= 0:
+                clip.update(accepted=False, reason="no voiced frames found (pitch measured again with YIN)")
+    manifest["pitch_tracker"] = PITCH_TRACKER
+    manifest["accepted"] = sum(bool(c.get("accepted")) for c in manifest.get("clips", []))
+    _write_json(out_dir / "manifest.json", manifest)
+    progress_file.unlink(missing_ok=True)
+    return manifest
+
+
 def prepare_clip(path: Path, out_dir: Path, *args, **kwargs) -> ClipRecord:
     """:func:`measure_clip`, reusing the clip's finished record when it and the clip's outputs are on disk
     (:mod:`helix_lm.music.prepare_cache`), and leaving a record when it is done."""
@@ -185,6 +247,8 @@ def prepare_clip(path: Path, out_dir: Path, *args, **kwargs) -> ClipRecord:
     if cached is not None:
         return ClipRecord(**cached)
     record = measure_clip(Path(path), Path(out_dir), *args, **kwargs)
+    if record.reason.startswith("unreadable"):       # may read next time (a file still being written): no record
+        return record
     with contextlib.suppress(OSError):                 # a full disk must not lose the clip already measured
         save_record(Path(out_dir), asdict(record))
     return record
@@ -342,10 +406,9 @@ def prepare_uploads(
         "accepted": sum(r.accepted for r in records),
         "hours": sum(r.seconds for r in records) / 3600,
         "gaps": report_gaps(tags) if tags else ["no clips"],
+        "pitch_tracker": PITCH_TRACKER,
     }
-    tmp = out_dir / f"manifest.json.{os.getpid()}.tmp"
-    tmp.write_text(json.dumps(manifest, indent=1, default=str))
-    os.replace(tmp, out_dir / "manifest.json")
+    _write_json(out_dir / "manifest.json", manifest)
     log(
         f"[data] {manifest['accepted']}/{len(records)} clips accepted, {manifest['hours']:.2f} h; "
         f"gaps: {manifest['gaps']}"

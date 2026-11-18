@@ -41,7 +41,8 @@ python -m helix_lm.scripts.tristream_bench --root /workspace/tristream   # what 
 
 ## What a run gives
 
-`results.json` holds every row (system, task, item, metrics) and the summary (mean, interval, count).
+`results.json` holds every row (system, task, item, metrics) and the summary (mean, interval, count). A task
+that fails is listed under `failed` with its error, and the other tasks still run.
 `report.md` is the table per task. `helix tristream bench compare` lists every main metric that got worse
 by more than its tolerance, with a Wilcoxon signed-rank test on the paired items, so noise is not read as a
 regression. The composite (`helix_lm.music.composite`) puts each main metric between a floor (0) and a target

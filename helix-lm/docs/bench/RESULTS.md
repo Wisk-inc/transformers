@@ -31,6 +31,16 @@ error.
 
 The prepare stage makes TriStream's pitch targets with YIN from 2.4.0 on.
 
+## Fixes in 2.4.1 (a bug scan before the first GPU run)
+
+- Device checks: a test tags every tensor that would be on the GPU and reports any op that mixes it with a CPU
+  tensor. On 2.4.0 it found 9 places: the prepare stage's breath check (every clip), the glitch detector, the
+  buzz, robotic and sync checks of the fail-safe loop, a low-pass filter, and the converter (audio from disk on
+  the CPU, the model on the GPU). The fail-safe loop also drew GPU noise with a CPU generator. All fixed.
+- The benchmark's register task crashed (a count read as a list), so the standard suite never finished.
+- The pass-through system scored 17.7 register pops a minute on clean takes; now 0.
+- Glitch check on a 4-minute song: 3.1 s in 2.4.0, 0.16 s now (block maxima and running sums).
+
 ## Fixes the tests found
 
 - Voice similarity: the old fallback (cosine of the cepstra's mean and spread) scored a copy of a take at -0.6

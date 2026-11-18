@@ -64,6 +64,11 @@ class Converter:
         self.chunk_seconds = 30.0  # long tracks are converted in chunks on one global grid
         self.anchors: torch.Tensor | None = None  # frames where the song turns: chunk edges snap to them
 
+    def device(self) -> torch.device:
+        """Where the model runs. Audio comes in on any device (read from disk: the CPU) and is moved here; until
+        2.4.1 it was not, and every conversion with the model on a GPU stopped on a device mismatch."""
+        return next(self.codec.parameters()).device if self.codec is not None else torch.device("cpu")
+
     def embed(self, reference: torch.Tensor, sample_rate: int, robust: bool = True) -> torch.Tensor:
         """The voice embedding of a reference; robust by default (cleaned, windowed, trimmed mean: see
         ``intake.reference_embedding``), with the report kept in ``self.last_reference``."""
@@ -76,7 +81,7 @@ class Converter:
                 reference, sample_rate, self.codec, self.speaker_encoder
             )
             return embedding
-        return self.speaker_encoder(self.codec.listen(reference[None]))
+        return self.speaker_encoder(self.codec.listen(reference[None].to(self.device())))
 
     def convert(
         self,
@@ -96,6 +101,12 @@ class Converter:
             return self._convert_long(vocal, f0_hz, speaker, sample_rate, steps, reference, hop, quality, tract_ratio)
         from .tristream import noise_features, source_features
 
+        home, device = vocal.device, self.device()  # the result goes back where the vocal came from
+        vocal, f0_hz, speaker = vocal.to(device), f0_hz.float().to(device), speaker.to(device)
+        if torch.is_tensor(reference):
+            reference = reference.to(device)
+        if torch.is_tensor(tract_ratio):
+            tract_ratio = tract_ratio.to(device)
         frames = self.codec.listen(vocal[None])  # (1, T, dim)
         t = frames.shape[1]
         f0 = torch.nn.functional.interpolate(f0_hz[None, None], size=t, mode="linear")[0]
@@ -103,18 +114,18 @@ class Converter:
         codes = self.codec.encode(vocal[None])[:, 0]  # the semantic codebook carries the content, not the timbre
         batch = {
             "source": source_features(f0, energy), "noise": noise_features(frames), "frames": frames,
-            "phonemes": torch.full((1, 1), -1, dtype=torch.long), "speaker": speaker,
+            "phonemes": torch.full((1, 1), -1, dtype=torch.long, device=device), "speaker": speaker,
         }  # fmt: skip
         if int(codes.max()) < self.model.config.semantic_codebook:  # a model trained with this codec's codebook
             batch["semantic"] = codes[:, :t]
         if quality is not None:
-            batch["quality"] = torch.tensor([float(quality)])
+            batch["quality"] = torch.tensor([float(quality)], device=device)
         if tract_ratio is not None:
             if torch.is_tensor(tract_ratio) and tract_ratio.dim() == 1 and tract_ratio.numel() > 1:
                 curve = torch.nn.functional.interpolate(tract_ratio.float()[None, None], size=t, mode="linear")[0]
                 batch["tract_ratio"] = curve  # (1, T): a smooth per-frame formant move, no wall at a register break
             else:
-                batch["tract_ratio"] = torch.tensor([float(tract_ratio)])
+                batch["tract_ratio"] = torch.tensor([float(tract_ratio)], device=device)
         if self.gates is not None or self.refiner is not None:
             from .failsafe import Gates, synthesize_with_gates
 
@@ -126,10 +137,10 @@ class Converter:
             self.last_report = report
             how = f"converted with TriStream-2 through the fail-safe loop ({len(report.rounds)} round(s), "
             how += f"{'passed' if report.ok else 'failed: ' + ', '.join(report.final.get('failed', []))})"
-            return wave[: vocal.shape[-1]], how
+            return wave[: vocal.shape[-1]].to(home), how
         out_frames = self.model.sample(batch, steps=steps)
         wave = self.codec.decode_frames(out_frames)[0, 0]
-        return wave[: vocal.shape[-1]], f"converted with TriStream-2 in {steps} flow steps"
+        return wave[: vocal.shape[-1]].to(home), f"converted with TriStream-2 in {steps} flow steps"
 
     def _convert_long(
         self, vocal, f0_hz, speaker, sample_rate, steps, reference, hop, quality=None, tract_ratio=None

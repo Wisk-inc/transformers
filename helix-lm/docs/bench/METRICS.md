@@ -43,6 +43,10 @@ Pitch is tracked with YIN (`helix_lm.audio.yin`) at 100 frames a second, frames 
 - `glitches_per_minute`: clicks and dropouts away from the clip's edges. A click is a jump six times the local
   motion and 2.5 times the largest jump within 25 ms around it, so a bright voice's edge at every glottal closure
   is not one. Before 2.4.0 every period of a bright voice counted, and the repair step smoothed each of them.
+- `register_pops_per_minute`: at each frame where the pitch crosses the singer's comfortable top, a level jump
+  over 12 dB between 5 ms slices within 100 ms, counted only while the voice sounds on both sides (within 20 dB of
+  the loudest moment there), or a click. Until 2.4.1 a dip into a short rest next to a crossing counted, and a
+  clean take scored 17.7 pops a minute.
 - `quality_proxy`: a signal check (periodicity, clipping, quiet floor), not a listening test. A UTMOS predictor
   can be loaded with `load_predictor` where it is installed.
 - `buzz_db`: energy at the codec's frame rate and its multiples.

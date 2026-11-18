@@ -125,3 +125,78 @@ def test_a_failure_that_keeps_coming_back_stops_the_run(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="the same fault"):
         M.main(["--root", str(tmp_path), "--retries", "100", "--retry-wait", "0", "--hf-repo", ""])
     assert len(tries) == M.SAME_FAILURE_LIMIT
+
+
+def test_a_catch_all_cannot_swallow_the_session_end(monkeypatch):
+    """The data stage catches Exception around each source; in 2.4.0 that handler swallowed the session end."""
+    from types import SimpleNamespace
+
+    from helix_lm.scripts import tristream_molab as M
+
+    pushes = []
+    monkeypatch.setattr(M, "hub_push", lambda args, force=False, reason="": pushes.append(reason) or True)
+    monkeypatch.setattr(M, "SESSION", Session(12.0, began=time.time() - 11.9 * 3600, why="test"))
+    assert not issubclass(SessionEnding, Exception)
+    reached = []
+    with pytest.raises(SessionEnding) as ending:
+        for name in ("vocalset", "dagstuhl", "esmuc"):
+            try:
+                M.stop_if_session_ends(SimpleNamespace(), f"data ({name})")
+                reached.append(name)
+            except Exception:  # what the data stage does around each source
+                continue
+    assert reached == [] and pushes == ["session end"] and ending.value.pushed
+
+
+def _prepared(out: Path, stem: str, f0: torch.Tensor) -> dict:
+    t = torch.arange(24000 * 2) / 24000
+    write_wave(out / f"{stem}.vocal.wav", 0.3 * torch.sin(2 * math.pi * 110.0 * t), 24000)
+    torch.save(f0, out / f"{stem}.f0.pt")
+    return {"path": f"/data/{stem}.wav", "seconds": 2.0, "tags": {"singer": "s", "f0_low": 200.0, "f0_high": 230.0},
+            "analysis": {}, "f0_path": str(out / f"{stem}.f0.pt"), "accepted": True, "reason": ""}
+
+
+def test_pitch_files_from_the_old_tracker_are_made_again(tmp_path):
+    import json
+
+    from helix_lm.music.data import PITCH_TRACKER, refresh_pitch
+
+    out = tmp_path / "prepared" / "raw_vocalset"
+    out.mkdir(parents=True)
+    octave_up = torch.full((51,), 220.0)                       # the old tracker's error on a 110 Hz voice
+    manifest = {"clips": [_prepared(out, f"take{k}", octave_up) for k in range(3)], "accepted": 3}
+    (out / "manifest.json").write_text(json.dumps(manifest))
+    calls = {"n": 0}
+
+    def stop_after_one() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    with pytest.raises(SessionEnding):
+        refresh_pitch(out, json.loads((out / "manifest.json").read_text()), 24000, should_stop=stop_after_one,
+                      log=lambda *_: None)
+    assert list(json.loads((out / "pitch_refresh.json").read_text())) == ["take0"]
+    done = refresh_pitch(out, json.loads((out / "manifest.json").read_text()), 24000, log=lambda *_: None)
+    assert done["pitch_tracker"] == PITCH_TRACKER and not (out / "pitch_refresh.json").exists()
+    for k in range(3):
+        f0 = torch.load(out / f"take{k}.f0.pt")
+        assert abs(float(f0[f0 > 0].median()) - 110.0) < 2.0
+    assert abs(done["clips"][0]["tags"]["f0_high"] - 110.0) < 3.0
+    assert json.loads((out / "manifest.json").read_text())["pitch_tracker"] == PITCH_TRACKER
+
+
+def test_the_benchmark_singers_are_never_trained_on():
+    from types import SimpleNamespace
+
+    from helix_lm.scripts import tristream_molab as M
+
+    tags = [SimpleNamespace(singer=s) for s in ("vocalset/f2", "vocalset/m10", "vocalset/f1", "emilia/x", "f2")]
+    split = M.singer_split(tags)
+    assert split["vocalset/f2"] == split["vocalset/m10"] == "validation"
+    from helix_lm.music.regularize import split_singers
+
+    plain = split_singers([t.singer for t in tags])
+    assert all(split[s] == plain[s] for s in ("vocalset/f1", "emilia/x", "f2"))  # everyone else as before
+    assert M.benchmark_file(Path("/r/prepared/raw_vocalset/m5_arpeggios_belt_c_a.vocal.wav"))
+    assert not M.benchmark_file(Path("/r/prepared/raw_vocalset/m4_arpeggios_belt_c_a.vocal.wav"))
+    assert not M.benchmark_file(Path("/r/prepared/uploads/f2_take.vocal.wav"))

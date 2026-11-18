@@ -27,8 +27,17 @@ WRAP_UP_MINUTES = 30.0
 MOLAB_PACKAGES = "/tmp/uv-venv"
 
 
-class SessionEnding(Exception):
-    """Raised by a stage that saved its work because the session is about to be stopped."""
+class SessionEnding(BaseException):
+    """Raised by a stage that saved its work because the session is about to be stopped.
+
+    A ``BaseException``, like ``KeyboardInterrupt``: the data stage catches ``Exception`` around each source so
+    that one failed download does not stop the others, and in 2.4.0 that handler swallowed this signal, pushed
+    once per remaining source, went on into a long download and counted the session's end as a failed data
+    attempt. ``pushed`` says whether the stage already pushed to the Hub."""
+
+    def __init__(self, message: str = "", pushed: bool = False) -> None:
+        super().__init__(message)
+        self.pushed = pushed
 
 
 def _proc_stat(pid: int) -> list:

@@ -114,7 +114,8 @@ def shaped_noise(
     """White noise filtered by band gains ``(B, Tf, bands)`` at the fine rate; the bands are mel-spaced."""
     b, tf, bands = gains.shape
     device = gains.device
-    noise = torch.randn(b, length, device=device, generator=generator)
+    noise = torch.randn(b, length, device=generator.device if generator is not None else device,
+                        generator=generator).to(device)  # a seeded CPU generator works with a GPU refiner
     window = torch.hann_window(n_fft, device=device)
     spec = torch.stft(noise, n_fft, hop, window=window, return_complex=True)  # (B, bins, frames)
     fb = mel_filterbank(sample_rate, n_fft, bands, device)  # (bands, bins)
@@ -271,7 +272,8 @@ class AirBandExtension(nn.Module):
         air_fb = torch.zeros(c.bands, n_fft // 2 + 1, device=body.device)
         for k in range(c.bands):
             air_fb[k] = ((freqs >= edges[k]) & (freqs < edges[k + 1])).float()
-        noise = torch.randn(b, n_out, device=body.device, generator=generator)
+        noise = torch.randn(b, n_out, device=generator.device if generator is not None else body.device,
+                            generator=generator).to(body.device)
         nspec = torch.stft(noise, n_fft, hop, window=window, return_complex=True)
         shaped = nspec * (gains @ air_fb).transpose(1, 2).to(nspec.dtype)
         air = torch.istft(shaped, n_fft, hop, window=window, length=n_out)

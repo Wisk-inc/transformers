@@ -222,7 +222,15 @@ def register_break_report(
     for frame in crossings.tolist():
         a = max(0, int((frame - half) / frame_rate * sample_rate / hop))
         z = min(db.numel(), int((frame + half) / frame_rate * sample_rate / hop))
-        jump = float((db[a + 1 : z] - db[a : z - 1]).abs().max()) if z - a > 2 else 0.0
+        jump = 0.0
+        if z - a > 2:
+            seg = db[a:z]
+            # only while the voice sounds on both sides (within 20 dB of the loudest moment around the crossing):
+            # a dip into a gap between two notes is articulation, not a pop. Without this a clean take crossing
+            # its register line next to a short rest scored a pop at most crossings (17.7 a minute)
+            sounding = torch.minimum(seg[1:], seg[:-1]) > seg.max() - 20.0
+            if bool(sounding.any()):
+                jump = float((seg[1:] - seg[:-1]).abs()[sounding].max())
         s0, s1 = int((frame - half) / frame_rate * sample_rate), int((frame + half) / frame_rate * sample_rate)
         clicked = bool(((clicks >= s0) & (clicks < s1)).any()) if clicks.numel() else False
         pops += int(jump > jump_db or clicked)
@@ -239,13 +247,13 @@ def hollow_score(wave: torch.Tensor, reference: torch.Tensor, sample_rate: int) 
     """The sound of a tract morphed past its limits: the F1 region (300-1200 Hz) under-represented against
     the reference, and a flat, low-contrast spectrum between 300 Hz and 4 kHz where formants should stand."""
     n_fft = 2048
-    window = torch.hann_window(n_fft)
+    window = torch.hann_window(n_fft, device=wave.device)
 
     def profile(x):
-        mag = torch.stft(x, n_fft, 512, window=window, return_complex=True).abs().mean(-1)
+        mag = torch.stft(x.to(wave.device), n_fft, 512, window=window, return_complex=True).abs().mean(-1)
         return 20 * torch.log10(mag + 1e-7)
 
-    freqs = torch.fft.rfftfreq(n_fft, 1 / sample_rate)
+    freqs = torch.fft.rfftfreq(n_fft, 1 / sample_rate, device=wave.device)
     p, r = profile(wave), profile(reference)
     f1 = (freqs >= 300) & (freqs < 1200)
     mid = (freqs >= 1200) & (freqs < 4000)

@@ -100,7 +100,30 @@ def stop_if_session_ends(args, what: str) -> None:
 
     if session().wrap_up():
         hub_push(args, force=True, reason="session end")
-        raise SessionEnding(f"{what}: saved and pushed before the session ends")
+        raise SessionEnding(f"{what}: saved and pushed before the session ends", pushed=True)
+
+
+def benchmark_singer(singer: str) -> bool:
+    """VocalSet's five benchmark singers (``helix_lm.bench.data.vocalset.TEST_SINGERS``). No stage trains on them,
+    so the benchmark measures voices the model has never heard. Until 2.4.1 the split was a hash of the singer's
+    name, and most of the five would have been trained on."""
+    from helix_lm.bench.data.vocalset import is_test_singer
+
+    return str(singer).startswith("vocalset/") and is_test_singer(singer)
+
+
+def benchmark_file(path: Path) -> bool:
+    """A prepared VocalSet file (``prepared/raw_vocalset/<singer>_...``) of a benchmark singer."""
+    path = Path(path)
+    return path.parent.name == "raw_vocalset" and benchmark_singer("vocalset/" + path.name.split("_")[0])
+
+
+def singer_split(tags) -> dict:
+    """The singer-disjoint split, with the benchmark singers always held out."""
+    from helix_lm.music.regularize import split_singers
+
+    split = split_singers([t.singer for t in tags])
+    return {s: "validation" if benchmark_singer(s) else side for s, side in split.items()}
 
 
 def done(root: Path, stage: str) -> bool:
@@ -1196,6 +1219,7 @@ def stage_data(args) -> None:
                     fetched += 1
                 except Exception as error:
                     log(f"  {f['name']}: not fetched ({type(error).__name__}: {str(error)[:80]})")
+            stop_if_session_ends(args, f"data ({name})")
             extracted = extract_archives(raw / name)
             found[name] = fetched
             if fetched < len(kept):
@@ -1217,15 +1241,18 @@ def stage_data(args) -> None:
             if todo:
                 log(f"emilia-yodas: {len(shards) - len(todo)} of {len(shards)} shards already on disk; "
                     f"downloading {len(todo)}")  # fmt: skip
-                snapshot_download(
-                    "amphion/Emilia-Dataset",
-                    repo_type="dataset",
-                    allow_patterns=[f"Emilia-YODAS/EN/{s}.tar" for s in todo],
-                    local_dir=str(emilia),
-                    token=token(),
-                )
+                for shard in todo:  # one at a time, so a session about to end does not start another
+                    stop_if_session_ends(args, "data (emilia-yodas)")
+                    snapshot_download(
+                        "amphion/Emilia-Dataset",
+                        repo_type="dataset",
+                        allow_patterns=[f"Emilia-YODAS/EN/{shard}.tar"],
+                        local_dir=str(emilia),
+                        token=token(),
+                    )
             else:
                 log(f"emilia-yodas: all {len(shards)} shards already on disk, not downloaded again")
+            stop_if_session_ends(args, "data (emilia-yodas)")
             extract_archives(emilia, delete=True)  # the tar is gone once its clips are out
             found["emilia-yodas"] = sum(archive_extracted(emilia, s + ".tar") for s in shards)
             log(f"emilia-yodas: {found['emilia-yodas']} of {len(shards)} shards unpacked (CC BY 4.0 half only)")
@@ -1233,6 +1260,7 @@ def stage_data(args) -> None:
             log(f"emilia-yodas: not fetched ({type(error).__name__}: {str(error)[:80]})")
     if args.include_research and token():
         for name, repo in RESEARCH_SOURCES.items():
+            stop_if_session_ends(args, f"data ({name})")
             try:
                 from huggingface_hub import snapshot_download
 
@@ -1276,7 +1304,7 @@ def emilia_speaker(path: Path) -> str:
 def stage_prepare(args) -> None:
     import torch
 
-    from helix_lm.music.data import find_audio, prepare_uploads
+    from helix_lm.music.data import PITCH_TRACKER, find_audio, prepare_uploads, refresh_pitch
     from helix_lm.music.separation import try_pretrained
 
     root = Path(args.root)
@@ -1299,6 +1327,9 @@ def stage_prepare(args) -> None:
         out = root / "prepared" / folder.replace("/", "_")
         if (out / "manifest.json").exists() and not args.force:
             manifests[folder] = json.loads((out / "manifest.json").read_text())
+            if manifests[folder].get("pitch_tracker") != PITCH_TRACKER:  # prepared by 2.3 or before
+                manifests[folder] = refresh_pitch(out, manifests[folder], args.sample_rate, device=device,
+                                                  should_stop=session().wrap_up, log=log)  # fmt: skip
             continue
         from helix_lm.music.prepare_cache import progress
 
@@ -1351,6 +1382,7 @@ def stage_codec(args) -> None:
     codec, disc = AudioCodec(config).to(device), MultiPeriodDiscriminator().to(device)
     files = find_audio([root / "prepared"])
     files = [f for f in files if f.name.endswith(".vocal.wav") or f.name.endswith(".instrumental.wav")]
+    files = [f for f in files if not benchmark_file(f)]  # the benchmark's singers are never trained on
     if not files:
         log("!! no prepared audio; run the prepare stage")
         return
@@ -1382,7 +1414,7 @@ def stage_codec(args) -> None:
     high_files = [
         Path(r["dir"]) / f"{Path(r['path']).stem}.vocal.wav"
         for r in prepared_records(root)
-        if r["tags"].get("f0_high", 0) >= 500
+        if r["tags"].get("f0_high", 0) >= 500 and not benchmark_singer(r["tags"].get("singer", ""))
     ]
     high_files = [f for f in high_files if f.exists()]
     low_files = [f for f in sung_files if f not in set(high_files)] or sung_files
@@ -1557,7 +1589,7 @@ def stage_refiner(args) -> None:
     if codec is None:
         log("!! no codec (run the codec stage first)")
         return
-    files = sorted((root / "prepared").rglob("*.vocal.wav"))
+    files = [f for f in sorted((root / "prepared").rglob("*.vocal.wav")) if not benchmark_file(f)]
     if not files:
         log("!! no prepared vocals")
         return
@@ -1739,7 +1771,7 @@ def stage_train(args) -> None:
 
     from helix_lm.audio import SpeakerEncoder
     from helix_lm.audio.data import read_wave
-    from helix_lm.music.regularize import ACCENTS, ClipTags, augment, mixture_weights, speech_share_at, split_singers
+    from helix_lm.music.regularize import ACCENTS, ClipTags, augment, mixture_weights, speech_share_at
     from helix_lm.music.tristream import TriStreamConfig, TriStreamForSinging, noise_features, source_features
     from helix_lm.optim import build_optimizer
 
@@ -1760,7 +1792,7 @@ def stage_train(args) -> None:
         log("!! no accepted clips")
         return
     tags = [ClipTags(**r["tags"]) for r in records]
-    split = split_singers([t.singer for t in tags])
+    split = singer_split(tags)
     train_idx = [i for i, t in enumerate(tags) if split[t.singer] == "train"]
     train_tags = [tags[i] for i in train_idx]
     sung = sum(t.domain != "speech" for t in train_tags)
@@ -1932,7 +1964,7 @@ def stage_eval(args) -> None:
     from helix_lm.audio.speaker import speaker_similarity
     from helix_lm.music.failsafe import Gates, synthesize_with_gates
     from helix_lm.music.register import register_break_report
-    from helix_lm.music.regularize import ClipTags, split_singers
+    from helix_lm.music.regularize import ClipTags
     from helix_lm.music.tristream import TriStreamConfig, TriStreamForSinging, noise_features, source_features
 
     root = Path(args.root)
@@ -1954,7 +1986,7 @@ def stage_eval(args) -> None:
         data = json.loads(manifest.read_text())
         records += [{**clip, "dir": str(manifest.parent)} for clip in data["clips"] if clip["accepted"]]
     tags = [ClipTags(**r["tags"]) for r in records]
-    split = split_singers([t.singer for t in tags])
+    split = singer_split(tags)
     paired = list(zip(records, tags, strict=True))
     sung = [(r, t) for r, t in paired if t.domain != "speech"] or paired
     held = [r for r, t in sung if split[t.singer] == "validation"][: args.eval_clips]
@@ -2182,6 +2214,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             globals()[f"stage_{args.stage}"](args)
         except SessionEnding as ending:
+            if not ending.pushed:
+                hub_push(args, force=True, reason="session end")
             log(f"{ending}. Run the cell again in a new session to go on from here")
             return 0
         return 0
@@ -2201,6 +2235,8 @@ def main(argv: list[str] | None = None) -> int:
             log("all stages done")
             return 0
         except SessionEnding as ending:
+            if not ending.pushed:
+                hub_push(args, force=True, reason="session end")
             log(f"{ending}. Everything is on the Hub; run the cell again in a new session to go on from here")
             return 0
         except KeyboardInterrupt:

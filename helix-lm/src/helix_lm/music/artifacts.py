@@ -47,9 +47,9 @@ def frame_rate_buzz(wave: torch.Tensor, sample_rate: int, frame_rate: float = 25
         return {"buzz_db": 0.0, "ok": True}
     k = 101
     trend = F.avg_pool1d(F.pad(env[None, None], (k // 2, k // 2), mode="replicate"), k, stride=1)[0, 0]
-    detrended = (env - trend) * torch.hann_window(env.numel())
+    detrended = (env - trend) * torch.hann_window(env.numel(), device=env.device)
     spectrum = torch.fft.rfft(detrended).abs()
-    freqs = torch.fft.rfftfreq(env.numel(), d=1e-3)
+    freqs = torch.fft.rfftfreq(env.numel(), d=1e-3, device=env.device)
 
     def band(lo, hi):
         sel = (freqs >= lo) & (freqs <= hi)
@@ -224,13 +224,13 @@ def robotic_score(f0_hz: torch.Tensor, frame_rate: float = 100.0) -> dict:
     for a, z in segments:
         a = a + trim if z - a - trim >= int(0.2 * frame_rate) else a
         x = cents[a:z]
-        t = torch.arange(z - a, dtype=torch.float)
+        t = torch.arange(z - a, dtype=torch.float, device=x.device)
         t = t - t.mean()
         slope = (t * (x - x.mean())).sum() / (t.pow(2).sum() + 1e-9)
         x = x - x.mean() - slope * t
-        window = torch.hann_window(z - a)
+        window = torch.hann_window(z - a, device=x.device)
         spec = torch.fft.rfft(x * window)
-        freqs = torch.fft.rfftfreq(z - a, d=1.0 / frame_rate)
+        freqs = torch.fft.rfftfreq(z - a, d=1.0 / frame_rate, device=x.device)
         power = spec.abs().pow(2)
         band = (freqs >= 3) & (freqs <= 10)
         if band.any():
@@ -272,7 +272,8 @@ def robotic_score(f0_hz: torch.Tensor, frame_rate: float = 100.0) -> dict:
         delta = (cents[1:] - cents[:-1]) * (voiced[1:] & voiced[:-1]).float()
         big = delta.abs() > 100
         window = max(2, int(0.2 * frame_rate))
-        cumulative = F.conv1d(F.pad(delta[None, None], (window - 1, 0)), torch.ones(1, 1, window))[0, 0].abs()
+        ones = torch.ones(1, 1, window, device=delta.device, dtype=delta.dtype)
+        cumulative = F.conv1d(F.pad(delta[None, None], (window - 1, 0)), ones)[0, 0].abs()
         i, n = 0, delta.numel()
         while i < n:
             if big[i]:
@@ -327,7 +328,7 @@ def sync_lag(
     onset = F.relu(voiced[1:] - voiced[:-1])
     change = ((cents[1:] - cents[:-1]).abs() > 100).float() * voiced[1:] * voiced[:-1]
     control = onset * 2 + change
-    kernel = torch.ones(1, 1, 3) / 3
+    kernel = torch.ones(1, 1, 3, device=control.device, dtype=control.dtype) / 3
     control = F.conv1d(F.pad(control[None, None], (1, 1)), kernel)[0, 0]
     mag = torch.log(_stft(wave, 512, hop) + 1e-4)
     flux = F.relu(mag[:, 1:] - mag[:, :-1]).sum(0)
@@ -368,7 +369,7 @@ def air_report(
     if sample_rate / 2 <= cutoff + 1000:
         return {"air_deficit_db": 0.0, "ok": True, "measured": False}
     n_fft = 2048
-    freqs = torch.fft.rfftfreq(n_fft, 1 / sample_rate)
+    freqs = torch.fft.rfftfreq(n_fft, 1 / sample_rate, device=pred.device)
     hi, mid = freqs >= cutoff, (freqs >= 4000) & (freqs < cutoff)
 
     def share(x):

@@ -351,16 +351,17 @@ def test_the_data_stage_run_twice_downloads_nothing_the_second_time(tmp_path, mo
                            include_research=False, data_attempts=5)  # fmt: skip
     try:
         molab.stage_data(args)
-        assert len(served) == 3 and snapshots == [[f"Emilia-YODAS/EN/EN-B{i:06d}.tar" for i in range(3)]]
+        # one shard per call, so a session about to end never starts another (2.4.1)
+        assert len(served) == 3 and snapshots == [[f"Emilia-YODAS/EN/EN-B{i:06d}.tar"] for i in range(3)]
         assert molab.complete(tmp_path, "data", args)
         assert not list((tmp_path / "raw" / "emilia-yodas").rglob("*.tar"))  # unpacked, then removed
         # second run: everything is on disk, so nothing is fetched
         molab.stage_data(args)
-        assert len(served) == 3 and len(snapshots) == 1
+        assert len(served) == 3 and len(snapshots) == 3
         # a zip removed by hand: still unpacked, so still not fetched
         (tmp_path / "raw" / "vocalset" / "VocalSet.zip").unlink()
         molab.stage_data(args)
-        assert len(served) == 3 and len(snapshots) == 1
+        assert len(served) == 3 and len(snapshots) == 3
         # one more hour of speech asked for: only the new shard is fetched
         args.emilia_hours = 200.0
         molab.stage_data(args)

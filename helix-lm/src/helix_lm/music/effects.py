@@ -68,9 +68,9 @@ def _lfilter(x: torch.Tensor, b: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
 
 def lowpass(x: torch.Tensor, cutoff: float, sample_rate: int, taps: int = 255) -> torch.Tensor:
     """Linear-phase FIR low-pass (windowed sinc); fast through FFT convolution."""
-    t = torch.arange(taps) - (taps - 1) / 2
+    t = torch.arange(taps, device=x.device) - (taps - 1) / 2
     fc = cutoff / sample_rate
-    kernel = 2 * fc * torch.sinc(2 * fc * t) * torch.hann_window(taps, periodic=False)
+    kernel = 2 * fc * torch.sinc(2 * fc * t) * torch.hann_window(taps, periodic=False, device=x.device)
     kernel = kernel / kernel.sum()
     y = _fft_convolve(x, kernel)
     return torch.roll(y, -(taps - 1) // 2, dims=-1)
@@ -289,8 +289,11 @@ def de_ess(x: torch.Tensor, sample_rate: int, threshold: float = 0.1, ratio: flo
 
 def rms_envelope(x: torch.Tensor, sample_rate: int, window_ms: float = 10.0) -> torch.Tensor:
     n = max(1, int(window_ms / 1000 * sample_rate))
-    kernel = torch.ones(1, 1, n) / n
-    env = F.conv1d(F.pad(x.pow(2)[None, None], (n // 2, n - 1 - n // 2)), kernel)[0, 0]
+    # a moving mean by running sums (in float64: no drift over millions of samples), on x's device: the same
+    # numbers as a box-filter convolution, in time that does not grow with the window
+    power = F.pad(x.pow(2)[None, None], (n // 2, n - 1 - n // 2))[0, 0].double()
+    total = F.pad(power.cumsum(-1), (1, 0))
+    env = ((total[..., n:] - total[..., :-n]) / n).clamp(min=0).to(x.dtype)
     return env.sqrt()
 
 
@@ -468,16 +471,24 @@ def strip_breaths(x: torch.Tensor, sample_rate: int, threshold_db: float = -32.0
 
 # -------------------------------------------------------------------------------------------- glitches --
 def _neighbour_peak(diff: torch.Tensor, reach: int, guard: int) -> torch.Tensor:
-    """The largest value within ``reach`` samples of each point, leaving out the ``guard`` samples around it."""
-    flat = diff.reshape(-1, diff.shape[-1])[:, None].float()
-    k = max(1, reach - guard + 1)
-    pooled = torch.nn.functional.max_pool1d(torch.nn.functional.pad(flat, (reach, reach)), k, stride=1)[:, 0]
+    """About the largest value within ``reach`` samples of each point, leaving out its own neighbourhood: computed
+    on blocks of ``guard`` samples (a point's block and the two beside it are left out), which keeps it linear in
+    the length (a sample-exact running maximum took 3 s on a 4-minute song)."""
     n = diff.shape[-1]
-    left = pooled[:, :n]                                     # max of diff[i - reach : i - guard + 1]
-    right = pooled[:, reach + guard : reach + guard + n]     # max of diff[i + guard : i + reach + 1]
-    if right.shape[-1] < n:
-        right = torch.nn.functional.pad(right, (0, n - right.shape[-1]))
-    return torch.maximum(left, right).reshape(diff.shape).to(diff.dtype)
+    flat = diff.reshape(-1, n).float()
+    block = max(1, guard)
+    nb = -(-n // block)
+    blocks = torch.nn.functional.pad(flat, (0, nb * block - n)).reshape(flat.shape[0], nb, block).amax(-1)
+    k = max(2, reach // block)                               # blocks either side within reach
+    width = k - 1                                            # blocks j-k .. j-2 (and j+2 .. j+k)
+    padded = torch.nn.functional.pad(blocks, (k, k))
+    pooled = torch.nn.functional.max_pool1d(padded[:, None], width, stride=1)[:, 0]
+    left = pooled[:, :nb]                                    # max over blocks j-k .. j-2
+    right = pooled[:, k + 2 : k + 2 + nb]                    # max over blocks j+2 .. j+k
+    if right.shape[-1] < nb:
+        right = torch.nn.functional.pad(right, (0, nb - right.shape[-1]))
+    near = torch.maximum(left, right).repeat_interleave(block, -1)[:, :n]
+    return near.reshape(diff.shape).to(diff.dtype)
 
 
 def detect_glitches(x: torch.Tensor, sample_rate: int) -> dict:
@@ -505,12 +516,11 @@ def repair_glitches(x: torch.Tensor, sample_rate: int, report: dict | None = Non
     for pos in report["clicks"].tolist():
         a, b = max(0, pos - 32), min(out.shape[-1], pos + 32)
         if b - a > 2:
-            ramp = torch.linspace(float(out[..., a]), float(out[..., b - 1]), b - a)
+            ramp = torch.linspace(float(out[..., a]), float(out[..., b - 1]), b - a, device=out.device)
             out[..., a:b] = ramp
     for pos in report["dropouts"].tolist():  # cross-fade over a dropout with the last good audio
         a, b = max(0, pos - int(0.01 * sample_rate)), min(out.shape[-1], pos + int(0.02 * sample_rate))
         if a > b - a:
-            out[..., a:b] = out[..., a - (b - a) : a] * torch.linspace(1, 0, b - a) + out[..., a:b] * torch.linspace(
-                0, 1, b - a
-            )
+            fade = torch.linspace(1, 0, b - a, device=out.device)
+            out[..., a:b] = out[..., a - (b - a) : a] * fade + out[..., a:b] * (1 - fade)
     return limit(out)

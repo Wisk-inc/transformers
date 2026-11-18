@@ -84,3 +84,15 @@ def test_the_quality_proxy_prefers_a_voice_to_noise_and_clipping():
     noise = torch.randn(2 * SR, generator=torch.Generator().manual_seed(3)) * 0.2
     q = quality_proxy(voice, SR)["quality_proxy"]
     assert q > quality_proxy(clipped, SR)["quality_proxy"] and q > quality_proxy(noise, SR)["quality_proxy"]
+
+
+def test_a_real_pop_at_a_register_crossing_is_found():
+    from helix_lm.music.register import register_break_report
+
+    t = torch.arange(2 * SR) / SR
+    f0 = torch.where(t < 1.0, 400.0, 480.0)                     # crosses 440 Hz at one second
+    wave = 0.05 * torch.sin(2 * math.pi * torch.cumsum(f0, 0) / SR)
+    cracked = torch.where(t < 1.0, wave, wave * 8.0)            # +18 dB at the crossing: the voice cracked
+    track = torch.where(torch.arange(200) < 100, 400.0, 480.0)
+    assert register_break_report(cracked, track, SR, 440.0, 100.0)["pops"] == 1
+    assert register_break_report(wave, track, SR, 440.0, 100.0)["pops"] == 0

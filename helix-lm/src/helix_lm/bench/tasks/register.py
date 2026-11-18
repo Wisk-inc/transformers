@@ -30,7 +30,7 @@ def run(system, items, sample_rate: int, cache, seconds: float = 8.0) -> list[di
         report = register_break_report(out, f0(out, sample_rate), sample_rate, top, F0_RATE)
         rows.append({"item": it.id, "set": it.set, "singer": it.singer,
                      "register_pops_per_minute": report["pops_per_minute"],
-                     "crossings": len(report.get("crossings", []))})
+                     "crossings": int(report.get("crossings", 0))})       # a count, not a list
     return rows
 
 

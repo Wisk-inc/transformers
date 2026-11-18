@@ -1,6 +1,6 @@
 # TriStream-V2-SVS: one cell, plain Python. Runs in molab, Jupyter, or as "python tristream_molab_cell.py" on
 # a rented GPU. Paste your Hugging Face token below and run it. It stops any earlier run by itself, installs
-# helix-lm 2.4.0, pulls the latest checkpoints from the private repo CorxLabs/Tristream-V2-SVS and goes on with
+# helix-lm 2.4.1, pulls the latest checkpoints from the private repo CorxLabs/Tristream-V2-SVS and goes on with
 # the hours that are left. A molab session ends after 12 hours: the run saves, pushes and stops 30 minutes before
 # that, so run this cell again in the next session and it carries on. Stopping this cell stops the run too.
 # ruff: noqa: E402  (the settings come first, so they are the first thing seen in the notebook)
@@ -10,7 +10,7 @@ HF_REPO = "CorxLabs/Tristream-V2-SVS"       # private: checkpoints, markers, ben
 GPU_HOURS = 32                              # the GPU hours you have in total for this model; 0 = the full budgets
 SIZE = "ts-765m"                            # "ts-300m" for a smaller, faster model
 ROOT = "auto"                               # "auto": the folder that already holds this run, else /workspace/tristream
-HELIX = "2.4.0"
+HELIX = "2.4.1"
 
 import os
 import signal

@@ -199,6 +199,15 @@ and fallbacks (`docs/TRISTREAM.md` section 12):
   singing-only evaluation; round three (section 14): a sustain-aware alignment prior for melismas, a codebook
   register audit with high-register oversampling, rooms and EQ on every training input against dry targets,
   a per-frame formant curve with a pop detector, and a two-block look-ahead switched on before drops;
+* **2.4.1**: fixes from a bug scan before the first GPU run. On a GPU the prepare stage stopped at its first
+  clip (the breath check built its window on the CPU), and the eval stage would have stopped in its first round
+  (a CPU random generator for GPU noise, and CPU kernels in the glitch, buzz, robotic and sync checks); a test now
+  replays those paths on the CPU with every would-be GPU tensor tagged, so this kind of failure is caught without
+  a GPU. The session's end can no longer be swallowed by the data stage's per-source error handling. Pitch files
+  made by the old tracker are redone with YIN from the vocals on disk. VocalSet's five benchmark singers are never
+  trained on. The converter moves audio to the model's device. In the benchmark: the register task crashed, the
+  VocalSet sample was one singer, a clean voice scored register pops, and one failing task cost the whole run;
+  all fixed. The glitch check is 19 times faster on a long song;
 * **2.4.0**: TriStream finishes each molab session cleanly (it saves, pushes and stops 30 minutes before the
   12-hour limit, and the next session goes on from there); the prepare stage keeps a record per clip, so a
   stopped prepare resumes at the clip it reached instead of the first one; a failure that comes back three

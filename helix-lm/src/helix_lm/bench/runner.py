@@ -21,6 +21,29 @@ from .tasks import runner
 SKIP_COLUMNS = {"item", "set", "singer", "target", "technique", "degradation", "system", "task"}
 
 
+def balanced(items: list, n: int, seed: int = 0) -> list:
+    """``n`` items spread over the singers: each singer's takes shuffled by a seeded generator, then dealt in turn.
+    The first ``n`` of a sorted list were all one singer's (VocalSet sorts by singer), which left a conversion
+    task no pair of different singers and measured one voice as if it were the set."""
+    import random
+
+    by: dict = {}
+    for it in items:
+        by.setdefault(it.singer, []).append(it)
+    rng = random.Random(seed)
+    queues = []
+    for singer in sorted(by):
+        takes = sorted(by[singer], key=lambda i: i.id)
+        rng.shuffle(takes)
+        queues.append(takes)
+    out = []
+    while len(out) < n and any(queues):
+        for q in queues:
+            if q and len(out) < n:
+                out.append(q.pop(0))
+    return out
+
+
 def gather(suite, data_dirs: dict | None, out: Path, sample_rate: int) -> dict:
     """``{set: items}`` for the sets of the suite that are here (the synthetic set is made in ``out``)."""
     data_dirs = data_dirs or {}
@@ -38,7 +61,7 @@ def gather(suite, data_dirs: dict | None, out: Path, sample_rate: int) -> dict:
         module = importlib.import_module(f"{__package__}.data.{name}")
         items = module.items(root)
         if items:
-            found[name] = items[: suite.max_items]
+            found[name] = balanced(items, suite.max_items)
     return found
 
 
@@ -63,7 +86,7 @@ def run_suite(suite="quick", systems=("identity", "harmonic-noise"), out="bench-
     out.mkdir(parents=True, exist_ok=True)
     sets = gather(s, data_dirs, out, sample_rate)
     cache = OutputCache(out / "cache")
-    rows, skipped = [], []
+    rows, skipped, failed = [], [], []
     began = time.time()
     for name in systems:
         system = make(name, root, size)
@@ -80,7 +103,12 @@ def run_suite(suite="quick", systems=("identity", "harmonic-noise"), out="bench-
                                                                      "register"):
                     continue
                 t0 = time.time()
-                part = runner(task)(system, items[: s.max_items], sample_rate, cache)
+                try:
+                    part = runner(task)(system, items[: s.max_items], sample_rate, cache)
+                except Exception as error:  # one broken task must not cost the whole suite its results
+                    failed.append(f"{name} / {task} / {set_name}: {type(error).__name__}: {str(error)[:200]}")
+                    log(f"[bench] {failed[-1]}")
+                    continue
                 for row in part:
                     row.update(system=name, task=task)
                 rows += part
@@ -88,6 +116,7 @@ def run_suite(suite="quick", systems=("identity", "harmonic-noise"), out="bench-
     summary = summarize(rows)
     result = {"suite": s.name, "systems": list(systems), "sets": {k: len(v) for k, v in sets.items()},
               "sample_rate": sample_rate, "seconds": round(time.time() - began, 1), "skipped": skipped,
+              "failed": failed,
               "cache": {"hits": cache.hits, "made": cache.misses}, "summary": summary, "rows": rows}
     (out / "results.json").write_text(json.dumps(result, indent=1, default=float))
     from .report import markdown
@@ -96,4 +125,4 @@ def run_suite(suite="quick", systems=("identity", "harmonic-noise"), out="bench-
     return result
 
 
-__all__ = ["gather", "run_suite", "summarize"]
+__all__ = ["balanced", "gather", "run_suite", "summarize"]

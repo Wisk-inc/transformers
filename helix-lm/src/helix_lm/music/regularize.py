@@ -223,7 +223,7 @@ def breath_events(wave: torch.Tensor, sample_rate: int, frame_rate: float = 25.0
     """
     hop = int(sample_rate / frame_rate)
     n_fft = 1024
-    window = torch.hann_window(n_fft)
+    window = torch.hann_window(n_fft, device=wave.device)  # on the wave's device: prepare measures on the GPU
     spec = torch.stft(wave, n_fft, hop, window=window, return_complex=True).abs() + 1e-8
     flatness = spec.log().mean(0).exp() / spec.mean(0)
     energy = spec.pow(2).mean(0)
