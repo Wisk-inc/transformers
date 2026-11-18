@@ -313,6 +313,10 @@ def cmd_tristream(args: argparse.Namespace) -> None:
         from .scripts.tristream_molab import main as molab_main
 
         raise SystemExit(molab_main(args.molab_args))
+    if args.action == "bench":
+        from .bench.cli import main as bench_main
+
+        raise SystemExit(bench_main(args.molab_args))
     from .music.tristream import TriStreamConfig, TriStreamForSinging, describe_tristream_sizes
 
     print(_banner())
@@ -632,8 +636,8 @@ def main(argv: list[str] | None = None) -> int:
     music.add_argument("--out", default="", help="plan: JSON; swap: wav; prepare: directory")
     music.set_defaults(func=cmd_music)
 
-    tristream = sub.add_parser("tristream", help="TriStream-2: sizes, a toy demo, the 96 GB molab program")
-    tristream.add_argument("action", choices=["sizes", "demo", "molab"])
+    tristream = sub.add_parser("tristream", help="TriStream-2: sizes, a toy demo, the 96 GB molab program, benchmarks")
+    tristream.add_argument("action", choices=["sizes", "demo", "molab", "bench"])
     tristream.add_argument("--size", default="ts-tiny")
     tristream.add_argument("--steps", type=int, default=10)
     tristream.add_argument("--seed", type=int, default=0)

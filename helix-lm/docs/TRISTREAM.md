@@ -411,7 +411,7 @@ helix music plan song.wav --low 55 --high 79 --out plan.json
 helix music swap song.wav reference.wav --out out.wav [singer_to_replace.wav] [--root /workspace/tristream]
 helix music prepare ~/takes --out /workspace/tristream/uploads --singer nathan --accent jamaican
 
-# the 96 GB program, in a notebook cell (resumes from the private Hub repo if the notebook dies):
+# the 96 GB program: paste notebooks/tristream_molab_cell.py into one cell (token, GPU hours, run), or by hand:
 !pip install -q "helix-lm[music]"
 !python -m helix_lm.scripts.tristream_molab --root /workspace/tristream --stage all \
     --hf-repo CorxLabs/Tristream-V2-SVS --size ts-765m --emilia-hours 300 \
@@ -421,6 +421,11 @@ helix music prepare ~/takes --out /workspace/tristream/uploads --singer nathan -
 
 The token for the Hub goes in `$HF_TOKEN` or `/root/hf_token` on the machine. Every stage creates its own
 folder, resumes from its own checkpoint and from the Hub's, and keeps the hours it has already used.
+
+On molab a session ends after 12 hours. From 2.4.0 the program knows when its session started (from
+`HELIX_SESSION_START`, or the oldest of its parent processes), saves, pushes and stops 30 minutes before the end
+(`HELIX_SESSION_HOURS` sets another limit, 0 for none), and the next session's cell goes on from there. The
+benchmark ([BENCHMARKS.md](BENCHMARKS.md)) runs at the end of each eval and uploads `bench/LATEST.md`.
 
 ---
 

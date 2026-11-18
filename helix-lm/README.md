@@ -199,6 +199,13 @@ and fallbacks (`docs/TRISTREAM.md` section 12):
   singing-only evaluation; round three (section 14): a sustain-aware alignment prior for melismas, a codebook
   register audit with high-register oversampling, rooms and EQ on every training input against dry targets,
   a per-frame formant curve with a pop detector, and a two-block look-ahead switched on before drops;
+* **2.4.0**: TriStream finishes each molab session cleanly (it saves, pushes and stops 30 minutes before the
+  12-hour limit, and the next session goes on from there); the prepare stage keeps a record per clip, so a
+  stopped prepare resumes at the clip it reached instead of the first one; a failure that comes back three
+  times in a row stops the run instead of retrying for days; pitch targets from YIN (no octave errors on low
+  voices, frames centred on their time); a blurred pitch target decoded below a bin; and a benchmark suite
+  (`helix tristream bench`, [docs/BENCHMARKS.md](docs/BENCHMARKS.md)) run after every eval, with results on
+  the Hub. The one notebook cell is [notebooks/tristream_molab_cell.py](notebooks/tristream_molab_cell.py);
 * **2.3.4**: the GPU is fed by every CPU core but two (worker processes building small chunks, joined on the
   GPU from pinned memory; threads when `/dev/shm` is small or a worker dies), the batch is the fastest one for
   the card (doubled while clips per second rise, never just the largest), schedules count clips instead of

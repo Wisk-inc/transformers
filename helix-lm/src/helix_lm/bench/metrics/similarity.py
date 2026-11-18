@@ -1,28 +1,47 @@
 # Copyright 2026 Nathan. Licensed under the Apache License, Version 2.0.
 """
-Voice similarity: the cosine of two voice embeddings.
+Voice similarity.
 
-With TriStream's codec and speaker encoder (:func:`encoder_from`), the embedding is the one the model was trained
-to match. Without them the fallback is the mean and spread of 20 mel cepstra over the loud frames: a weak voice
-print, enough to rank systems on one set and to catch a conversion that kept the source's voice, not a speaker
-verification score.
+With TriStream's codec and speaker encoder (:func:`encoder_from`, or any ``embed``), it is the cosine of two
+embeddings, the measure the model was trained on. Without one the fallback compares the long-term spectral
+envelope: the mean of the first 12 mel cepstra over each signal's frames within 20 dB of its loudest (each frame's
+bands held within 50 dB of its loudest band), turned into a distance in dB (the scale of mel cepstral distortion)
+and then into ``exp(-distance / 4 dB)``. On the synthetic voices one singer on two notes is 1.3 to 1.7 dB apart
+(about 0.7), two singers on one vowel 3.6 to 4.0 dB (about 0.4). It also moves with the vowels sung, so it ranks
+systems on one set and catches a conversion that kept the source's voice; it is not a speaker verification score.
+
+Until 2.4.0 the fallback was the cosine of the cepstra's mean and spread. That cosine scored a harmonic-noise copy
+of a take at -0.6 against the take itself and two different singers at 0.96, so it could not tell a converted
+voice from the source; it was replaced before any results were published.
 """
 
 from __future__ import annotations
+
+import math
 
 import torch
 
 from .mfcc import mel_cepstrum
 
+#: dB of cepstral distance at which the fallback similarity falls to 1/e
+SCALE_DB = 4.0
+_DB = 10.0 / math.log(10.0) * math.sqrt(2.0)          # the mel cepstral distortion constant
 
-def cepstral_print(wave: torch.Tensor, sample_rate: int) -> torch.Tensor:
-    c = mel_cepstrum(wave, sample_rate, n_coeffs=21)
-    level = c[:, 0]
-    loud = c[level > level.max() - 2.0][:, 1:] if c.shape[0] else c[:, 1:]
-    if loud.shape[0] < 2:
-        loud = c[:, 1:]
-    v = torch.cat([loud.mean(0), loud.std(0, unbiased=False)])
-    return v / v.norm().clamp(min=1e-9)
+
+def cepstral_print(wave: torch.Tensor, sample_rate: int, n_coeffs: int = 13, within_db: float = 20.0,
+                   floor_db: float = 50.0):
+    """The mean of cepstra ``1..n_coeffs-1`` over the frames within ``within_db`` of the loudest one, with each
+    frame's bands held within ``floor_db`` of its loudest band."""
+    c = mel_cepstrum(wave, sample_rate, n_coeffs=n_coeffs, floor_db=floor_db)
+    if c.shape[0] == 0:
+        return torch.zeros(n_coeffs - 1)
+    level_db = c[:, 0] * math.sqrt(2.0) * 20.0 / math.log(10.0)      # c0 is the mean log amplitude / sqrt(2)
+    keep = level_db > level_db.max() - within_db
+    return c[keep][:, 1:].mean(0)
+
+
+def envelope_distance_db(a: torch.Tensor, b: torch.Tensor, sample_rate: int) -> float:
+    return _DB * float((cepstral_print(a, sample_rate) - cepstral_print(b, sample_rate)).norm())
 
 
 def encoder_from(codec, speaker_encoder):
@@ -39,7 +58,8 @@ def encoder_from(codec, speaker_encoder):
 
 
 def speaker_similarity(a: torch.Tensor, b: torch.Tensor, sample_rate: int, embed=None) -> float:
-    embed = embed or cepstral_print
+    if embed is None:
+        return math.exp(-envelope_distance_db(a, b, sample_rate) / SCALE_DB)
     ea, eb = embed(a, sample_rate), embed(b, sample_rate)
     return float((ea * eb).sum() / (ea.norm() * eb.norm()).clamp(min=1e-9))
 
@@ -54,4 +74,5 @@ def similarity_metrics(pred: torch.Tensor, target_voice: torch.Tensor, sample_ra
     return out
 
 
-__all__ = ["cepstral_print", "encoder_from", "similarity_metrics", "speaker_similarity"]
+__all__ = ["SCALE_DB", "cepstral_print", "encoder_from", "envelope_distance_db", "similarity_metrics",
+           "speaker_similarity"]

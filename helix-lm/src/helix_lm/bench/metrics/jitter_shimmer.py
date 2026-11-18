@@ -30,7 +30,10 @@ def jitter_shimmer(wave: torch.Tensor, sample_rate: int, frame_rate: float = 100
     wave = wave.flatten().float()
     f0 = estimate_f0(wave[None], sample_rate, frame_rate)[0].double()
     hop = int(round(sample_rate / frame_rate))
-    peaks = wave[: f0.numel() * hop].reshape(-1, hop).abs().max(-1).values.double() if wave.numel() >= hop else None
+    # one peak per pitch frame: the tracker gives a frame past the last full hop, so the wave is padded to match
+    # (without it a voice that ran to the end of the clip had no shimmer at all)
+    padded = torch.nn.functional.pad(wave, (0, max(0, f0.numel() * hop - wave.numel())))
+    peaks = padded[: f0.numel() * hop].reshape(-1, hop).abs().max(-1).values.double() if wave.numel() >= hop else None
     jit, shim = [], []
     for a, b in _runs(f0 > 0):
         period = 1.0 / f0[a:b]

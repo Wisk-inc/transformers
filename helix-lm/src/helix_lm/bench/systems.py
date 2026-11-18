@@ -24,15 +24,21 @@ class TriStream:
     supports = ("resynthesis", "svc", "svs", "pitch_control", "technique", "robustness", "longform", "speed",
                 "register")
 
-    def __init__(self, converter, steps: int = 16) -> None:
+    def __init__(self, converter, steps: int = 16, tag: str = "") -> None:
         self.converter, self.steps = converter, steps
+        # outputs are cached under this name: a new checkpoint gets a new name, so its outputs are made again
+        # instead of the last checkpoint's being scored again
+        self.name = f"tristream-{tag}" if tag else "tristream"
 
     @classmethod
     def from_root(cls, root: str | Path, size: str = "ts-765m", device=None) -> TriStream | None:
         from ..music.conversion import load_converter
 
         converter = load_converter(root, size, device)
-        return None if converter.model is None else cls(converter)
+        if converter.model is None:
+            return None
+        return cls(converter, tag=checkpoint_tag(Path(root) / "codec" / "codec.pt",
+                                                 Path(root) / "runs" / size / "latest.pt"))
 
     def resynthesize(self, wave: torch.Tensor, sample_rate: int) -> torch.Tensor:
         codec = self.converter.codec
@@ -60,6 +66,14 @@ class TriStream:
         return self.convert(guide, reference, sample_rate)
 
 
+def checkpoint_tag(*paths: Path) -> str:
+    """A short name for the exact checkpoint files: their sizes and times of change."""
+    import hashlib
+
+    parts = [f"{p.stat().st_size}:{p.stat().st_mtime_ns}" for p in paths if p.exists()]
+    return hashlib.sha1("|".join(parts).encode()).hexdigest()[:10]
+
+
 def make(name: str, root: str | Path | None = None, size: str = "ts-765m"):
     """A system by name: a baseline, or ``tristream`` (needs ``root``); None when TriStream is not trained yet."""
     if name in BASELINES:
@@ -69,4 +83,4 @@ def make(name: str, root: str | Path | None = None, size: str = "ts-765m"):
     raise KeyError(f"no system {name!r}; there are {', '.join([*BASELINES, 'tristream'])}")
 
 
-__all__ = ["TriStream", "make"]
+__all__ = ["TriStream", "checkpoint_tag", "make"]

@@ -30,7 +30,10 @@ def lpc(frame: np.ndarray, order: int) -> np.ndarray:
 
 def formants(wave: torch.Tensor, sample_rate: int, frame_ms: float = 25.0, hop_ms: float = 10.0,
              max_frames: int = 400) -> np.ndarray:
-    """``(frames, 2)`` F1 and F2 in Hz of the loud frames (NaN where none was found)."""
+    """``(frames, 2)`` F1 and F2 in Hz of the loud frames (NaN where none was found). LPC finds formants when
+    the harmonics are close together: on a source-filter vowel it is within 12% at 100 and 220 Hz, and at 440 Hz
+    it reports harmonics instead (F1 near 440 Hz for every vowel). No benchmark task scores formants; use it on
+    speech or low sung notes."""
     target = 11025
     x = resample(wave.flatten().double(), sample_rate, target).numpy()
     x = np.append(x[0], x[1:] - 0.97 * x[:-1])                               # pre-emphasis
@@ -51,7 +54,7 @@ def formants(wave: torch.Tensor, sample_rate: int, frame_ms: float = 25.0, hop_m
         roots = roots[np.imag(roots) > 0]
         freqs = np.angle(roots) * target / (2 * math.pi)
         bw = -0.5 * target / math.pi * np.log(np.abs(roots) + 1e-12)
-        cand = np.sort(freqs[(freqs > 90) & (bw < 400)])
+        cand = np.sort(freqs[(freqs > 200) & (bw < 400)])        # under 200 Hz it is the voice's first harmonic
         out.append([cand[0] if len(cand) > 0 else np.nan, cand[1] if len(cand) > 1 else np.nan])
     return np.array(out, dtype=np.float64).reshape(-1, 2)
 

@@ -15,7 +15,7 @@ ANCHORS = {                    # metric: (floor, target, weight)
     "ffe": (0.2, 0.0, 1.0),
     "vuv_error": (0.2, 0.0, 1.0),
     "mcd_db": (10.0, 2.0, 1.5),
-    "speaker_similarity": (0.5, 0.95, 2.0),
+    "speaker_similarity": (0.4, 0.9, 2.0),        # 0.4: another singer on the same vowel (fallback print)
     "note_accuracy": (0.5, 1.0, 1.5),
     "consonant_clarity": (0.3, 1.0, 1.0),
     "quality_proxy": (0.0, 1.0, 1.0),

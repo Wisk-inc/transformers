@@ -467,11 +467,28 @@ def strip_breaths(x: torch.Tensor, sample_rate: int, threshold_db: float = -32.0
 
 
 # -------------------------------------------------------------------------------------------- glitches --
+def _neighbour_peak(diff: torch.Tensor, reach: int, guard: int) -> torch.Tensor:
+    """The largest value within ``reach`` samples of each point, leaving out the ``guard`` samples around it."""
+    flat = diff.reshape(-1, diff.shape[-1])[:, None].float()
+    k = max(1, reach - guard + 1)
+    pooled = torch.nn.functional.max_pool1d(torch.nn.functional.pad(flat, (reach, reach)), k, stride=1)[:, 0]
+    n = diff.shape[-1]
+    left = pooled[:, :n]                                     # max of diff[i - reach : i - guard + 1]
+    right = pooled[:, reach + guard : reach + guard + n]     # max of diff[i + guard : i + reach + 1]
+    if right.shape[-1] < n:
+        right = torch.nn.functional.pad(right, (0, n - right.shape[-1]))
+    return torch.maximum(left, right).reshape(diff.shape).to(diff.dtype)
+
+
 def detect_glitches(x: torch.Tensor, sample_rate: int) -> dict:
     """Clicks (sample-to-sample jumps far above the local level), dropouts (sudden silence), clipping, DC offset."""
     diff = (x[..., 1:] - x[..., :-1]).abs()
     local = rms_envelope(diff, sample_rate, 20.0) + 1e-4  # the usual sample-to-sample motion around each point
-    clicks = ((diff > 6 * local) & (diff > 0.05)).nonzero().flatten()
+    # a click is a jump far above the largest jump nearby (outside 1.5 ms around it). A bright voice has a sharp
+    # edge at every glottal closure, well above its average motion: those come back one period later, so they
+    # are not clicks. Without this every period of a bright voice was "repaired" (smoothed over 2.7 ms).
+    neighbour = _neighbour_peak(diff, int(0.025 * sample_rate), int(0.0015 * sample_rate))
+    clicks = ((diff > 6 * local) & (diff > 0.05) & (diff > 2.5 * neighbour)).nonzero().flatten()
     env = rms_envelope(x, sample_rate, 5.0)
     quiet = env < 1e-4
     loud_before = torch.roll(env, int(0.02 * sample_rate)) > 0.02

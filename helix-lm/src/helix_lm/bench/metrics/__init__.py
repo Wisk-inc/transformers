@@ -40,7 +40,7 @@ _ROWS = [
     ("shimmer_error", "share", "lower", "period-to-period amplitude shimmer difference"),
     ("formant_error_hz", "Hz", "lower", "F1 and F2 error"),
     ("tilt_error_db", "dB/oct", "lower", "spectral tilt difference"),
-    ("speaker_similarity", "", "higher", "cosine similarity of voice embeddings"),
+    ("speaker_similarity", "", "higher", "voice similarity: embedding cosine, or the envelope print (1 = same)"),
     ("fad", "", "lower", "Frechet distance between embedding distributions"),
     ("quality_proxy", "", "higher", "signal-based quality proxy (not a listening test)"),
     ("glitches_per_minute", "1/min", "lower", "clicks and dropouts"),

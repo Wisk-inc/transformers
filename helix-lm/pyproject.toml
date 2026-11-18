@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "helix-lm"
-version = "2.3.4"
+version = "2.4.0"
 description = "HELIX, ANANSI and TriStream-2: linear-scaling sequence architectures with exact long-range recall, the engine that trains them (Muon, muP, growth), and a music stack (analysis, frisson critic, conductor, separation, singing voice conversion)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -73,7 +73,7 @@ helix = "helix_lm.cli:main"
 packages = ["src/helix_lm"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/helix_lm", "tests", "docs", "README.md", "LICENSE", "NOTICE", "pyproject.toml"]
+include = ["src/helix_lm", "tests", "docs", "notebooks", "README.md", "LICENSE", "NOTICE", "pyproject.toml"]
 
 [tool.ruff]
 line-length = 119

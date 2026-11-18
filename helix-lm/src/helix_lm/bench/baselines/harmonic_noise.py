@@ -23,10 +23,22 @@ LIFTER = 40                     # cepstral coefficients kept for the envelope
 
 
 def envelope(wave: torch.Tensor, sample_rate: int, n_fft: int = 1024) -> torch.Tensor:
-    """``(frames, bins)`` log-amplitude spectral envelope at ``RATE`` frames a second."""
+    """``(frames, bins)`` log-amplitude spectral envelope at ``RATE`` frames a second.
+
+    The spectrum is first raised to its peaks over one harmonic spacing (a running maximum as wide as the take's
+    median pitch), then smoothed in the cepstrum. Smoothing the raw spectrum averages the harmonic peaks with the
+    deep valleys between them: the envelope then sat 10 dB low under 1.5 kHz and the copy lost the voice's tilt
+    (its long-term envelope was 13 dB from the take's, further than another singer's)."""
     hop = int(round(sample_rate / RATE))
     window = torch.hann_window(n_fft, dtype=torch.float64)
-    spec = torch.stft(wave.flatten().double(), n_fft, hop, window=window, return_complex=True).abs().T
+    wave = wave.flatten().double()
+    spec = torch.stft(wave, n_fft, hop, window=window, return_complex=True).abs().T
+    f0 = yin_f0(wave.float(), sample_rate, RATE)
+    voiced = f0[f0 > 0]
+    if voiced.numel():
+        width = int(float(voiced.median()) / (sample_rate / n_fft)) | 1             # odd, about one harmonic
+        if width >= 3:
+            spec = torch.nn.functional.max_pool1d(spec[:, None], width, stride=1, padding=width // 2)[:, 0]
     log = torch.log(spec.clamp(min=1e-7))
     cep = torch.fft.irfft(log, n=n_fft)
     cep[:, LIFTER : n_fft - LIFTER + 1] = 0

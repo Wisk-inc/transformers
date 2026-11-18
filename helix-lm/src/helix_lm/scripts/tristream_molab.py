@@ -2011,6 +2011,18 @@ def stage_eval(args) -> None:
     (root / "eval").mkdir(parents=True, exist_ok=True)
     (root / "eval" / "summary.json").write_text(json.dumps(summary, indent=1))
     log("eval:", summary)
+    # the benchmark suite against the baselines, the change from the last run, results to the Hub; never stops
+    # the run (a benchmark that cannot run is said, and the model is still pushed)
+    try:
+        if session().left_hours() < 1.0:
+            log("[bench] not run: under an hour of this session is left; it runs at the next eval")
+        else:
+            from helix_lm.scripts.tristream_bench import run as bench
+
+            bench(root, args.size, "standard" if (root / "raw" / "vocalset").exists() else "quick",
+                  args.hf_repo or None, token(), log=log)
+    except Exception as error:
+        log(f"[bench] not run ({type(error).__name__}: {str(error)[:160]})")
     mark(root, "eval")
 
 
@@ -2047,7 +2059,8 @@ def stage_eta(args) -> None:
         log(f"  {name:34} {hours:8.1f}   {note}")
     log(f"  {'total':34} {total:8.1f}   = {total / 24:.1f} days")
     log(f"  pushes every {args.push_every_hours:.0f} h to {args.hf_repo or '(no repo)'}")
-    log("shorter plan: --codec-hours 72 --refiner-hours 24 --train-hours 72 is about 7.5 days")
+    if total > 24 * 7.5:                       # only worth saying when the plan is longer than the shorter one
+        log("shorter plan: --codec-hours 72 --refiner-hours 24 --train-hours 72 is about 7.5 days")
 
 
 # ------------------------------------------------------------------------------------------- swap --

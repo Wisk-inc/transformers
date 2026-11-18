@@ -30,7 +30,7 @@ from .model import (
 )
 from .tokenizer import HelixTokenizer, train_tokenizer
 
-__version__ = "2.3.4"
+__version__ = "2.4.0"
 __author__ = "Nathan"
 
 __all__ = [
