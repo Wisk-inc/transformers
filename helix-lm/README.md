@@ -149,6 +149,45 @@ HelixConfig(
 )
 ```
 
+## 2.5: Pinxit, a painter
+
+Pinxit (`helix_lm.paint`, [docs/PINXIT.md](docs/PINXIT.md)) paints a photo stroke by stroke. It does not start
+from noise. It decides what the picture is about, mixes a palette and lays brush strokes from broad to fine,
+each with a brush, two pigment mixes, a pressure and a speed. What comes back is the list of strokes, so a
+painting can be rendered at any size, replayed, saved with its memory and changed later.
+
+```bash
+pip install "helix-lm[paint]"
+```
+
+```python
+from helix_lm.paint import load_eye, paint
+
+eye = load_eye()                                         # SigLIP 2: it finds the subject
+painting = paint("photo.jpg", style="mona lisa", emotion="majesty", eye=eye)
+painting.save("painting.png")
+painting.save("painting.pinxit")                         # with its memory: add to it, rework it, undo
+```
+
+* **the hand shows**: a heavy stroke is wide, thick and pools where it lands; a fast one runs dry, shows the
+  brush's hairs and ends ragged; a slow one trembles. The canvas has a weave that a dry brush skips, and a
+  saved picture shows the canvas's bare edge;
+* **it holds back**: the subject is finished, the rest is left broad, and a part that is not to be finished is
+  put in with one fast stroke;
+* **it distorts on purpose**: the frame is cut to place the subject, the photo is seen in planes and tones
+  before a stroke is made, lights are pushed warm and shadows cool, contrast is raised at the subject;
+* **style from a painting**: give it a picture of any painting, or the name of one of fourteen famous ones.
+  It measures the palette, how hard the edges are, whether shapes are outlined and how much the paint shows,
+  carries the photo's colours onto the painting's and works that way (soft glazes after Leonardo, short loaded
+  marks after Van Gogh, drawn outlines after Hokusai);
+* **memory**: `painting.add(image=...)`, `touch`, `rework`, `undo` (exact), also after saving and reopening;
+* **a model to train**: Pinxit on the Helix trunk with SigLIP 2 as its eye, fine-tuned through small adapters.
+  One notebook cell trains it in 12-hour sessions: [notebooks/pinxit_molab_cell.py](notebooks/pinxit_molab_cell.py).
+
+It runs today on a CPU without trained weights (written rules propose the strokes, gradient descent settles
+them). No GPU run has been made yet, and painting from words does not work well enough to use; the document
+says what was checked and what was not.
+
 ## 2.0: ANANSI, faster learning, audio
 
 2.0 is a major upgrade documented in [`docs/ANANSI.md`](docs/ANANSI.md), with the evidence behind every piece:

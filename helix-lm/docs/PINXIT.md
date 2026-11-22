@@ -12,25 +12,27 @@ pip install "helix-lm[paint]"
 ```
 
 ```python
-from helix_lm.paint import paint
+from helix_lm.paint import load_eye, paint
 
-painting = paint("photo.jpg", style="a_painting.jpg", emotion="majesty")
-painting.save("painting.png")           # the picture, 1600 pixels wide
-painting.save("painting.pinxit")        # the painting with its memory, to change later
-painting.save("painting.gif")           # how it was painted
+eye = load_eye()                         # a pretrained vision model that finds the subject (section 6)
+painting = paint("photo.jpg", style="mona lisa", emotion="majesty", eye=eye)
+painting.save("painting.png")            # the canvas, 1600 pixels wide, with its bare edge
+painting.save("painting.pinxit")         # the painting with its memory, to change later
+painting.save("painting.gif")            # how it was painted
 ```
 
 ```bash
-helix paint make photo.jpg --style a_painting.jpg --emotion majesty --out painting.png --keep painting.pinxit
-helix paint make photo.jpg --emotion tenderness --eye siglip --sheet passes.png
+helix paint make photo.jpg --style "the starry night" --eye siglip --out painting.png --keep painting.pinxit
+helix paint make photo.jpg --style my_favourite_painting.jpg --emotion tenderness --sheet passes.png
 helix paint change painting.pinxit --add boat.png --box 0.2,0.5,0.5,0.8 --out painting2.png
 helix paint change painting.pinxit --undo
-helix paint read a_painting.jpg         # the style and the feeling measured from a painting
+helix paint read a_painting.jpg          # the style and the feeling measured from a painting
+helix paint styles                       # the famous paintings whose style can be asked for by name
 ```
 
 This runs today, on a CPU, with no trained weights: a hand made of written rules proposes the strokes and
 gradient descent settles them. A photo takes about a minute. The trained model does the same job in one pass
-per layer of the painting; section 8 says how to train it and section 10 what has and has not been checked.
+per layer of the painting; section 9 says how to train it and section 11 what has and has not been checked.
 
 ![A lake at sunrise, painted with the feeling "majesty"](pinxit/lake_majesty.jpg)
 
@@ -45,16 +47,38 @@ Pressure and speed are not decoration. They change the mark, the way they do on 
 
 - a heavy stroke is wider and denser, leaves thicker paint, pools where the brush lands and lifts, and has
   ridges along its edges;
-- a fast stroke runs dry towards its end, shows the bristles and ends in a flick;
+- a fast stroke runs dry towards its end, shows the hairs of the brush and ends in a flick;
 - a slow stroke trembles a little.
 
-Thick paint catches the light in the final render. `painting.performance()` gives every stroke with the time it
-starts and how long it takes, so the painting can be replayed as gestures.
+`painting.performance()` gives every stroke with the time it starts and how long it takes, so the painting can
+be replayed as gestures.
 
 Colours are mixed as pigments (Kubelka and Munk's model), so blue and yellow make green and not grey. They come
 from a palette of twelve taken from the style, or from the photo when no style is given.
 
-## 2. The passes
+## 2. Paint and canvas
+
+An early version looked like a photo with a filter on it. Seen at full size the reasons were plain: every
+stroke was a smooth blob, its "bristle marks" ran in rings round its tip like contour lines on a map, there was
+no canvas, and the strokes followed every gradient of the photo. This is what changed.
+
+- **Hairs.** A brush is a row of hairs. Each leaves its own track along the stroke, a little lighter or darker
+  than its neighbour's. The tracks run straight on past the stroke's end, each hair lifts off at its own
+  moment, so a fast or dry stroke ends ragged, and along a track the paint breaks up as the brush runs out.
+- **Canvas.** The canvas has a weave. A dry brush catches only the tops of the threads. Thin paint lets the
+  weave show and thick paint buries it. Thick paint catches the light.
+- **The edge.** A saved picture shows the canvas as it would be photographed, with a bare, toned edge where
+  the strokes stop. `border=0` cuts it off.
+- **Planes.** A photo holds every pore and every smooth gradient. Before a stroke is made the photo is seen
+  the way a painter squints at a subject: small differences inside a shape are levelled, the borders between
+  shapes are kept, and light and dark are gathered into a handful of tones. The subject keeps more of its
+  modelling than the rest. `abstraction=0` keeps every detail.
+
+![The corner of a painting at full size: bare canvas, hair tracks, ragged ends](pinxit/surface.jpg)
+
+The check that called an early sample "hard to say, perhaps a filter" has not been run on these. Section 11.
+
+## 3. The passes
 
 The canvas is toned first. Then it is painted in passes, each on a grid twice as fine as the last. The first
 two cover the whole canvas with broad strokes. The middle ones work where the canvas is still far from the plan.
@@ -64,11 +88,11 @@ The last is only for the subject. A stroke that would change nothing is not made
 
 ![The photo, the plan and each pass](pinxit/passes.jpg)
 
-## 3. What makes it look painted by someone
+## 4. What makes it look painted by someone
 
 Three things were asked of it. Each is a part of the code you can read and turn up or down.
 
-**The trace of the hand.** Section 1: pressure and speed are part of every stroke and shape the mark.
+**The trace of the hand.** Sections 1 and 2: pressure and speed are part of every stroke and shape the mark.
 
 **Restraint.** A plan says how finished each part should be. The subject gets the finest pass. The rest is
 left broader, and a part that is not to be finished but is still wrong is put in with one fast, dry stroke
@@ -93,30 +117,71 @@ are not learned from data, and they will sometimes be wrong for a picture. Every
 | `work` | 512 | the size the painting is planned at; larger means more and finer strokes |
 | `compose` | 0.6 | how far the frame may be cut to place the subject; 0 keeps the photo's frame |
 | `exaggerate` | 0.6 | how far the subject, the posture and the colours are pushed; 0 keeps the photo |
+| `abstraction` | 0.6 | how far the photo is seen in planes and tones; 0 keeps every detail |
 | `restraint` | from the feeling | how much is left unfinished |
-| `style_strength` | 0.8 | how far the colours move to the style's |
+| `style_strength` | 0.8 | how far the colours and the handling move to the style's |
 | `palette_strength` | 0.7 | how closely strokes keep to the palette |
 | `budget` | 2600 | the most strokes after the first two passes |
+| `weave` | 0.6 | how much the canvas's cloth shows; 0 paints on a smooth board |
+| `border` | 0.025 | the bare edge round a saved picture, as a share of its width |
 | `seed` | 0 | another seed, another painting of the same plan |
 
-## 4. Feeling and style
+## 5. Style: give it a painting
+
+`style` is a picture of a painting, yours or anyone's. Pinxit measures it and paints the photo that way.
+
+```python
+painting = paint("me.jpg", style="that_painting_i_love.jpg", eye=eye)
+card = read_style("that_painting_i_love.jpg")      # what was measured, to look at or keep
+```
+
+What is measured:
+
+- **the palette**: twelve pigments and how much of the picture each takes, the tone of the ground, and how the
+  colours spread (which hues go with which tones);
+- **edges**: in the middle of its strong edges, how much steeper is an edge seen sharply than seen blurred? A
+  clean cut measures 2.47, the same cut blurred by three pixels 1.43. The Mona Lisa is the softest of fourteen
+  famous paintings (1.84), Monet's Water Lilies the crispest (2.53);
+- **outlines**: thin marks darker than what lies on both sides of them. Van Gogh's Bedroom has the most,
+  Hokusai's Great Wave comes next, the Mona Lisa has none;
+- **paint**: how much detail there is at the size of a brush mark. Leonardo and Vermeer show none, Van Gogh and
+  Monet show it everywhere; and how much of the picture is even colour, as in Hokusai's print;
+- how long and wide the marks are, which way they run, and the feeling of the colours.
+
+What the painter then does with it:
+
+- the photo's whole cloud of colours is carried onto the painting's (not channel by channel: a blue flag painted
+  after a brown and olive painting becomes one of that painting's darks) and drawn toward its pigments;
+- for soft edges every brush is softened, the paint goes on in thin layers with the wash, and the gradations
+  are kept instead of being stepped;
+- for outlines the borders between the planes are drawn in the darkest pigment;
+- where the picture is built from marks of paint (its paint shows, and it is not made of even areas the way
+  a print is), a last pass lays short marks all over the canvas, each close to one pigment and a little lighter
+  or darker than its neighbour, following the style's flow. Thick paint is lit more strongly.
+
+Fourteen famous paintings come measured with the package, so no picture is needed: `style="mona lisa"`,
+`"the starry night"`, `"the great wave"`, `"girl with a pearl earring"`, `"water lilies"`, `"the scream"`,
+`"the birth of venus"`, `"the night watch"`, `"the kiss"` and more. A painter's name works too (`"vermeer"`).
+`helix paint styles` lists them. Only the measurements are in the package, not the pictures.
+
+![The Mona Lisa, and a portrait painted after it](pinxit/after_mona_lisa.jpg)
+
+![The Starry Night, and a lake painted after it](pinxit/after_starry_night.jpg)
+
+![The Great Wave, and a cat painted after it](pinxit/after_great_wave.jpg)
+
+What this is and is not: the palette, the tones, the edges, the outlines and the kind of mark carry over. The
+drawing does not. A portrait painted after the Mona Lisa has her colours and her soft edges, not Leonardo's
+hand.
 
 `emotion` is one of eight: awe (also called majesty), serenity, joy, tenderness, melancholy, fear, anger,
 mystery. A feeling is a set of numbers that reach into everything above: how saturated and warm the colours are,
-the key and the contrast, how fast and heavy the strokes are, how long and bent, how much is left unfinished,
-which brushes are used and which way the strokes flow.
+the key and the contrast, how fast and heavy the strokes are, how much is left unfinished, which brushes are
+used and which way the strokes flow. A style passes on its own feeling when you give none. That feeling is read
+from the colours alone (the formulas of Valdez and Mehrabian, 1994). It is a starting point. It does not know
+what the painting shows.
 
-`style` is a painting. `read_style` measures it: its palette, its lights and darks, the length, width, bend and
-texture of its strokes, how its strokes flow, which brushes it suggests, and the feeling of its colours. The
-photo is then painted with those. A style also passes on its feeling when you give none.
-
-The feeling read from a painting comes from its colours alone (the formulas of Valdez and Mehrabian, 1994, for
-how pleasant, arousing and dominant a colour feels). It is a starting point. It does not know what the painting
-shows.
-
-![A cat painted with the palette and strokes of Van Gogh's Bedroom](pinxit/cat_van_gogh.jpg)
-
-## 5. The eye
+## 6. The eye
 
 The rules find the subject by colour and contrast. That is often wrong: in a portrait the badge on the jacket
 has more contrast than the face. A pretrained vision model knows better. Pinxit uses SigLIP 2
@@ -135,13 +200,13 @@ patch features do not say this by themselves; four ways of reading them were tri
 patches.) It costs 37 looks, about five seconds on a CPU.
 
 Below, the same photo with the same settings. Without the eye the badge and the helmet got the finest work and
-the face stayed rough. With it the face is finished and the rest is left loose.
+the face stayed rough. With it the face is finished and the rest is left loose. For portraits, use the eye.
 
 ![Left: planned by colour and contrast alone. Right: planned with the eye.](pinxit/portrait_eye.jpg)
 
 DINOv2 (`facebook/dinov2-small`) works as a smaller eye. It does not read text.
 
-## 6. Memory, and changing a painting
+## 7. Memory, and changing a painting
 
 A `.pinxit` file holds everything that was done: every stroke in order, the plan, the palette, the feeling,
 what the model remembers of each place, and the history of changes. Open it a year later and go on.
@@ -164,10 +229,10 @@ and opened again. A change that fails half-way leaves the painting as it was.
 A picture with transparency is painted in as a cut-out. Its light and colour are moved halfway to those of the
 place it goes to, and it is painted with the painting's own palette and brushes.
 
-`painting.add(text="a small red boat", box=..., eye=eye)` paints from words. There is no picture to copy, so
-strokes are moved until the eye says the box looks like the words. Read section 10 before relying on it.
+`painting.add(text="a small red boat", box=..., eye=eye)` tries to paint from words. It does not work well
+enough to use: see section 11. To add something, give a picture of it.
 
-## 7. The model
+## 8. The model
 
 The rules hand works one stroke at a time and needs dozens of gradient steps per pass. The model is trained to
 give all the strokes of a canvas cell at once.
@@ -175,8 +240,8 @@ give all the strokes of a canvas cell at once.
 It is a fine-tune in the usual sense: a pretrained base, small trained adapters in it, and a new part on top.
 
 - **The eye** is the base. SigLIP 2 stays as it was trained. Low-rank adapters (LoRA, rank 16, 2.4M numbers) are
-  added to the attention layers of its vision half and trained. Words are always judged by the eye without the
-  adapters, so training cannot pull pictures and words apart.
+  added to the attention layers of its vision half and trained. Words and the subject are always judged by the
+  eye without the adapters, so training cannot pull those apart.
 - **Pinxit** is the new part. For each cell of the canvas it reads a short sequence: a brief (which pass, how
   finished this place should be, which way strokes flow here), the style, the feeling, what it remembers of this
   place, what the eye sees here, the twelve pigments, and 64 tokens of the window (the plan, the canvas so far
@@ -200,15 +265,15 @@ painting.
 from helix_lm.paint import load_hand, paint
 
 hand, eye = load_hand("CorxLabs/Pinxit-1")       # a checkpoint file or a Hub repository
-painting = paint("photo.jpg", style="a_painting.jpg", emotion="majesty", hand=hand, eye=eye)
+painting = paint("photo.jpg", style="mona lisa", emotion="majesty", hand=hand, eye=eye)
 ```
 
 `load_hand` gives the model and the eye it was trained with, adapters loaded. `polish` (0.25) is the share of
 the rules hand's gradient steps still run on the model's strokes; 0 takes them as they are.
 
-To fine-tune it further on your own pictures, put them in the training folder (section 8) and run more hours.
+To fine-tune it further on your own pictures, put them in the training folder (section 9) and run more hours.
 
-## 8. Training
+## 9. Training
 
 Two stages.
 
@@ -221,6 +286,10 @@ plan the model lays its strokes on a canvas that looks the way earlier passes wo
 on how close the canvas comes to the plan where it matters, on whether its strokes are as fast, heavy, long and
 wide as the rules say they should be in that place (that is where the gestures come from), and on whether it
 made as many strokes as it was allowed. The eye's adapters are trained in this stage.
+
+One plan in four is not a photo. It is one of the paintings, copied as it is with its own style card, the way a
+student copies in a museum. That is how the model meets brushwork made by a hand and learns what strokes a
+style card stands for.
 
 The pictures come from open collections, fetched by the program and listed with their sources:
 
@@ -256,7 +325,7 @@ practice sheets, or as many cells of real pictures, as fill 88% of the memory. A
 of several pictures at once, and when they hold more cells than fit, the rest go through without gradients. A
 step that still runs out of memory is dropped and the next ones are made smaller.
 
-## 9. Scores
+## 10. Scores
 
 `helix_lm.paint.bench.judge(painting)` measures whether a painting did what was asked of it:
 
@@ -272,13 +341,16 @@ step that still runs out of memory is dropped and the next ones are made smaller
 
 They say nothing about whether a painting is good. That needs eyes.
 
-## 10. What has been checked, and what has not
+## 11. What has been checked, and what has not
 
 Checked here, on a CPU:
 
-- the engine on real photos and real paintings as styles, by eye and with the scores;
+- the engine on real photos, by eye at full size and with the scores, before and after the changes of section 2;
+- style copying on the Mona Lisa, The Starry Night, the Great Wave and Van Gogh's Bedroom, by eye, and the
+  measurements on fourteen paintings and on plain shapes blurred by known amounts;
 - saving, opening, adding a picture, touching up, reworking and undoing, with undo exact to the bit;
-- the real SigLIP 2 eye: it matches four test photos to the right words, its adapters train, save and load;
+- the real SigLIP 2 eye: it matches four test photos to the right words, it finds the face in a portrait, its
+  adapters train, save and load;
 - every stage of the training program on a small scale, with the real eye, including a session that ends in the
   middle and a run that goes on from the Hub;
 - a test that tags every tensor that would be on the GPU and fails if one meets a CPU tensor. It found one
@@ -286,11 +358,21 @@ Checked here, on a CPU:
 
 Not checked:
 
+- **Whether a checker calls the pictures hand-made.** An early sample was judged "hard to say, perhaps a
+  filter" by Google's check. The causes that could be seen are fixed (section 2) and at full size the pictures
+  now show hair tracks, ragged ends, canvas and a bare edge. The check itself has not been run again, so that
+  is still open. Nothing was done to fool a checker: the changes are to how the paint is laid.
 - **No GPU run has been made.** The step sizes, the hours and the quality of the trained model are plans.
 - **The trained model has only been trained for a few steps here.** After those it is worse than the rules
   hand, as it should be. How good it gets with 20 GPU hours is not known.
-- **Painting from words is weak.** With the real eye the score for the words goes up, and what appears is a
-  suggestion of the thing at best. To add something, give a picture of it.
+- **Painting from words does not work well enough to use.** With the real eye the score for "a small red
+  sailing boat" went from 0.02 to 0.19, higher than a photo of one would score, and what appeared was a scatter
+  of pale marks and a red smear. The eye can be pleased without a boat being there. It also took fourteen
+  minutes on a CPU. To add something, give a picture of it.
+- Faces are small in most photos. The strokes there are a few pixels wide and a likeness is rough. A larger
+  `work` (768) helps and takes longer.
 - The feeling read from a painting comes from colour statistics. It is a prior, not a judgement.
+- The outline measure also counts dark dashes between lighter ones, so Monet's Water Lilies reads as somewhat
+  outlined.
 - The Met's open collection is not used: its image server answers scripts with a bot check, and that was left
   alone.

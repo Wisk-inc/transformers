@@ -220,10 +220,15 @@ def style_cards(folder, log=print, should_stop=None) -> int:
 class PlanStream(torch.utils.data.IterableDataset):
     """Plans without end for :func:`helix_lm.paint.train.train_pictures`: a photo, a painting's card (or the
     photo's own colours, one time in five), a feeling (the card's own, one of the eight, or none), and the mind's
-    settings varied a little, so the model meets every kind of brief."""
+    settings varied a little, so the model meets every kind of brief.
 
-    def __init__(self, photos: list, paintings: list, work: int = 256, seed: int = 0) -> None:
+    One plan in four (``copies``) is not a photo at all but one of the paintings, to be copied as it is with
+    its own card: nothing reframed, pushed or simplified. That is how the model meets brushwork made by a hand,
+    the way a student copies in a museum, and learns what strokes a style card stands for."""
+
+    def __init__(self, photos: list, paintings: list, work: int = 256, seed: int = 0, copies: float = 0.25) -> None:
         self.photos, self.paintings, self.work, self.seed = list(photos), list(paintings), work, seed
+        self.copies = copies
         if not self.photos:
             raise ValueError("no photos to train on")
 
@@ -237,6 +242,17 @@ class PlanStream(torch.utils.data.IterableDataset):
         rng = random.Random(self.seed * 1000 + (info.id if info else 0) + int.from_bytes(os.urandom(2), "little"))
         while True:
             try:
+                if self.paintings and rng.random() < self.copies:           # a painting, copied as it is
+                    path = Path(rng.choice(self.paintings))
+                    side = path.with_suffix(".card.json")
+                    if side.exists():
+                        picture = load_image(path, max_side=2 * self.work)
+                        if min(picture.shape[-2:]) >= 64:
+                            card = StyleCard.from_json(json.loads(side.read_text()))
+                            yield make_plan(picture, card, feeling_of(card.emotion, 0.7), Settings(
+                                work=self.work, compose=0.0, exaggerate=0.0, abstraction=0.0, style_strength=0.0,
+                                restraint=rng.choice((None, 0.2)), seed=rng.randrange(1 << 20)))
+                            continue
                 photo = load_image(rng.choice(self.photos), max_side=2 * self.work)
                 if min(photo.shape[-2:]) < 64:
                     continue
@@ -253,6 +269,7 @@ class PlanStream(torch.utils.data.IterableDataset):
                         feeling_of(None)
                 settings = Settings(work=self.work, compose=rng.choice((0.0, 0.6, 1.0)),
                                     exaggerate=rng.uniform(0.0, 1.0), restraint=rng.choice((None, rng.random())),
+                                    abstraction=rng.choice((0.0, 0.6, 0.6, 0.9)),
                                     style_strength=rng.uniform(0.4, 1.0), seed=rng.randrange(1 << 20))
                 yield make_plan(photo, card, feeling, settings)
             except (OSError, ValueError, RuntimeError):   # a picture that cannot be read: the next one

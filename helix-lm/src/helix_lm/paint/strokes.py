@@ -109,7 +109,7 @@ def inverse_geometry(cx, cy, half, radius, angle, bend=0.5, taper=0.7, opacity=0
 
 
 def to_absolute(strokes: Strokes, cell_y: torch.Tensor, cell_x: torch.Tensor, cell: float, width: float,
-                level: int) -> torch.Tensor:
+                level: int, soft: float = 1.0) -> torch.Tensor:
     """Window strokes ``(M, N)`` -> rows of a painting ``(M * N kept, ABS)`` in units of the canvas width.
     ``cell_y, cell_x (M,)`` say which cell each window belongs to, ``cell`` is the cell's size in pixels of this
     level's canvas and ``width`` that canvas's width in pixels. The rows come out in painting order: stroke
@@ -122,7 +122,7 @@ def to_absolute(strokes: Strokes, cell_y: torch.Tensor, cell_x: torch.Tensor, ce
     def place(p):
         return (origin[:, None] + p * span) / width
 
-    profile = brush_profile(strokes.brush)
+    profile = brush_profile(strokes.brush, soft)
     rows = torch.cat([place(g["p0"]), place(g["p1"]), place(g["p2"]),
                       (g["r0"] * span / width)[..., None], (g["r1"] * span / width)[..., None],
                       (g["opacity"] * strokes.keep)[..., None], profile, strokes.color, strokes.color2,

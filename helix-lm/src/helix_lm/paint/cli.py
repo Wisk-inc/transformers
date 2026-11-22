@@ -34,7 +34,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     make = sub.add_parser("make", help="paint a photo")
     make.add_argument("photo")
-    make.add_argument("--style", default=None, help="a painting whose style to take")
+    make.add_argument("--style", default=None, help="a painting whose style to take: a picture of it, or the name "
+                                                    "of a famous one ('mona lisa'; see: helix paint styles)")
     make.add_argument("--emotion", default=None, help="awe (majesty), serenity, joy, tenderness, melancholy, fear, "
                                                     "anger, mystery")
     make.add_argument("--out", default="painting.png", help=".png/.jpg picture, .pinxit (to change later), .svg, .gif")
@@ -60,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     read.add_argument("picture")
     read.add_argument("--out", default=None)
     sub.add_parser("sizes", help="the model sizes")
+    sub.add_parser("styles", help="the famous paintings whose style can be asked for by name")
     for p in (make, change):
         p.add_argument("--model", default=None, help="a trained checkpoint or a Hub repository; without it the "
                                                      "untrained hand paints")
@@ -68,6 +70,12 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--eye", default=None, help="without --model: a pretrained eye that says what the photo "
                                                    "is about and reads --words ('siglip' for the usual one)")
     args, rest = parser.parse_known_args(argv)
+    if args.cmd == "styles":
+        from .style import style_names
+
+        for name, what in style_names().items():
+            print(f"{name:20s} {what}")
+        return 0
     if args.cmd == "sizes":
         from .model import Pinxit, PinxitConfig
 

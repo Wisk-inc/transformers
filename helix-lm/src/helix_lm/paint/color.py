@@ -93,6 +93,36 @@ def snap_to_palette(colors: torch.Tensor, palette: torch.Tensor, strength: float
     return colors + strength * (mixed - colors)
 
 
+def _root(m: torch.Tensor, power: float) -> torch.Tensor:
+    """A symmetric positive matrix raised to ``power``."""
+    values, vectors = torch.linalg.eigh(m.double())
+    return ((vectors * values.clamp(min=1e-10) ** power) @ vectors.T).float()
+
+
+def colour_statistics(lab: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """The mean ``(3,)`` and the covariance ``(3, 3)`` of the colours of an OKLab picture ``(3, H, W)``."""
+    flat = lab.reshape(3, -1)
+    flat = flat[:, :: max(1, flat.shape[1] // 60000)]
+    mean = flat.mean(1)
+    centred = flat - mean[:, None]
+    return mean, centred @ centred.T / max(1, centred.shape[1] - 1)
+
+
+def match_colours(lab: torch.Tensor, mean: torch.Tensor, cov: torch.Tensor) -> torch.Tensor:
+    """Move the colours of an OKLab picture ``(3, H, W)`` so that as a whole they have the ``mean`` and the
+    ``cov`` of another picture's: the straight-line map that carries one cloud of colours onto the other while
+    moving each colour as little as possible (Pitie and Kokaram, 2007). Unlike matching each channel alone,
+    this turns the picture's own colour directions into the other's: a blue flag in a photo painted after a
+    brown and olive painting becomes one of that painting's darks, not a blue with less saturation."""
+    own_mean, own_cov = colour_statistics(lab)
+    eye = 1e-6 * torch.eye(3)
+    a, b = own_cov + eye, cov.float() + eye
+    half, back = _root(a, 0.5), _root(a, -0.5)
+    move = back @ _root(half @ b @ half, 0.5) @ back
+    flat = lab.reshape(3, -1)
+    return (move @ (flat - own_mean[:, None]) + mean.float()[:, None]).reshape(lab.shape)
+
+
 def extract_palette(image: torch.Tensor, colors: int = 12, iterations: int = 24, seed: int = 0,
                     samples: int = 20000) -> tuple[torch.Tensor, torch.Tensor]:
     """The palette of an sRGB image ``(3, H, W)``: ``(colors (k, 3) sRGB sorted dark to light, shares (k,))`` by
@@ -127,6 +157,6 @@ def delta_e(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 TAU = 2.0 * math.pi
 
-__all__ = ["TAU", "delta_e", "extract_palette", "image_to_oklab", "linear_to_oklab", "linear_to_srgb",
-           "mix_pigments", "oklab_to_image", "oklab_to_linear", "oklab_to_srgb", "snap_to_palette",
-           "srgb_to_linear", "srgb_to_oklab"]
+__all__ = ["TAU", "colour_statistics", "delta_e", "extract_palette", "image_to_oklab", "linear_to_oklab",
+           "linear_to_srgb", "match_colours", "mix_pigments", "oklab_to_image", "oklab_to_linear", "oklab_to_srgb",
+           "snap_to_palette", "srgb_to_linear", "srgb_to_oklab"]

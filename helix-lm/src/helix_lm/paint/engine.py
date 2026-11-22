@@ -93,6 +93,7 @@ class View:
     brief: torch.Tensor           # (A, BRIEF): the same in a few numbers per cell, for the model
     generator: torch.Generator
     memory: torch.Tensor | None = None      # (A, C): what the model remembers of these places
+    marks: float = 0.0                      # above 0: a pass of short marks all over, for a style whose paint shows
 
 
 def sample_maps(maps: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -121,6 +122,8 @@ class StudioHand:
         lo, hi = round(0.3 * r), round(0.7 * r)
         side = hi - lo
         chance = (view.error[:, lo:hi, lo:hi].reshape(a, -1) + 1e-3) ** 1.5
+        if view.marks > 0:                                   # marks go everywhere, not where the canvas is wrong
+            chance = torch.ones_like(chance)
         pick = torch.multinomial(chance.cpu(), n, replacement=True, generator=gen).to(dev)
         cxw = ((lo + pick % side).float() + rand(a, n)) / r
         cyw = ((lo + pick // side).float() + rand(a, n)) / r
@@ -130,6 +133,8 @@ class StudioHand:
             view.maps, x.flatten(), y.flatten()).reshape(a, n, 9).unbind(-1)
         frac = view.level.index / max(1, view.levels - 1)
         coh = coh.clamp(0.0, 1.0)
+        if view.marks > 0:                                   # the style's own flow counts for more than the photo's
+            coh = coh * (1.0 - 0.6 * view.marks)
         dx, dy = coh * cos2 + (1 - coh) * fw * fcos, coh * sin2 + (1 - coh) * fw * fsin
         theta = torch.where(dx.abs() + dy.abs() < 0.05, rand(a, n) * math.pi, 0.5 * torch.atan2(dy, dx))
         theta = theta + 0.5 * (f.jitter + card.jitter) * randn(a, n) * (1.2 - coh)
@@ -140,6 +145,9 @@ class StudioHand:
         half = 0.125 * f.length * card.length * (0.75 + 0.5 * speed) * (0.6 + 0.8 * coh)
         radius = 0.05 * f.width * card.width * (1.15 - 0.6 * coh) * (1.0 - 0.35 * focus * frac)
         half, radius = half * torch.exp(0.3 * randn(a, n)), radius * torch.exp(0.3 * randn(a, n))   # no two alike
+        if view.marks > 0:                                   # loaded, and laid side by side
+            radius = 1.2 * radius
+            pressure = (pressure + 0.25).clamp(max=0.97)
         curl = min(1.0, 0.8 * (f.bend + card.bend))
         bend = 0.5 + (rand(a, n) - 0.5) * 2 * curl * (1 - 0.6 * coh) * (1.1 - speed)
         weights = torch.tensor(card.brushes, device=dev) * torch.tensor(f.brushes, device=dev)
@@ -166,13 +174,21 @@ class StudioHand:
         points = torch.stack([centre, centre + 0.9 * radius[..., None] * normal], 2) * 2 - 1       # (A, N, 2, 2)
         seen = F.grid_sample(view.target, points, mode="bilinear", padding_mode="border", align_corners=False)
         keep = (torch.arange(n, device=dev)[None] < view.counts[:, None]).float()
-        return Strokes(geom, one_hot(brush), seen[..., 0].permute(0, 2, 1), seen[..., 1].permute(0, 2, 1),
-                       (0.15 + 0.5 * card.texture) * rand(a, n), keep, rand(a, n, PHASES))
+        first, second = seen[..., 0].permute(0, 2, 1), seen[..., 1].permute(0, 2, 1)
+        if view.marks > 0:
+            # broken colour: each mark a lighter or darker mix than its neighbour, close to one pigment of the
+            # palette, so that the marks stay apart and the eye does the mixing
+            tone = torch.exp((0.10 + 0.14 * view.marks) * randn(a, n, 1))
+            palette = view.plan.palette.to(dev)
+            first = snap_to_palette((first * tone).clamp(0.0, 1.0), palette, 0.8, 0.0005)
+            second = snap_to_palette((second * tone).clamp(0.0, 1.0), palette, 0.8, 0.0005)
+        return Strokes(geom, one_hot(brush), first, second, (0.15 + 0.5 * card.texture) * rand(a, n), keep,
+                       rand(a, n, PHASES))
 
 
 def lay(view: View, strokes: Strokes, canvas: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """The pass's strokes laid on ``canvas (3, H, W)``: ``(new canvas, alpha (A, N, R, R), rgb (A, N, 3, R, R))``."""
-    alpha, rgb = render_windows(strokes, WINDOW, view.level.segments)
+    alpha, rgb = render_windows(strokes, WINDOW, view.level.segments, soft=view.plan.card.softness())
     n = alpha.shape[1]
     # only the part of the canvas the worked cells can reach is laid: their rows and columns and one more on
     # each side, starting on an even row and column so the order windows are laid in stays the same
@@ -245,12 +261,14 @@ def refine(strokes: Strokes, view: View, canvas: torch.Tensor, target_lab: torch
 
 def open_level(plan: Plan, level: Level, levels: int, canvas: torch.Tensor, generator: torch.Generator,
                region: torch.Tensor | None = None, memory: torch.Tensor | None = None,
-               everything: bool = False) -> dict | None:
+               everything: bool = False, marks: float = 0.0) -> dict | None:
     """Look at the canvas ``(3, H, W)`` (linear RGB, this pass's size) against the plan and decide which cells
     are worked and how many strokes each may get. Returns the :class:`View` for the hand with the pass's
     ``weight`` map, the plan in OKLab (``target_lab``) and ``notes``, or None when no cell needs work.
     ``everything`` works every cell (of the ``region``) with a full count of strokes, however close the canvas
-    already is to the plan: for painting in something the plan does not hold yet."""
+    already is to the plan: for painting in something the plan does not hold yet. ``marks`` (0..1) opens a
+    pass of short marks laid all over the canvas, a few to a cell and fewer at the subject, for a style whose
+    paint shows everywhere (Van Gogh, Monet)."""
     hc, wc = level.size
     dev = canvas.device
     target = resize(plan.target.to(dev), (hc, wc))
@@ -279,11 +297,13 @@ def open_level(plan: Plan, level: Level, levels: int, canvas: torch.Tensor, gene
     cell_error, cell_finish, cell_focus = per_cell(error * (0.5 + focus)), per_cell(finish), per_cell(focus)
     need = ((cell_error - 0.018) / (0.085 - 0.018)).clamp(0.0, 1.0)
     allowed = (cell_finish >= reach).float()
-    if block_in or everything:                                # the whole canvas is covered
+    if marks > 0:
+        counts = torch.ceil(level.strokes * 0.6 * marks * (1.0 - 0.5 * cell_focus)).long().clamp(min=1)
+    elif block_in or everything:                              # the whole canvas is covered
         counts = torch.full_like(cell_finish, level.strokes).long()
     else:
         counts = torch.ceil(level.strokes * need * allowed * (0.35 + 0.65 * cell_finish)).long()
-    gesture = (allowed == 0) & (cell_error > 0.11) if not (block_in or everything) else \
+    gesture = (allowed == 0) & (cell_error > 0.11) if not (block_in or everything or marks > 0) else \
         torch.zeros_like(allowed, dtype=torch.bool)
     counts = torch.where(gesture, torch.ones_like(counts), counts)
     if region is not None:
@@ -305,14 +325,14 @@ def open_level(plan: Plan, level: Level, levels: int, canvas: torch.Tensor, gene
                 cut_windows(canvas[None], CELL)[0].reshape(-1, 3, WINDOW, WINDOW)[active],
                 cut_windows(error[None, None], CELL)[0].reshape(-1, WINDOW, WINDOW)[active], cy, cx,
                 counts.flatten()[active], gesture.flatten()[active], maps, brief[active], generator,
-                None if memory is None else memory[active])
+                None if memory is None else memory[active], marks)
     return {"view": view, "weight": weight, "target_lab": target_lab, "notes": notes, "active": active,
             "block_in": block_in}
 
 
 def paint_level(plan: Plan, level: Level, levels: int, rows: torch.Tensor, hand, generator: torch.Generator,
                 region: torch.Tensor | None = None, memory: torch.Tensor | None = None, budget: int | None = None,
-                log=None, canvas: torch.Tensor | None = None) -> tuple[torch.Tensor, dict]:
+                log=None, canvas: torch.Tensor | None = None, marks: float = 0.0) -> tuple[torch.Tensor, dict]:
     """One pass. ``rows`` are the painting's strokes so far; returns the new strokes ``(K, ABS)`` and notes
     (cells worked, strokes proposed and kept, what the model remembers). ``region (H, W)`` limits the pass to a
     part of the canvas (for changes to a finished painting). ``canvas`` is the painting so far as a picture
@@ -327,7 +347,7 @@ def paint_level(plan: Plan, level: Level, levels: int, rows: torch.Tensor, hand,
                                         tremor=False)
         else:
             canvas = plan.ground.to(dev)[:, None, None].expand(3, hc, wc).clone()
-    opened = open_level(plan, level, levels, canvas, generator, region, memory)
+    opened = open_level(plan, level, levels, canvas, generator, region, memory, marks=marks)
     if opened is None:
         return rows.new_zeros(0, ABS), {"cells": 0, "of": level.gy * level.gx, "proposed": 0, "kept": 0}
     view, weight, target_lab, notes = opened["view"], opened["weight"], opened["target_lab"], opened["notes"]
@@ -335,6 +355,8 @@ def paint_level(plan: Plan, level: Level, levels: int, rows: torch.Tensor, hand,
     proposal = hand.propose(view)
     remembered = getattr(hand, "remembered", None)
     steps = level.steps if getattr(hand, "refines", True) else round(level.steps * getattr(hand, "steps_share", 0.0))
+    if marks > 0:                                             # marks stay as they were laid
+        steps = 0
     strokes = refine(proposal, view, canvas, target_lab, weight, steps, plan.settings.palette_strength)
     with torch.no_grad():                                     # a stroke that changes almost nothing is not made
         _, alpha, rgb = lay(view, strokes, canvas)
@@ -342,18 +364,19 @@ def paint_level(plan: Plan, level: Level, levels: int, rows: torch.Tensor, hand,
         # the lights); the first two passes keep every stroke, because their job is to cover the canvas
         seen = (rgb.clamp(min=0).sqrt() - view.canvas[:, None].clamp(min=0).sqrt()).abs().sum(2)
         change = (alpha * seen).mean((-1, -2))
-        keep = strokes.keep if block_in else strokes.keep * (change > 1.2e-3)
+        keep = strokes.keep if (block_in or marks > 0) else strokes.keep * (change > 1.2e-3)
         if budget is not None and int(keep.sum()) > budget:
             cut = torch.sort((change * keep).flatten(), descending=True).values[max(budget - 1, 0)]
             keep = keep * (change >= cut)
         strokes.keep = keep
-    new = to_absolute(strokes, cy, cx, CELL, wc, level.index)
+    new = to_absolute(strokes, cy, cx, CELL, wc, level.index, plan.card.softness())
     notes["kept"] = int(new.shape[0])
     if remembered is not None:
         notes["memory"], notes["cells_index"] = remembered, active
     if log:
-        log(f"pass {level.index + 1} of {levels} ({level.gy}x{level.gx} cells): worked {notes['cells']} of "
-            f"{notes['of']} cells, {notes['kept']} strokes")
+        what = "a pass of short marks all over" if marks > 0 else f"pass {level.index + 1} of {levels}"
+        log(f"{what} ({level.gy}x{level.gx} cells): worked {notes['cells']} of {notes['of']} cells, "
+            f"{notes['kept']} strokes")
     return new, notes
 
 

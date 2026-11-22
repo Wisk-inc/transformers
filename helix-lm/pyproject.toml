@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "helix-lm"
 version = "2.5.0"
-description = "HELIX, ANANSI and TriStream-2: linear-scaling sequence architectures with exact long-range recall, the engine that trains them (Muon, muP, growth), and a music stack (analysis, frisson critic, conductor, separation, singing voice conversion)"
+description = "HELIX, ANANSI and TriStream-2: linear-scaling sequence architectures with exact long-range recall, the engine that trains them (Muon, muP, growth), a music stack (analysis, frisson critic, conductor, separation, singing voice conversion), and Pinxit, a painter that works stroke by stroke"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -28,6 +28,9 @@ keywords = [
     "voice-conversion",
     "music-information-retrieval",
     "audio-codec",
+    "stroke-based-rendering",
+    "painting",
+    "style-transfer",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -75,6 +78,7 @@ packages = ["src/helix_lm"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/helix_lm", "tests", "docs", "notebooks", "README.md", "LICENSE", "NOTICE", "pyproject.toml"]
+exclude = ["docs/pinxit"]           # the sample pictures: in the repository, not in the source package
 
 [tool.ruff]
 line-length = 119

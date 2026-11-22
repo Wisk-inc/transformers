@@ -31,10 +31,17 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F
 
-from .color import extract_palette, image_to_oklab, linear_to_oklab, oklab_to_image, srgb_to_linear
+from .color import (
+    extract_palette,
+    image_to_oklab,
+    linear_to_oklab,
+    match_colours,
+    oklab_to_image,
+    srgb_to_linear,
+)
 from .emotion import Feeling
 from .io import resize
-from .see import focal_point, gaussian_blur, saliency, value_masses
+from .see import focal_point, gaussian_blur, saliency, slope, value_masses
 from .style import StyleCard
 
 THIRDS = ((1 / 3, 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1 / 3), (2 / 3, 2 / 3))
@@ -46,12 +53,15 @@ class Settings:
     detail: int | None = None       # how many passes from broad to fine (None: as many as ``work`` needs)
     compose: float = 0.6            # 0 keeps the photo's framing
     exaggerate: float = 0.6         # 0 keeps the photo's shapes and colours
+    abstraction: float = 0.6        # how far the photo is seen in planes and steps of tone; 0 keeps every detail
     restraint: float | None = None  # how much stays unfinished (None: what the feeling asks for)
     style_strength: float = 0.8     # how far lights, darks and colours move to the style's
     palette_strength: float = 0.7   # how strictly strokes use the palette's pigments
     budget: int = 2600              # the most strokes a painting may have
     colors: int = 12                # pigments on the palette
     steps: float = 1.0              # more (or fewer) refinement steps per pass; 0 lays the strokes as proposed
+    weave: float = 0.6              # how much the canvas's cloth shows; 0 paints on a smooth board
+    border: float = 0.025           # the bare edge of the canvas around a saved picture, as a share of its width
     seed: int = 0
 
 
@@ -164,7 +174,19 @@ def push_colour(image: torch.Tensor, focus: torch.Tensor, focal: tuple, feeling:
     lab = image_to_oklab(image)
     light, a, b = lab[0].clone(), lab[1].clone(), lab[2].clone()
     size = max(image.shape[-2:])
-    if card.measured and style_strength > 0:
+    if card.measured and style_strength > 0 and card.lab_cov:
+        # the whole cloud of the photo's colours carried onto the painting's, then drawn toward its pigments
+        moved = match_colours(lab, torch.tensor(card.lab_mean), torch.tensor(card.lab_cov))
+        pigments = linear_to_oklab(card.palette_linear())
+        near = torch.softmax(-(moved.reshape(3, -1).T[:, None] - pigments[None]).pow(2).sum(-1) / 0.002, -1)
+        drawn = (near @ pigments).T.reshape(moved.shape)
+        moved = moved + 0.45 * (drawn - moved)
+        light = light + style_strength * (moved[0] - light)
+        light = light + style_strength * (match_quantiles(light, card.l_quantiles) - light)
+        a, b = a + style_strength * (moved[1] - a), b + style_strength * (moved[2] - b)
+        notes.append(f"the photo's colours carried {style_strength:.0%} of the way onto the style's and toward "
+                     "its pigments")
+    elif card.measured and style_strength > 0:                   # a card measured before colour spreads were kept
         light = light + style_strength * (match_quantiles(light, card.l_quantiles) - light)
         gain_a = card.ab_std[0] / (float(a.std()) + 1e-4)
         gain_b = card.ab_std[1] / (float(b.std()) + 1e-4)
@@ -218,6 +240,58 @@ def push_colour(image: torch.Tensor, focus: torch.Tensor, focal: tuple, feeling:
         light = light - 0.06 * x * (far / 0.9).clamp(0.0, 1.0) ** 2
     out = oklab_to_image(torch.stack([light.clamp(0.02, 0.985), a, b]))
     return out.clamp(0.0, 1.0), notes
+
+
+def simplify(image: torch.Tensor, focus: torch.Tensor, amount: float,
+             stepping: float = 1.0) -> tuple[torch.Tensor, str]:
+    """
+    See the picture as a painter does, in planes. A photo holds every pore and every smooth gradient, and strokes
+    that chase those look like a filter over the photo. So before anything is painted, small differences inside
+    a shape are levelled out while the borders between shapes are kept (Perona and Malik's diffusion, in OKLab),
+    and lightness is gathered into a handful of tones, the way a passage is mixed from a few puddles of paint
+    and not from a gradient. The subject keeps more of its modelling than the rest. ``stepping`` below 1 keeps
+    more of the gradations (for a style painted without steps, like Leonardo's). sRGB ``(3, H, W)`` in and out,
+    with a line for the report.
+    """
+    if amount <= 0:
+        return image, ""
+    lab = image_to_oklab(image)
+    keep = 1.0 - 0.65 * focus
+    k2 = (0.02 + 0.04 * amount) ** 2                             # differences smaller than this are levelled
+    for _ in range(round(20 + 100 * amount)):
+        total = torch.zeros_like(lab)
+        for shift, dim in ((1, 1), (-1, 1), (1, 2), (-1, 2)):
+            d = torch.roll(lab, shift, dim) - lab
+            edge = 0 if shift == 1 else -1                       # nothing flows in across the picture's border
+            if dim == 1:
+                d[:, edge] = 0.0
+            else:
+                d[:, :, edge] = 0.0
+            total = total + torch.exp(-d.pow(2).sum(0, keepdim=True) / k2) * d
+        lab = lab + 0.2 * keep * total
+    tones = round(14 - 8 * amount)
+    q = lab[0] * tones
+    stepped = (torch.floor(q) + torch.sigmoid(16.0 * (q - torch.floor(q) - 0.5))) / tones
+    lab[0] = lab[0] + amount * stepping * keep * (stepped - lab[0])
+    note = "seen in planes: detail levelled" + (f", light and dark in {tones} tones" if stepping > 0.5 else
+                                                ", the gradations kept")
+    return oklab_to_image(lab).clamp(0.0, 1.0), note
+
+
+def draw_outlines(target: torch.Tensor, planes: torch.Tensor, dark: torch.Tensor,
+                  strength: float) -> torch.Tensor:
+    """Draw round the shapes, for a style that does (Hokusai's prints, Van Gogh's Bedroom): the borders between
+    the planes of ``planes`` become thin lines in the palette's darkest pigment ``dark (3,)`` (sRGB) on
+    ``target``. Both sRGB ``(3, H, W)``."""
+    steep = slope(gaussian_blur(image_to_oklab(planes)[0], 1.2))
+    sample = steep.flatten()[:: max(1, steep.numel() // 40000)]
+    cut = max(float(torch.quantile(sample, 0.86)), 0.25 * float(torch.quantile(sample, 0.995)), 1e-4)
+    crest = (steep >= 0.92 * F.max_pool2d(steep[None, None], 3, 1, 1)[0, 0]).float()      # the middle of a border
+    line = crest * ((steep - cut) / cut).clamp(0.0, 1.0)         # nothing where the picture is even
+    line = (2.2 * gaussian_blur(line, 0.9)).clamp(0.0, 1.0)
+    lab = image_to_oklab(target)
+    ink = image_to_oklab(dark.reshape(3, 1, 1).float())
+    return oklab_to_image(lab + 0.85 * strength * line * (ink - lab)).clamp(0.0, 1.0)
 
 
 # -------------------------------------------------------------------------------- finish and flow --
@@ -316,8 +390,17 @@ def make_plan(photo: torch.Tensor, card: StyleCard, feeling: Feeling, settings: 
     near = torch.exp(-(ys ** 2 + xs ** 2) / (2 * 0.28 ** 2))
     focus = 0.6 * sal + 0.4 * near
     focus = focus / focus.max().clamp(min=1e-8)
-    target, notes = push_colour(source, focus, focal, feeling, card, x, settings.style_strength)
+    planes, note = simplify(source, focus, settings.abstraction, card.hardness if card.measured else 1.0)
+    if note:
+        report.append(note)
+    target, notes = push_colour(planes, focus, focal, feeling, card, x, settings.style_strength)
     report += notes
+    if card.measured and card.outline * settings.style_strength > 0.2:
+        target = draw_outlines(target, planes, torch.tensor(card.palette[0]), card.outline * settings.style_strength)
+        report.append(f"the shapes drawn round in the darkest pigment, as the style does ({card.outline:.0%})")
+    if card.measured and card.hardness < 0.5:
+        report.append(f"edges kept soft and paint laid in thin layers, as the style does (hardness "
+                      f"{card.hardness:.2f})")
     restraint = feeling.restraint if settings.restraint is None else settings.restraint
     finish = finish_map(focus, restraint)
     report.append(f"restraint {restraint:.2f}: {float((finish >= 0.45 * restraint + 0.05).float().mean()):.0%} of "
@@ -346,4 +429,4 @@ def make_plan(photo: torch.Tensor, card: StyleCard, feeling: Feeling, settings: 
 
 
 __all__ = ["Plan", "Settings", "compose", "composition_score", "finish_map", "flow_field", "make_plan",
-           "match_quantiles", "push_colour", "warp_grid", "working_size"]
+           "match_quantiles", "push_colour", "simplify", "warp_grid", "working_size"]

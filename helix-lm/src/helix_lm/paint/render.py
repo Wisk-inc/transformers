@@ -41,6 +41,7 @@ from .strokes import (
 )
 
 AA = 0.7                                     # pixels over which an edge goes from paint to no paint
+THREADS = 420.0                              # threads of the canvas across a picture's width
 TAU = 2.0 * math.pi
 
 
@@ -63,7 +64,9 @@ def add_tremor(pts: torch.Tensor, amplitude: torch.Tensor, phase: torch.Tensor) 
 
 def _nearest(pts: torch.Tensor, gx: torch.Tensor, gy: torch.Tensor):
     """For points ``(gx, gy) (P,)`` and polylines ``pts (M, S + 1, 2)``: distance to the line, how far along it
-    the nearest point is (0..1), which side the point is on, and how far past an end it lies. Each ``(M, P)``."""
+    the nearest point is (0..1), how far to the side of it the point lies (signed, measured square to the
+    stroke's direction there, so it does not turn round the stroke's ends), and how far past an end it lies.
+    Each ``(M, P)``."""
     segments = pts.shape[1] - 1
     best = far = side = along = None
     for i in range(segments):
@@ -79,7 +82,7 @@ def _nearest(pts: torch.Tensor, gx: torch.Tensor, gy: torch.Tensor):
             past = past + torch.relu(-t) * len2.sqrt()
         if i == segments - 1:
             past = past + torch.relu(t - 1.0) * len2.sqrt()
-        cross = ab[:, 0:1] * apy - ab[:, 1:2] * apx
+        cross = (ab[:, 0:1] * apy - ab[:, 1:2] * apx) / len2.sqrt()
         if best is None:
             best, along, side, far = d2, tc / segments, cross, past
         else:
@@ -91,38 +94,87 @@ def _nearest(pts: torch.Tensor, gx: torch.Tensor, gy: torch.Tensor):
     return (best + 1e-8).sqrt(), along, side, far
 
 
+def _hash(x: torch.Tensor) -> torch.Tensor:
+    """A number in 0..1 for each number in ``x`` that looks random (the sine hash of shader code)."""
+    return torch.frac(torch.sin(x * 12.9898 + 4.1414) * 43758.5453)
+
+
+def _noise(x: torch.Tensor, seed: torch.Tensor) -> torch.Tensor:
+    """Smooth random values in 0..1 along ``x``: a new one at every whole number, eased from one to the next.
+    ``seed`` (broadcast against ``x``) makes each stroke's values its own."""
+    with torch.no_grad():
+        i = torch.floor(x)
+        a, b = _hash(i + 31.7 * seed), _hash(i + 1.0 + 31.7 * seed)
+    f = x - i
+    f = f * f * (3.0 - 2.0 * f)
+    return a + (b - a) * f
+
+
 def stroke_fields(pts: torch.Tensor, r0: torch.Tensor, r1: torch.Tensor, profile: torch.Tensor,
                   pressure: torch.Tensor, speed: torch.Tensor, phase: torch.Tensor, gx: torch.Tensor,
                   gy: torch.Tensor, aa: float = AA) -> dict:
     """The paint a stroke leaves on the points ``(gx, gy) (P,)``, everything in the same pixel units.
     ``pts (M, S + 1, 2)``, ``r0, r1, pressure, speed (M,)``, ``profile (M, fields)``, ``phase (M, 5)``.
     Returns ``paint (M, P)`` (how much paint, before the stroke's opacity), ``second (M, P)`` (where the brush's
-    second colour shows) and ``height (M, P)`` (how thick the paint lies)."""
-    d, u, side, far = _nearest(pts, gx, gy)
+    second colour shows), ``height (M, P)`` (how thick the paint lies), ``dry (M, P)`` (how dry the brush is
+    there: a dry brush only catches the tops of the canvas's weave) and ``tone (M, P)`` (around 1: the track of
+    one hair is a little lighter or darker than its neighbour's).
+
+    A brush is a row of hairs. Each hair leaves its own track along the stroke, loaded a little differently from
+    its neighbours; the tracks run on straight past the stroke's ends and each hair lifts off at its own
+    moment, so a fast or dry stroke ends ragged; and along a track the paint breaks up as it runs out."""
+    d, u, lat, far = _nearest(pts, gx, gy)
     hard, taper, end_round, bristle, count, decay, fade, thick = (profile[:, i : i + 1] for i in range(8))
     p, s = pressure[:, None], speed[:, None]
+    length = (pts[:, 1:] - pts[:, :-1]).norm(dim=-1).sum(-1, keepdim=True)
     flick = 0.7 * s * ((u - 0.55) / 0.45).clamp(0.0, 1.0) ** 2            # a fast stroke thins out at its end
+    wobble = 1.0 + 0.05 * torch.sin(TAU * (1.3 * u + phase[:, 3:4])) \
+        + 0.03 * torch.sin(TAU * (3.1 * u + phase[:, 4:5]))
     w = (r0[:, None] + (r1 - r0)[:, None] * u) * (0.75 + 0.5 * p) * (1.0 - taper * (2.0 * u - 1.0) ** 4)
-    w = w * (1.0 - flick)
+    w = w * (1.0 - flick) * wobble                                         # no edge of a stroke is quite even
     edge = aa + (1.0 - hard) * 0.9 * w
     cover = torch.sigmoid(4.0 * (w - d) / edge)
     square = torch.sigmoid(4.0 * (0.5 * aa - far) / aa)
     cover = cover * (end_round + (1.0 - end_round) * square)
-    v = (torch.sign(side) * d / (w + 1e-6)).clamp(-1.0, 1.0)
-    waves = (torch.sin(TAU * (0.5 * count * v + phase[:, 0:1])) + torch.sin(TAU * (0.83 * count * v + phase[:, 1:2]))
-             + torch.sin(TAU * (1.31 * count * v + phase[:, 2:3])))
-    marks = 0.5 + waves / 6.0                                              # 0..1, the gaps between bristles
+    v = (lat / (w + 1e-6)).clamp(-1.0, 1.0)
+    across = (0.5 * v + 0.5) * count                                       # which hair, counted across the brush
+    hairs = 0.6 * _noise(across, phase[:, 0:1]) + 0.4 * _noise(3.3 * across, phase[:, 1:2])
+    dryness = (bristle * (1.25 - 0.5 * p) * (0.7 + 0.6 * s)).clamp(max=1.0)
+    half = 0.5 * (r0 + r1)[:, None]
+    rag = dryness * (0.35 + 0.9 * s) * 1.5 * half                          # how unevenly the hairs lift off
+    end = rag * _noise(across, phase[:, 2:3]) ** 2
+    start = 0.3 * rag * _noise(across, phase[:, 2:3] + 0.5) ** 2
+    to_end, to_start = (1.0 - u) * length - far + w, u * length - far + w
+    cover = cover * torch.sigmoid(4.0 * (to_end - end) / (aa + 0.3 * end)) \
+        * torch.sigmoid(4.0 * (to_start - start) / (aa + 0.3 * start))
     thin = 1.0 - torch.exp(-3.0 * decay * (0.4 + 1.6 * s) * u)             # the brush running out of paint
-    streaks = (bristle * (1.25 - 0.5 * p) * (0.7 + 0.6 * s)).clamp(max=1.0)
-    texture = 1.0 - streaks * (0.25 + 0.75 * thin) * marks
+    with torch.no_grad():
+        hair = torch.floor(across)
+    breaks = _noise(u * length / (1.5 * half + 1.0), phase[:, 1:2] + 0.137 * hair)
+    marks = hairs * (0.6 + 0.4 * breaks)                                   # 0..1, the gaps the hairs leave
+    texture = 1.0 - dryness * (0.25 + 0.75 * thin) * marks
     fading = 1.0 - (fade * (0.5 + s)).clamp(max=1.0) * thin
     pool = 0.35 * p * (1.0 - s)                                            # paint left where the brush landed
     density = 1.0 + pool * (torch.exp(-(u / 0.1) ** 2) + 0.5 * torch.exp(-((1.0 - u) / 0.08) ** 2))
     paint = (0.65 + 0.35 * p) * density * cover * texture * fading
-    second = 0.5 + 0.5 * torch.sin(TAU * (0.37 * count * v + phase[:, 3:4]))
+    second = torch.sigmoid(7.0 * (_noise(0.6 * across + 1.0, phase[:, 3:4]) - 0.5))   # the second colour, in tracks
     ridge = 0.75 + 0.5 * v * v                                             # pressed paint piles up at the edges
-    height = thick * (0.3 + 1.1 * p) * (1.0 - 0.5 * s) * density * ridge * cover * (0.6 + 0.4 * (1.0 - marks))
-    return {"paint": paint, "second": second, "height": height}
+    height = thick * (0.3 + 1.1 * p) * (1.0 - 0.5 * s) * density * ridge * cover * (0.55 + 0.45 * (1.0 - marks))
+    tone = 1.0 + (0.05 + 0.13 * dryness) * (1.0 - 2.0 * hairs)
+    return {"paint": paint, "second": second, "height": height, "dry": dryness * (0.25 + 0.75 * thin), "tone": tone}
+
+
+def canvas_weave(height: int, width: int, pitch: float, device=None) -> torch.Tensor:
+    """A primed canvas as the height of its surface, 0..1 at each pixel: threads ``pitch`` pixels apart that go
+    over and under each other, none quite straight and no two the same thickness."""
+    ys = torch.arange(height, device=device, dtype=torch.float32)[:, None] + 0.5
+    xs = torch.arange(width, device=device, dtype=torch.float32)[None, :] + 0.5
+    xw = xs + 0.35 * pitch * torch.sin(TAU * ys / (37.0 * pitch) + 1.3)    # the threads wander a little
+    yw = ys + 0.35 * pitch * torch.sin(TAU * xs / (41.0 * pitch) + 0.4)
+    i, j = torch.floor(xw / pitch), torch.floor(yw / pitch)
+    warp = torch.sin(math.pi * xw / pitch).abs() * (0.5 + 0.5 * torch.cos(math.pi * yw / pitch + math.pi * i))
+    weft = torch.sin(math.pi * yw / pitch).abs() * (0.5 + 0.5 * torch.cos(math.pi * xw / pitch + math.pi * (j + 1)))
+    return torch.maximum(warp * (0.75 + 0.5 * _hash(i)), weft * (0.75 + 0.5 * _hash(j + 7.0))).clamp(0.0, 1.0)
 
 
 def window_grid(size: int, device=None, dtype=torch.float32) -> tuple[torch.Tensor, torch.Tensor]:
@@ -132,9 +184,10 @@ def window_grid(size: int, device=None, dtype=torch.float32) -> tuple[torch.Tens
 
 
 def render_windows(strokes: Strokes, size: int = 32, segments: int = 6, aa: float = AA,
-                   chunk: int = 4096) -> tuple[torch.Tensor, torch.Tensor]:
+                   chunk: int = 4096, soft: float = 1.0) -> tuple[torch.Tensor, torch.Tensor]:
     """Strokes with any leading shape ``(..., N)`` -> ``alpha (..., N, size, size)`` and the colour laid at each
-    pixel ``rgb (..., N, 3, size, size)`` (linear RGB). Each stroke is drawn alone in its own window."""
+    pixel ``rgb (..., N, 3, size, size)`` (linear RGB). Each stroke is drawn alone in its own window. ``soft``
+    softens every brush's edge (see :func:`helix_lm.paint.brushes.brush_profile`)."""
     lead = strokes.keep.shape
     flat = strokes.flat()
     gx, gy = window_grid(size, flat.geom.device, flat.geom.dtype)
@@ -143,11 +196,11 @@ def render_windows(strokes: Strokes, size: int = 32, segments: int = 6, aa: floa
         part = flat.index(slice(a, a + chunk))
         g = geometry(part.geom)
         pts = curve_points(g["p0"], g["p1"], g["p2"], segments) * size
-        f = stroke_fields(pts, g["r0"] * size, g["r1"] * size, brush_profile(part.brush), g["pressure"], g["speed"],
-                          part.phase, gx, gy, aa)
+        f = stroke_fields(pts, g["r0"] * size, g["r1"] * size, brush_profile(part.brush, soft), g["pressure"],
+                          g["speed"], part.phase, gx, gy, aa)
         alphas.append(((g["opacity"] * part.keep)[:, None] * f["paint"]).clamp(max=1.0))
-        rgbs.append(part.color[:, :, None]
-                    + (part.color2 - part.color)[:, :, None] * (part.streak[:, None] * f["second"])[:, None])
+        rgbs.append((part.color[:, :, None] + (part.color2 - part.color)[:, :, None]
+                     * (part.streak[:, None] * f["second"])[:, None]) * f["tone"][:, None])
     alpha = torch.cat(alphas).reshape(*lead, size, size)
     rgb = torch.cat(rgbs).reshape(*lead, 3, size, size)
     return alpha, rgb
@@ -208,21 +261,40 @@ def light_relief(image: torch.Tensor, height: torch.Tensor, strength: float = 0.
 @torch.no_grad()
 def render_painting(rows: torch.Tensor, width: int, height: int, ground: torch.Tensor, segments: int = 14,
                     relief: float = 0.5, tremor: bool = True, canvas: torch.Tensor | None = None,
-                    paint_height: torch.Tensor | None = None, finish: bool = True,
-                    aa: float = AA) -> tuple[torch.Tensor, torch.Tensor]:
+                    paint_height: torch.Tensor | None = None, finish: bool = True, aa: float = AA,
+                    weave: float = 0.0, scale: float | None = None,
+                    origin: tuple = (0.0, 0.0)) -> tuple[torch.Tensor, torch.Tensor]:
     """A painting's strokes ``rows (N, ABS)`` (units of the canvas width) painted in order on a canvas of
     ``width x height`` pixels toned with ``ground (3,)`` (linear RGB). Returns ``(image (3, H, W) linear RGB, the
     height of the paint (H, W))``. Pass the ``canvas`` and ``paint_height`` of an earlier call (with
-    ``finish=False``) to go on painting where it stopped."""
+    ``finish=False``) to go on painting where it stopped.
+
+    ``weave`` (0..1) gives the canvas its cloth: a dry brush then only catches the tops of the threads, thin
+    paint lets them show and thick paint buries them. ``scale`` is how many pixels the unit of the strokes is
+    (the picture's width when not given) and ``origin`` where the picture's corner lies on the canvas, for a
+    canvas larger than the picture, whose edge then shows."""
     device = rows.device
+    scale = float(width if scale is None else scale)
+    cloth = None
+    pitch = scale / THREADS
+    strength = weave * min(1.0, max(0.0, (pitch - 1.4) / 1.6))            # threads too fine to draw are left out
+    if strength > 0:
+        cloth = canvas_weave(height, width, pitch, device)
     if canvas is None:
         canvas = ground.to(device).float()[:, None, None].expand(3, height, width).clone()
+        if cloth is not None:                              # the tone was brushed on: it is not perfectly even
+            ys = torch.arange(height, device=device, dtype=torch.float32)[:, None] / scale
+            xs = torch.arange(width, device=device, dtype=torch.float32)[None, :] / scale
+            streaks = torch.sin(TAU * (9.0 * ys + 1.7 * xs)) + torch.sin(TAU * (23.0 * ys - 3.1 * xs + 0.3)) \
+                + torch.sin(TAU * (4.3 * xs + 0.8 * ys + 0.6))
+            canvas = canvas * (1.0 + 0.02 * strength * streaks)
         paint_height = torch.zeros(height, width, device=device)
-    pts_all = curve_points(rows[:, 0:2], rows[:, 2:4], rows[:, 4:6], segments) * width
+    pts_all = curve_points(rows[:, 0:2], rows[:, 2:4], rows[:, 4:6], segments) * scale
+    pts_all = pts_all + torch.tensor(origin, device=device, dtype=pts_all.dtype)
     if tremor and len(rows):
         steadiness = (1.0 - rows[:, A_SPEED]) ** 2
-        pts_all = add_tremor(pts_all, 0.3 * steadiness * rows[:, A_R0] * width, rows[:, A_PHASE][:, 4])
-    reach = 1.3 * torch.maximum(rows[:, A_R0], rows[:, A_R1]) * width * 2.2 + 2.0 + 2.0 * aa if len(rows) else None
+        pts_all = add_tremor(pts_all, 0.3 * steadiness * rows[:, A_R0] * scale, rows[:, A_PHASE][:, 4])
+    reach = 1.3 * torch.maximum(rows[:, A_R0], rows[:, A_R1]) * scale * 2.2 + 2.0 + 2.0 * aa if len(rows) else None
     for i in range(rows.shape[0]):
         pts, m = pts_all[i], float(reach[i])
         x0, x1 = int(max(0.0, float(pts[:, 0].min()) - m)), int(min(float(width), float(pts[:, 0].max()) + m + 1))
@@ -233,19 +305,27 @@ def render_painting(rows: torch.Tensor, width: int, height: int, ground: torch.T
         xs = torch.arange(x0, x1, device=device, dtype=torch.float32) + 0.5
         gy, gx = torch.meshgrid(ys, xs, indexing="ij")
         row = rows[i : i + 1]
-        f = stroke_fields(pts[None], row[:, A_R0] * width, row[:, A_R1] * width, row[:, A_PROFILE],
+        f = stroke_fields(pts[None], row[:, A_R0] * scale, row[:, A_R1] * scale, row[:, A_PROFILE],
                           row[:, A_PRESSURE], row[:, A_SPEED], row[:, A_PHASE], gx.reshape(-1), gy.reshape(-1), aa)
         a = (row[0, A_ALPHA] * f["paint"][0]).clamp(max=1.0).reshape(y1 - y0, x1 - x0)
+        if cloth is not None:                              # a dry brush skips the hollows between the threads
+            dry = f["dry"][0].reshape(y1 - y0, x1 - x0)
+            buried = (paint_height[y0:y1, x0:x1] / 0.35).clamp(0.0, 1.0)      # unless paint already fills them
+            catch = torch.sigmoid(9.0 * (cloth[y0:y1, x0:x1] - 0.25 - 0.45 * dry))
+            a = a * (1.0 - strength * dry * (1.0 - buried) * (1.0 - catch))
         second = (row[0, A_STREAK] * f["second"][0]).reshape(y1 - y0, x1 - x0)
         c1, c2 = row[0, A_COLOR], row[0, A_COLOR2]
-        rgb = c1[:, None, None] + (c2 - c1)[:, None, None] * second
+        rgb = (c1[:, None, None] + (c2 - c1)[:, None, None] * second) * f["tone"][0].reshape(y1 - y0, x1 - x0)
         canvas[:, y0:y1, x0:x1] = canvas[:, y0:y1, x0:x1] * (1.0 - a) + rgb * a
         thick = f["height"][0].reshape(y1 - y0, x1 - x0)
         paint_height[y0:y1, x0:x1] = paint_height[y0:y1, x0:x1] * (1.0 - 0.85 * a) + a * thick
     if not finish:
         return canvas, paint_height
-    return light_relief(canvas, paint_height, relief).clamp(0.0, 1.0), paint_height
+    surface = paint_height
+    if cloth is not None:                                  # the cloth shows where the paint is thin
+        surface = paint_height + 0.2 * strength * cloth * (1.0 - (paint_height / 0.45).clamp(0.0, 1.0))
+    return light_relief(canvas, surface, relief).clamp(0.0, 1.0), paint_height
 
 
-__all__ = ["AA", "add_tremor", "composite_level", "curve_points", "cut_windows", "light_relief", "render_painting",
-           "render_windows", "stroke_fields", "window_grid"]
+__all__ = ["AA", "THREADS", "add_tremor", "canvas_weave", "composite_level", "curve_points", "cut_windows",
+           "light_relief", "render_painting", "render_windows", "stroke_fields", "window_grid"]

@@ -6,8 +6,12 @@ Painting something in from words. Experimental.
 painting and painted in its palette. With ``text=`` there is nothing to copy, so the strokes are found by asking
 an eye that reads text (SigLIP 2 or CLIP): strokes in the painting's palette are laid in the box and moved,
 turned and recoloured until the eye says the box looks like the words (the idea of CLIPDraw, Frans et al. 2021,
-with this renderer and brushes). What comes out is loose and suggestive, in keeping with the rest; it is only as
-good as the eye's sense of the words, and with the untrained test eye it means nothing.
+with this renderer and brushes).
+
+It does not work well enough to use. Tried with SigLIP 2 on "a small red sailing boat on the water", the eye's
+score for the words rose from 0.02 to 0.19, higher than a photo of such a boat scores, and what was painted was
+a scatter of pale marks with a red smear among them: the eye can be pleased without the thing being there. It
+is kept as an experiment. To add something to a painting, give a picture of it.
 """
 
 from __future__ import annotations
@@ -24,14 +28,14 @@ from .strokes import Strokes, to_absolute
 NOT_THIS = "a blurry mess of random brush strokes"
 
 
-def add_text(painting, text: str, box=(0.3, 0.3, 0.7, 0.7), eye=None, steps: int = 120, views: int = 6,
+def add_text(painting, text: str, box=(0.3, 0.3, 0.7, 0.7), eye=None, steps: int = 80, views: int = 4,
              log=None):
     """Paint ``text`` into ``box = (left, top, right, bottom)`` of ``painting``. Returns the painting.
 
-    The strokes are small enough for the box to hold about six cells across, so the eye is shown something it
-    can read. Each step the box is seen ``views`` ways (shifted and scaled a little) and the strokes move
-    towards what the eye calls ``text`` and away from what it calls a mess; a stroke that does not help costs a
-    little for being there, so it fades instead of staying as scatter."""
+    The strokes are small enough for the box to hold about four cells across. Each step the box is seen
+    ``views`` ways (shifted and scaled a little) and the strokes move towards what the eye calls ``text`` and
+    away from what it calls a mess; a stroke that does not help costs a little for being there, so it fades
+    instead of staying as scatter. See the module's notes for how far this gets."""
     if eye is None or not getattr(eye, "has_text", False):
         raise ValueError("painting from words needs an eye that reads text, for example "
                          "load_eye('google/siglip2-base-patch16-256'); or give image= to paint a picture in")
@@ -39,7 +43,7 @@ def add_text(painting, text: str, box=(0.3, 0.3, 0.7, 0.7), eye=None, steps: int
     h, w = plan.target.shape[-2:]
     mask = painting._box_mask(box, feather=0.1)
     extent = max(float(mask.sum(0).gt(0.5).sum()), float(mask.sum(1).gt(0.5).sum()))
-    level = min(levels, key=lambda lv: abs(h / lv.gy - extent / 6.0))         # cells about a sixth of the box
+    level = min(levels, key=lambda lv: abs(h / lv.gy - extent / 4.0))         # cells about a quarter of the box
     hc, wc = level.size
     generator = torch.Generator().manual_seed(plan.settings.seed + 7 + len(painting.history))
     with torch.no_grad():
@@ -101,7 +105,7 @@ def add_text(painting, text: str, box=(0.3, 0.3, 0.7, 0.7), eye=None, steps: int
         with torch.no_grad():
             strokes = build().detach()
             out, _, _ = lay(view, strokes, canvas)
-            new = to_absolute(strokes, view.cy, view.cx, hc // level.gy, wc, level.index)
+            new = to_absolute(strokes, view.cy, view.cx, hc // level.gy, wc, level.index, plan.card.softness())
             painted = resize(linear_to_srgb(out), (h, w))
             plan.target = plan.target * (1 - mask) + painted * mask       # the plan now holds what was added
         before = len(painting)

@@ -204,7 +204,10 @@ def test_the_pretrained_eye_wrapper_reads_real_model_classes():
                        "image_size": 64, "patch_size": 16},
         text_config={"hidden_size": 32, "intermediate_size": 64, "num_hidden_layers": 1, "num_attention_heads": 2,
                      "vocab_size": 100, "max_position_embeddings": 64})))
-    assert sig.features(img)["dense"].shape == (32, 4, 4) and sig.has_text and sig.saliency(img).shape == (4, 4)
+    assert sig.features(img)["dense"].shape == (32, 4, 4) and sig.has_text
+    about = sig.saliency(img)                                     # which part the picture is about, part by part
+    assert about.shape == (8, 8) and float(about.min()) == 0.0 and 0.99 < float(about.max()) <= 1.0
+    assert about.device.type == "cpu"
     words = torch.nn.functional.normalize(torch.randn(32), dim=0)
     plain = sig.score(img[None], words)
     assert plain.shape == (1,)

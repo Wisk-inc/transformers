@@ -56,7 +56,9 @@ def test_every_stage_runs_on_ones_own_pictures_and_a_second_run_has_nothing_left
     for stage in program.STAGES:
         assert (tmp_path / "markers" / stage).exists(), stage
     assert "[fetch] data: 3 photos, 2 paintings" in said          # the second process did the data stage,
-    assert "== stage data" not in said and "== stage pictures" in said            # so the run did not have to
+    # so the run did not have to: it skipped the stage, or waited for the other process when its turn came first
+    assert "== stage data" not in said or "data: fetched beside the practice sheets" in said
+    assert "== stage pictures" in said
     assert len(list((tmp_path / "uploads" / "paintings").glob("*.card.json"))) == 2
     side = json.loads((tmp_path / "runs" / "px-tiny" / "latest.json").read_text())
     assert side["stage"] == "pictures" and side["step"] == 2

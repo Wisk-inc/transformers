@@ -31,10 +31,10 @@ from .color import image_to_oklab, linear_to_srgb, oklab_to_image
 from .emotion import Feeling, feeling_of
 from .engine import CELL, StudioHand, paint_level, plan_levels
 from .io import load_alpha, load_image, resize, save_image, to_pil
-from .mind import Plan, Settings, make_plan, push_colour
+from .mind import Plan, Settings, make_plan, push_colour, simplify
 from .render import light_relief, render_painting
 from .strokes import A_ALPHA, A_BRUSH, A_COLOR, A_LEVEL, A_PRESSURE, A_PROFILE, A_R0, A_R1, A_SPEED, ABS
-from .style import StyleCard, own_card, read_style
+from .style import StyleCard, named_style, own_card, read_style, style_names
 
 VERSION = 1
 
@@ -55,11 +55,22 @@ class Painting:
     def __len__(self) -> int:
         return int(self.rows.shape[0])
 
-    def render(self, width: int = 1024, relief: float = 0.5, upto: int | None = None) -> torch.Tensor:
+    def render(self, width: int = 1024, relief: float | None = None, upto: int | None = None, border: float = 0.0,
+               weave: float | None = None) -> torch.Tensor:
         """The painting as an sRGB picture ``(3, H, W)``, ``width`` pixels wide. ``upto`` stops after that many
-        strokes."""
+        strokes. ``border`` adds the bare edge of the canvas all round (a share of the picture's width): the
+        strokes end where the painter stopped, not at a ruled line. ``relief`` is how strongly thick paint
+        catches the light (by default more for a style with visible paint) and ``weave`` how much the cloth
+        shows (by default the plan's setting)."""
         rows = self.rows if upto is None else self.rows[:upto]
-        image, _ = render_painting(rows, width, max(1, round(width * self.aspect)), self.plan.ground, relief=relief)
+        card, settings = self.plan.card, self.plan.settings
+        if relief is None:
+            relief = 0.35 + 0.6 * card.texture if card.measured else 0.6
+        scale = width / (1.0 + 2.0 * border)
+        height = max(1, round(scale * (self.aspect + 2.0 * border)))
+        image, _ = render_painting(rows, width, height, self.plan.ground, relief=relief,
+                                   weave=settings.weave if weave is None else weave, scale=scale,
+                                   origin=(border * scale, border * scale))
         return linear_to_srgb(image)
 
     def stages(self, width: int = 512) -> list[tuple[str, torch.Tensor]]:
@@ -156,8 +167,8 @@ class Painting:
             return self.to_svg(path, width)
         if kind == ".gif":
             return self.timelapse(path)
-        if kind != ".pinxit":
-            return save_image(self.render(width), path)
+        if kind != ".pinxit":                         # the canvas as it would be photographed, edge and all
+            return save_image(self.render(width, border=self.plan.settings.border), path)
         plan = self.plan
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"version": VERSION, "rows": self.rows, "target": plan.target, "source": plan.source,
@@ -320,8 +331,11 @@ class Painting:
         x = self.plan.settings.exaggerate if exaggerate is None else exaggerate
         mask = self._box_mask(box) if box is not None else torch.ones_like(self.plan.focus)
         with self._change(mask):
-            target, notes = push_colour(self.plan.source, self.plan.focus, self.plan.focal, feeling, self.plan.card,
-                                        x, self.plan.settings.style_strength)
+            card = self.plan.card
+            planes, _ = simplify(self.plan.source, self.plan.focus, self.plan.settings.abstraction,
+                                 card.hardness if card.measured else 1.0)
+            target, notes = push_colour(planes, self.plan.focus, self.plan.focal, feeling, self.plan.card, x,
+                                        self.plan.settings.style_strength)
             self.plan.target = self.plan.target * (1 - mask) + target * mask
             self.plan.feeling = feeling
             self.plan.report += [f"reworked: {n}" for n in notes]
@@ -343,7 +357,9 @@ class Painting:
 def paint(photo, style=None, emotion=None, *, hand=None, eye=None, log=None, **settings) -> Painting:
     """
     Paint a photo. ``photo`` and ``style`` are paths, PIL images or ``(3, H, W)`` sRGB tensors; ``style`` may also
-    be a :class:`~helix_lm.paint.style.StyleCard`. ``emotion`` is a name (``"awe"``, ``"majesty"``,
+    be a :class:`~helix_lm.paint.style.StyleCard` or the name of a famous painting whose measured style comes
+    with the package (``"mona lisa"``, ``"the starry night"``; :func:`~helix_lm.paint.style.style_names` lists
+    them). ``emotion`` is a name (``"awe"``, ``"majesty"``,
     ``"melancholy"`` ...); without one, a painting given as the style passes on the feeling read from it, and a
     photo alone is painted without one. ``hand`` is what makes the strokes (the trained model's
     :class:`~helix_lm.paint.model.ModelHand`, or the untrained :class:`StudioHand`), ``eye`` a pretrained vision
@@ -353,6 +369,11 @@ def paint(photo, style=None, emotion=None, *, hand=None, eye=None, log=None, **s
     s = Settings(**settings)
     if isinstance(style, StyleCard):
         card = style
+    elif isinstance(style, str) and not Path(style).exists():    # not a file: a famous painting, by name
+        card = named_style(style)
+        if card is None:
+            raise FileNotFoundError(f"{style!r} is not a picture on disk and not a painting whose style comes "
+                                    f"with the package; those are: {', '.join(style_names())}")
     else:
         card = read_style(style, seed=s.seed) if style is not None else own_card(image, s.colors, s.seed)
     if emotion is not None:
@@ -389,6 +410,12 @@ def paint(photo, style=None, emotion=None, *, hand=None, eye=None, log=None, **s
             store = torch.zeros(level.gy * level.gx, notes["memory"].shape[-1])
             store[notes["cells_index"]] = notes["memory"].float().cpu()
             memory[level.index] = store
+    marks = card.marks() * s.style_strength
+    if marks > 0.4:                                               # a style whose paint shows everywhere
+        new, _ = paint_level(plan, levels[-1], len(levels), rows, StudioHand(), generator, log=log, canvas=canvas,
+                             marks=marks)
+        rows = torch.cat([rows, new])
+        plan.report.append(f"a last pass of short marks all over, as the style's paint shows ({marks:.0%})")
     history = [{"op": "paint", "from": 0, "strokes": int(rows.shape[0]), "hand": getattr(hand, "name", "hand"),
                 "emotion": str(emotion), "style": card.name}]
     return Painting(rows, plan, history, memory)

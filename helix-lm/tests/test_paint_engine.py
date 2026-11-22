@@ -101,7 +101,7 @@ def test_a_stroke_can_be_found_by_gradient_descent():
 
 def test_the_mind_composes_distorts_and_holds_back():
     img = _scene()
-    plan = make_plan(img, own_card(img), feeling_of("awe"), Settings(work=128))
+    plan = make_plan(img, own_card(img), feeling_of("awe"), Settings(work=128, abstraction=0.0))
     h, w = plan.target.shape[-2:]
     assert (h, w) == working_size(96, 128, 128)[2:] and abs(plan.focal[1] - 0.25) < 0.2
     assert any("warmed" in line for line in plan.report) and any("restraint" in line for line in plan.report)
@@ -111,7 +111,8 @@ def test_the_mind_composes_distorts_and_holds_back():
         light = lab[..., 0] > lab[..., 0].median()
         return float(lab[..., 2][light].mean() - lab[..., 2][~light].mean())
     assert gap(plan.target) > gap(plan.source)
-    still = make_plan(img, own_card(img), feeling_of(None), Settings(work=128, compose=0.0, exaggerate=0.0))
+    still = make_plan(img, own_card(img), feeling_of(None),
+                      Settings(work=128, compose=0.0, exaggerate=0.0, abstraction=0.0))
     assert float((still.target - still.source).abs().max()) < 1e-3          # every move can be switched off
     loose, tight = finish_map(plan.focus, 0.9), finish_map(plan.focus, 0.1)
     assert float(loose.mean()) < float(tight.mean()) and float(loose[0, 0]) < float(loose[h // 2, w // 2])

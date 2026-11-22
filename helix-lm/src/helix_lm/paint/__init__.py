@@ -11,7 +11,7 @@ brushes, and keeps what it did so the painting can be changed later. See ``docs/
 from .emotion import EMOTIONS, Feeling, feeling_of, read_emotion
 from .mind import Settings
 from .painting import Painting, paint
-from .style import StyleCard, read_style
+from .style import StyleCard, named_style, read_style, style_names
 
 _LATER = {"load_hand": "model", "ModelHand": "model", "Pinxit": "model", "PinxitConfig": "model", "load_eye": "eye"}
 
@@ -27,4 +27,5 @@ def __getattr__(name: str):
 
 
 __all__ = ["EMOTIONS", "Feeling", "ModelHand", "Painting", "Pinxit", "PinxitConfig", "Settings", "StyleCard",
-           "feeling_of", "load_eye", "load_hand", "paint", "read_emotion", "read_style"]
+           "feeling_of", "load_eye", "load_hand", "named_style", "paint", "read_emotion", "read_style",
+           "style_names"]

@@ -17,12 +17,12 @@ FIELDS = ("hardness", "taper", "end_round", "bristle", "bristle_count", "load_de
 
 _TABLE = (
     # hardness taper end_round bristle count decay fade thickness
-    (0.85, 0.05, 0.10, 0.35, 9.0, 0.60, 0.15, 0.60),   # flat: square ends, clear bristle marks
-    (0.60, 0.55, 1.00, 0.15, 5.0, 0.40, 0.10, 0.40),   # round: pointed, soft
-    (0.70, 0.30, 0.80, 0.25, 7.0, 0.50, 0.12, 0.50),   # filbert: rounded flat, the all-purpose brush
-    (0.75, 0.15, 0.30, 0.80, 13.0, 1.60, 0.55, 0.30),  # dry: little paint, broken streaks
-    (0.97, 0.00, 0.00, 0.05, 3.0, 0.20, 0.05, 1.00),   # knife: hard slabs of thick paint
-    (0.15, 0.35, 1.00, 0.05, 3.0, 0.20, 0.20, 0.05),   # wash: wide, soft, thin
+    (0.93, 0.05, 0.10, 0.45, 11.0, 0.60, 0.15, 0.60),  # flat: square ends, clear bristle marks
+    (0.84, 0.55, 1.00, 0.25, 6.0, 0.40, 0.10, 0.40),   # round: pointed
+    (0.88, 0.30, 0.80, 0.35, 9.0, 0.50, 0.12, 0.50),   # filbert: rounded flat, the all-purpose brush
+    (0.86, 0.15, 0.30, 0.85, 15.0, 1.60, 0.55, 0.30),  # dry: little paint, broken streaks
+    (0.98, 0.00, 0.00, 0.08, 4.0, 0.20, 0.05, 1.00),   # knife: hard slabs of thick paint
+    (0.60, 0.35, 1.00, 0.20, 7.0, 0.30, 0.20, 0.06),   # wash: wide and thin, its edge a little soft
 )
 
 
@@ -31,9 +31,14 @@ def brush_table(device=None, dtype=torch.float32) -> torch.Tensor:
     return torch.tensor(_TABLE, dtype=dtype, device=device)
 
 
-def brush_profile(weights: torch.Tensor) -> torch.Tensor:
-    """``(..., brushes)`` weights summing to 1 -> ``(..., fields)`` the row the renderer uses."""
-    return weights @ brush_table(weights.device, weights.dtype)
+def brush_profile(weights: torch.Tensor, soft: float = 1.0) -> torch.Tensor:
+    """``(..., brushes)`` weights summing to 1 -> ``(..., fields)`` the row the renderer uses. ``soft`` above 1
+    makes every edge that much softer (a style painted without hard edges, like Leonardo's)."""
+    profile = weights @ brush_table(weights.device, weights.dtype)
+    if soft == 1.0:
+        return profile
+    hard = 1.0 - ((1.0 - profile[..., :1]) * soft).clamp(max=0.95)
+    return torch.cat([hard, profile[..., 1:]], -1)
 
 
 def one_hot(index: torch.Tensor) -> torch.Tensor:

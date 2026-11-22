@@ -83,6 +83,14 @@ def saliency(image: torch.Tensor, eye_map: torch.Tensor | None = None) -> torch.
     return out / out.max().clamp(min=1e-8)
 
 
+def slope(x: torch.Tensor) -> torch.Tensor:
+    """How steeply ``x (H, W)`` changes at each pixel."""
+    gx, gy = torch.zeros_like(x), torch.zeros_like(x)
+    gx[:, 1:-1] = (x[:, 2:] - x[:, :-2]) / 2.0
+    gy[1:-1] = (x[2:] - x[:-2]) / 2.0
+    return (gx ** 2 + gy ** 2).sqrt()
+
+
 def focal_point(sal: torch.Tensor) -> tuple[float, float]:
     """The centre of what stands out most: ``(y, x)`` in 0..1, the weighted middle of the top eighth."""
     cut = torch.quantile(sal.flatten()[:: max(1, sal.numel() // 20000)], 0.875)
@@ -109,4 +117,4 @@ def value_masses(light: torch.Tensor, masses: int = 3, softness: float = 0.03) -
     return centres, (weights * centres).sum(-1)
 
 
-__all__ = ["focal_point", "gaussian_blur", "lightness", "orientation_field", "saliency", "value_masses"]
+__all__ = ["focal_point", "gaussian_blur", "lightness", "orientation_field", "saliency", "slope", "value_masses"]
