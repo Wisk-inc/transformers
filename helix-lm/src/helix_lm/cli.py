@@ -308,6 +308,12 @@ def cmd_music(args: argparse.Namespace) -> None:
     print(f"written {out}\n{report.summary()}")
 
 
+def cmd_paint(args: argparse.Namespace) -> None:
+    from .paint.cli import main as paint_main
+
+    raise SystemExit(paint_main(args.paint_args))
+
+
 def cmd_tristream(args: argparse.Namespace) -> None:
     if args.action == "molab":
         from .scripts.tristream_molab import main as molab_main
@@ -643,6 +649,10 @@ def main(argv: list[str] | None = None) -> int:
     tristream.add_argument("--seed", type=int, default=0)
     tristream.add_argument("molab_args", nargs=argparse.REMAINDER, help="molab: see `helix tristream molab -- --help`")
     tristream.set_defaults(func=cmd_tristream)
+
+    painter = sub.add_parser("paint", help="Pinxit: paint a photo stroke by stroke (make, change, read, sizes, molab)")
+    painter.add_argument("paint_args", nargs=argparse.REMAINDER, help="see `helix paint make --help`")
+    painter.set_defaults(func=cmd_paint)
 
     args = parser.parse_args(argv)
     if getattr(args, "molab_args", None) and args.molab_args[:1] == ["--"]:

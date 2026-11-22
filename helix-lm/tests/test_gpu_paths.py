@@ -21,6 +21,12 @@ ALLOWED = {torch.Tensor.__getitem__, torch.Tensor.__setitem__, torch.Tensor.copy
            torch.Tensor.index_put_, torch.Tensor.index_select, torch.index_select, torch.Tensor.type_as}
 
 
+# calls that are about the tensor itself, not its values: they must reach the tensor, not a tagged copy of it
+ITSELF = {torch.Tensor.requires_grad_, torch.Tensor.retain_grad, torch.Tensor.grad.__get__,
+          torch.Tensor.grad.__set__, torch.Tensor.requires_grad.__set__, torch.Tensor.is_leaf.__get__,
+          torch.Tensor.retains_grad.__get__}
+
+
 class OnGpu(torch.Tensor):
     pass
 
@@ -48,6 +54,12 @@ class DeviceCheck(TorchFunctionMode):
 
     def __torch_function__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs or {}
+        if func in ITSELF:
+            with torch._C.DisableTorchFunctionSubclass():
+                out = func(*args, **kwargs)
+                if func == torch.Tensor.grad.__get__ and out is not None:   # a gradient lives where its tensor does
+                    out = out.as_subclass(type(args[0]))
+                return out
         tensors = [t for t in tree_flatten((args, kwargs))[0] if isinstance(t, torch.Tensor)]
         on_gpu = any(isinstance(t, OnGpu) for t in tensors)
         cpu_only = [t for t in tensors if not isinstance(t, (OnGpu, Placed)) and t.numel() > 1]
@@ -58,6 +70,8 @@ class DeviceCheck(TorchFunctionMode):
         with torch._C.DisableTorchFunctionSubclass():
             out = func(*tree_map(_plain, args), **tree_map(_plain, kwargs))
         placed = "device" in kwargs or (func is torch.Tensor.to and len(args) + len(kwargs) > 1)
+        if func is torch.Tensor.cpu:                             # brought back to the CPU: no longer tagged
+            return out
         if on_gpu:
             return tree_map(_gpu, out)
         if placed or (tensors and not cpu_only and any(isinstance(t, Placed) for t in tensors)):
