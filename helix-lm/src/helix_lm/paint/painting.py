@@ -28,7 +28,7 @@ import torch.nn.functional as F
 
 from .brushes import BRUSHES
 from .color import image_to_oklab, linear_to_srgb, oklab_to_image
-from .emotion import Feeling, feeling_of
+from .emotion import Feeling, emotion_name, feeling_of
 from .engine import CELL, StudioHand, paint_level, plan_levels
 from .io import load_alpha, load_image, resize, save_image, to_pil
 from .mind import Plan, Settings, make_plan, push_colour, simplify
@@ -354,7 +354,8 @@ class Painting:
         return self
 
 
-def paint(photo, style=None, emotion=None, *, hand=None, eye=None, log=None, **settings) -> Painting:
+def paint(photo, style=None, emotion=None, *, hand=None, eye=None, imagine=None, subject: str | None = None,
+          log=None, **settings) -> Painting:
     """
     Paint a photo. ``photo`` and ``style`` are paths, PIL images or ``(3, H, W)`` sRGB tensors; ``style`` may also
     be a :class:`~helix_lm.paint.style.StyleCard` or the name of a famous painting whose measured style comes
@@ -363,7 +364,11 @@ def paint(photo, style=None, emotion=None, *, hand=None, eye=None, log=None, **s
     ``"melancholy"`` ...); without one, a painting given as the style passes on the feeling read from it, and a
     photo alone is painted without one. ``hand`` is what makes the strokes (the trained model's
     :class:`~helix_lm.paint.model.ModelHand`, or the untrained :class:`StudioHand`), ``eye`` a pretrained vision
-    model that says what matters in the photo. Other keywords are :class:`~helix_lm.paint.mind.Settings`.
+    model that says what matters in the photo. ``imagine`` is an image model paired with the painter
+    (:func:`~helix_lm.paint.imagine.load_imaginer`): it imagines the photo as a painting, and that is what is
+    painted. ``subject`` says in words what the picture is of (``"a woman in an orange space suit"``): the image
+    model is told, and an eye that reads text looks for it and makes it the subject. Other keywords are
+    :class:`~helix_lm.paint.mind.Settings`.
     """
     image = load_image(photo, max_side=2048)
     s = Settings(**settings)
@@ -381,7 +386,16 @@ def paint(photo, style=None, emotion=None, *, hand=None, eye=None, log=None, **s
     else:
         feeling = feeling_of(card.emotion, 0.7) if (card.measured and card.emotion) else feeling_of(None)
     eye_map = eye.saliency(image) if eye is not None else None
-    plan = make_plan(image, card, feeling, s, eye_map)
+    if eye is not None and subject and getattr(eye, "has_text", False):   # the named thing is the subject
+        eye_map = 0.7 * eye.find(image, subject, grid=eye_map.shape[-1]) + 0.3 * eye_map
+    words = ""
+    if imagine is not None:
+        from .imagine import describe
+
+        said = emotion if isinstance(emotion, str) else (max(card.emotion, key=card.emotion.get)
+                                                         if (card.measured and card.emotion) else None)
+        words = describe(card, emotion_name(said) if said else None, subject)
+    plan = make_plan(image, card, feeling, s, eye_map, imagine, words)
     if log:
         for line in plan.report:
             log("plan: " + line)

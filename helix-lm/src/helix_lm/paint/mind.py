@@ -57,7 +57,7 @@ class Settings:
     restraint: float | None = None  # how much stays unfinished (None: what the feeling asks for)
     style_strength: float = 0.8     # how far lights, darks and colours move to the style's
     palette_strength: float = 0.7   # how strictly strokes use the palette's pigments
-    budget: int = 2600              # the most strokes a painting may have
+    budget: int = 3400              # the most strokes a painting may have
     colors: int = 12                # pigments on the palette
     steps: float = 1.0              # more (or fewer) refinement steps per pass; 0 lays the strokes as proposed
     weave: float = 0.6              # how much the canvas's cloth shows; 0 paints on a smooth board
@@ -354,9 +354,11 @@ def working_size(height: int, width: int, work: int, cell: int = 16) -> tuple[in
 
 
 def make_plan(photo: torch.Tensor, card: StyleCard, feeling: Feeling, settings: Settings,
-              eye_map: torch.Tensor | None = None) -> Plan:
+              eye_map: torch.Tensor | None = None, imagine=None, words: str = "") -> Plan:
     """Everything decided before painting ``photo`` (sRGB ``(3, H, W)``) in the style of ``card`` with
-    ``feeling``."""
+    ``feeling``. ``imagine`` is an image model paired with the painter
+    (:class:`helix_lm.paint.imagine.Imaginer`): once the photo is framed it imagines it as a painting from
+    ``words``, and that picture is what the painter then looks at instead of the photo."""
     photo = photo.float()
     _, _, h, w = working_size(photo.shape[-2], photo.shape[-1], settings.work)
     report = []
@@ -383,6 +385,10 @@ def make_plan(photo: torch.Tensor, card: StyleCard, feeling: Feeling, settings: 
     if moves:
         report.append("distorted on purpose: " + ", ".join(moves))
     source = source.clamp(0.0, 1.0)
+    if imagine is not None:
+        source = imagine(source, words, seed=settings.seed).clamp(0.0, 1.0)
+        report.append(f"imagined as a painting by {getattr(imagine, 'name', '') or 'the image model'}: "
+                      f"{words[:110]}")
     sal = saliency(source, None if eye_map is None else F.grid_sample(
         eye_map.float()[None, None], grid, mode="bilinear", padding_mode="reflection", align_corners=False)[0, 0])
     ys = ((torch.arange(h) + 0.5) / h - focal[0])[:, None]
@@ -390,7 +396,10 @@ def make_plan(photo: torch.Tensor, card: StyleCard, feeling: Feeling, settings: 
     near = torch.exp(-(ys ** 2 + xs ** 2) / (2 * 0.28 ** 2))
     focus = 0.6 * sal + 0.4 * near
     focus = focus / focus.max().clamp(min=1e-8)
-    planes, note = simplify(source, focus, settings.abstraction, card.hardness if card.measured else 1.0)
+    if imagine is not None:                                      # the image model has seen it in planes already
+        planes, note = source, ""
+    else:
+        planes, note = simplify(source, focus, settings.abstraction, card.hardness if card.measured else 1.0)
     if note:
         report.append(note)
     target, notes = push_colour(planes, focus, focal, feeling, card, x, settings.style_strength)

@@ -118,13 +118,11 @@ class Eye(nn.Module):
             for m, was in zip(layers, before, strict=True):
                 m.active = was
 
-    @torch.no_grad()
-    def saliency(self, image: torch.Tensor, grid: int = 8, window: int = 3) -> torch.Tensor:
-        """What the picture is about, as the eye sees it: ``(grid, grid)`` in 0..1, on the CPU, where the plan
-        is made. Part by part the picture is blurred away and the eye is asked for its summary again; the more
-        the summary changes, the more that part matters. (The patch features themselves do not say this: in
-        SigLIP 2 a few stray patches stand out from the rest, not the subject.) The eye is asked as it came,
-        without the adapters."""
+    @staticmethod
+    def _parts(image: torch.Tensor, grid: int, window: int) -> tuple[list, list]:
+        """The picture whole, then again with one part after another blurred away: the views, and for each
+        blurred view the row and column of its part on a ``grid x grid`` board (parts are ``window`` squares
+        wide and overlap)."""
         side = 32 * grid
         small = F.interpolate(image[None].float(), size=(side, side), mode="bilinear", align_corners=False,
                               antialias=True)[0]
@@ -138,16 +136,45 @@ class Eye(nn.Module):
                 view[part] = flat[part]
                 views.append(view)
                 places.append((y, x))
+        return views, places
+
+    @staticmethod
+    def _board(places: list, values: torch.Tensor, grid: int, window: int) -> torch.Tensor:
+        """What blurring each part changed, laid back on the board: every square gets the mean over the parts
+        that covered it."""
+        total, count = torch.zeros(grid, grid), torch.zeros(grid, grid)
+        for (y, x), value in zip(places, values, strict=True):
+            total[y : y + window, x : x + window] += value
+            count[y : y + window, x : x + window] += 1.0
+        return total / count.clamp(min=1.0)
+
+    @torch.no_grad()
+    def saliency(self, image: torch.Tensor, grid: int = 8, window: int = 3) -> torch.Tensor:
+        """What the picture is about, as the eye sees it: ``(grid, grid)`` in 0..1, on the CPU, where the plan
+        is made. Part by part the picture is blurred away and the eye is asked for its summary again; the more
+        the summary changes, the more that part matters. (The patch features themselves do not say this: in
+        SigLIP 2 a few stray patches stand out from the rest, not the subject.) The eye is asked as it came,
+        without the adapters."""
+        views, places = self._parts(image, grid, window)
         with self.as_pretrained():
             pooled = torch.cat([self.features_many(views[i : i + 16])["pooled"] for i in range(0, len(views), 16)])
         pooled = F.normalize(pooled.float(), dim=-1).cpu()
-        change = 1.0 - (pooled[1:] * pooled[:1]).sum(-1)
-        total, count = torch.zeros(grid, grid), torch.zeros(grid, grid)
-        for (y, x), value in zip(places, change, strict=True):
-            total[y : y + window, x : x + window] += value
-            count[y : y + window, x : x + window] += 1.0
-        out = total / count.clamp(min=1.0)
+        out = self._board(places, 1.0 - (pooled[1:] * pooled[:1]).sum(-1), grid, window)
         return (out - out.min()) / (out.max() - out.min() + 1e-8)
+
+    @torch.no_grad()
+    def find(self, image: torch.Tensor, words: str, grid: int = 10, window: int = 3) -> torch.Tensor:
+        """Where in the picture the thing the ``words`` name is: ``(grid, grid)`` in 0..1, on the CPU. Part by
+        part the picture is blurred away and the eye is asked how well the words still fit it; where blurring
+        hurts the fit most, the thing is. Needs an eye that reads text."""
+        if not self.has_text:
+            raise ValueError(f"{self.name} does not read text; use a SigLIP or CLIP eye to find things by words")
+        said = self.text([words])[0]
+        views, places = self._parts(image, grid, window)
+        fit = torch.cat([self.score(torch.stack(views[i : i + 16]), said) for i in range(0, len(views), 16)])
+        fit = fit.float().cpu()
+        out = self._board(places, (fit[:1] - fit[1:]).clamp(min=0.0), grid, window)
+        return out / out.max().clamp(min=1e-8)
 
     def text(self, prompts: list) -> torch.Tensor:
         raise NotImplementedError("this eye does not read text")

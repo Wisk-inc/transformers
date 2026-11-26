@@ -13,7 +13,8 @@ from .mind import Settings
 from .painting import Painting, paint
 from .style import StyleCard, named_style, read_style, style_names
 
-_LATER = {"load_hand": "model", "ModelHand": "model", "Pinxit": "model", "PinxitConfig": "model", "load_eye": "eye"}
+_LATER = {"load_hand": "model", "ModelHand": "model", "Pinxit": "model", "PinxitConfig": "model", "load_eye": "eye",
+          "load_imaginer": "imagine"}
 
 
 def __getattr__(name: str):
@@ -27,5 +28,5 @@ def __getattr__(name: str):
 
 
 __all__ = ["EMOTIONS", "Feeling", "ModelHand", "Painting", "Pinxit", "PinxitConfig", "Settings", "StyleCard",
-           "feeling_of", "load_eye", "load_hand", "named_style", "paint", "read_emotion", "read_style",
-           "style_names"]
+           "feeling_of", "load_eye", "load_hand", "load_imaginer", "named_style", "paint", "read_emotion",
+           "read_style", "style_names"]
