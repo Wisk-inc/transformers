@@ -22,6 +22,7 @@ hand-drawn animation.
 
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass
 
@@ -53,42 +54,113 @@ TOOLS = {
     "brush pen": Tool("brush pen", 0.0032, 0.96, False, 0.9, 0.0, 1.1, 0.5),
     "marker": Tool("marker", 0.016, 0.86, True, 0.05, 0.06, 0.1, 0.9),
     "fine marker": Tool("fine marker", 0.0062, 0.86, True, 0.1, 0.05, 0.15, 0.8),
+    # cel paint: opaque, filled exactly up to the ink lines and laid under them, as on the back of a cel
+    "brush": Tool("brush", 0.02, 1.0, False, 0.0, 0.0, 0.0, 1.6),
 }
 TOOL_NAMES = tuple(TOOLS)
-KINDS = ("sketch", "line", "fill", "shade")
+# sketch and line are ink; fill and shade are marker layers; cel, cel-shadow and cel-light are cel paint (a
+# flat base colour, the hard-edged shadow shape over it, the highlight shape): new kinds go at the end, so that
+# older .pinxa files still read
+KINDS = ("sketch", "line", "fill", "shade", "cel", "cel-shadow", "cel-light")
+CELS = ("cel", "cel-shadow", "cel-light")
+_uids = itertools.count(1)
 SURFACES = {"whiteboard": (0.955, 0.958, 0.962), "paper": (0.968, 0.955, 0.922)}
 
 
 class Line:
     """One stroke of a tool: ``points (K, 2)`` in board widths (x, y), the pen's ``pressure (K,)`` 0..1, the
     ``tool`` (a name of :data:`TOOLS`), the ``colour`` (sRGB), for colour the number of the ``marker`` on the
-    palette (-1 for ink), its ``kind`` (sketch, line, fill, shade) and its ``age`` (for how many frames it has
-    been traced over from the frame before; 0 for a line drawn new)."""
+    palette (-1 for ink), its ``kind`` (see :data:`KINDS`) and its ``age`` (for how many frames it has been
+    traced over from the frame before; 0 for a line drawn new). ``uid`` names the line across frames: a line
+    traced onto the next frame keeps it, so its path through the animation can be followed (and smoothed).
+    A cel shape (``kind`` in :data:`CELS`) is a filled outline: ``points`` are its rings one after the other
+    (the outer edge, then any holes) and ``rings`` their numbers of points; it is filled exactly, even-odd."""
 
-    __slots__ = ("age", "colour", "kind", "marker", "points", "pressure", "tool")
+    __slots__ = ("age", "colour", "kind", "marker", "points", "pressure", "rings", "tool", "uid")
 
-    def __init__(self, points, pressure, tool: str, colour, marker: int = -1, kind: str = "line", age: int = 0):
+    def __init__(self, points, pressure, tool: str, colour, marker: int = -1, kind: str = "line", age: int = 0,
+                 uid: int | None = None, rings=None):
         self.points = torch.as_tensor(points, dtype=torch.float32)
         self.pressure = torch.as_tensor(pressure, dtype=torch.float32)
         self.tool, self.colour = tool, tuple(float(c) for c in colour)
         self.marker, self.kind, self.age = int(marker), kind, int(age)
+        self.uid = next(_uids) if uid is None else int(uid)
+        self.rings = None if rings is None else tuple(int(n) for n in rings)
 
     def __len__(self) -> int:
         return int(self.points.shape[0])
 
     def length(self) -> float:
+        if self.rings is not None:                   # a cel shape: the length of its edge
+            return float(sum(ring.norm(dim=-1).sum() for ring in self.ring_points(close=True)))
         return float((self.points[1:] - self.points[:-1]).norm(dim=-1).sum()) if len(self) > 1 else 0.0
+
+    def ring_points(self, close: bool = False) -> list:
+        """A cel shape's rings as ``(K, 2)`` points each (with ``close``, the steps from point to point instead,
+        the last one back to the first)."""
+        out, at = [], 0
+        for n in self.rings or (len(self),):
+            ring = self.points[at : at + n]
+            out.append(torch.roll(ring, -1, 0) - ring if close else ring)
+            at += n
+        return out
 
     def moved(self, points, pressure=None, age: int | None = None) -> Line:
         return Line(points, self.pressure if pressure is None else pressure, self.tool, self.colour, self.marker,
-                    self.kind, self.age + 1 if age is None else age)
+                    self.kind, self.age + 1 if age is None else age, self.uid, self.rings)
 
     def reversed(self) -> Line:
+        if self.rings is not None:                   # a filled shape has no direction to draw it in
+            return self
         return Line(self.points.flip(0), self.pressure.flip(0), self.tool, self.colour, self.marker, self.kind,
-                    self.age)
+                    self.age, self.uid)
 
     def __repr__(self) -> str:
         return f"Line({self.kind}, {self.tool}, {len(self)} points, marker {self.marker}, age {self.age})"
+
+
+def fill_rings(points: torch.Tensor, rings, height: int, width: int, ss: int = 4):
+    """How much of each pixel the shape with these rings covers (even-odd, so a ring inside another is a
+    hole), exactly up to its edge: ``points (N, 2)`` in pixels (x, y), ``rings`` the numbers of points of each
+    ring. Returns ``(y0, x0, coverage (h, w))`` for the part of the board it touches, or None. Each pixel is
+    looked at ``ss`` by ``ss`` times, so an edge is smooth."""
+    pts = torch.as_tensor(points, dtype=torch.float32)
+    if len(pts) < 3:
+        return None
+    x0 = max(0, int(math.floor(float(pts[:, 0].min()))))
+    y0 = max(0, int(math.floor(float(pts[:, 1].min()))))
+    x1 = min(width, int(math.ceil(float(pts[:, 0].max()))) + 1)
+    y1 = min(height, int(math.ceil(float(pts[:, 1].max()))) + 1)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    a_list, b_list, at = [], [], 0
+    for n in rings or (len(pts),):
+        ring = pts[at : at + n]
+        at += n
+        if len(ring) >= 2:
+            a_list.append(ring)
+            b_list.append(torch.roll(ring, -1, 0))
+    a, b = torch.cat(a_list), torch.cat(b_list)
+    a = (a - torch.tensor([x0, y0], dtype=torch.float32)) * ss        # in samples of the box
+    b = (b - torch.tensor([x0, y0], dtype=torch.float32)) * ss
+    rows, cols = (y1 - y0) * ss, (x1 - x0) * ss
+    lo, hi = torch.minimum(a[:, 1], b[:, 1]), torch.maximum(a[:, 1], b[:, 1])
+    j0 = torch.ceil(lo - 0.5).clamp(0, rows).long()                    # the sample rows (at j + 0.5) it crosses
+    j1 = torch.ceil(hi - 0.5).clamp(0, rows).long()
+    count = (j1 - j0).clamp(min=0)
+    total = int(count.sum())
+    if total == 0:
+        return None
+    edge = torch.repeat_interleave(torch.arange(len(a)), count)
+    j = j0[edge] + torch.arange(total) - torch.repeat_interleave(torch.cumsum(count, 0) - count, count)
+    ya, yb, xa, xb = a[edge, 1], b[edge, 1], a[edge, 0], b[edge, 0]
+    x = xa + (j.float() + 0.5 - ya) * (xb - xa) / (yb - ya)
+    i = torch.ceil(x - 0.5).clamp(0, cols).long()                      # samples from here on are across it
+    flips = torch.zeros(rows * (cols + 1), dtype=torch.int32)
+    flips.index_put_((j * (cols + 1) + i,), torch.ones(total, dtype=torch.int32), accumulate=True)
+    inside = (flips.view(rows, cols + 1).cumsum(1)[:, :cols] % 2).float()
+    cov = F.avg_pool2d(inside[None, None], ss)[0, 0]
+    return y0, x0, cov
 
 
 # ------------------------------------------------------------------------------------------- rendering --
@@ -215,11 +287,38 @@ class Board:
         self.canvas, self.tooth = surface(height, width, kind)
         self.waver, self.seed, self.count = waver, seed, 0
         self.wet, self.wet_key = torch.zeros(height, width), None     # marker ink not yet dry
+        # the ink lines alone (colour times cover, and cover), so that cel paint can go under them:
+        # canvas = paint * (1 - ink_cover) + ink
+        self.ink, self.ink_cover = torch.zeros(3, height, width), torch.zeros(height, width)
 
     def pixels(self, line: Line) -> torch.Tensor:
         return line.points * self.scale + self.origin
 
+    def _paint(self, line: Line, upto: int | None, canvas: torch.Tensor | None) -> None:
+        """Cel paint: the shape filled exactly, opaque, under the ink lines already drawn. Drawn part way
+        (``upto`` of its points), the brush has gone over that share of it, in rows across the shape."""
+        got = fill_rings(self.pixels(line), line.rings, self.height, self.width)
+        if got is None:
+            return
+        y0, x0, cov = got
+        h, w = cov.shape
+        if upto is not None and upto < len(line):
+            share = upto / max(1, len(line))
+            yy = torch.arange(h, dtype=torch.float32)[:, None]
+            xx = torch.arange(w, dtype=torch.float32)[None, :]
+            along = (0.77 * xx + 0.64 * yy) / max(1.0, 0.77 * w + 0.64 * h)
+            cov = cov * ((share - along) * max(h, w) / 3.0 + 0.5).clamp(0.0, 1.0)
+        canvas = self.canvas if canvas is None else canvas
+        region = canvas[:, y0 : y0 + h, x0 : x0 + w]
+        ink = self.ink[:, y0 : y0 + h, x0 : x0 + w]
+        under = 1.0 - self.ink_cover[y0 : y0 + h, x0 : x0 + w]
+        paint = srgb_to_linear(torch.tensor(line.colour))[:, None, None]
+        region.mul_(1.0 - cov).add_(cov * (ink + under * paint))
+
     def _ink(self, line: Line, upto: int | None = None, canvas: torch.Tensor | None = None) -> None:
+        if line.kind in CELS:
+            self._paint(line, upto, canvas)
+            return
         tool = TOOLS[line.tool]
         key = (line.marker, line.kind, line.colour)
         commit = canvas is None                              # drawn for good, not only looked at
@@ -265,6 +364,10 @@ class Board:
                 self.wet[y0 : y0 + h, x0 : x0 + w] = more
         else:
             region.mul_(1.0 - alpha).add_(ink * alpha)
+            if commit and line.kind in ("line", "sketch"):
+                self.ink[:, y0 : y0 + h, x0 : x0 + w].mul_(1.0 - alpha).add_(ink * alpha)
+                cover = self.ink_cover[y0 : y0 + h, x0 : x0 + w]
+                cover.mul_(1.0 - alpha).add_(alpha)
 
     def draw(self, line: Line) -> None:
         self._ink(line)
@@ -712,6 +815,10 @@ def order(lines: list, start=(0.0, 0.0)) -> list:
         long = [line for line in group if line.length() > 0.08]
         nearest(long)
         nearest([line for line in group if line.length() <= 0.08])
+    for kind in CELS:
+        group = [line for line in lines if line.kind == kind]
+        for colour in sorted({line.colour for line in group}, key=lambda c: -sum(c)):
+            nearest([line for line in group if line.colour == colour])
     for kind in ("fill", "shade"):
         group = [line for line in lines if line.kind == kind]
         for k in sorted({line.marker for line in group}):
@@ -802,7 +909,7 @@ def draw_picture(image: torch.Tensor, palette: torch.Tensor | None = None, *, li
     return order(out)
 
 
-__all__ = ["KINDS", "SURFACES", "TOOLS", "TOOL_NAMES", "Board", "Line", "Look", "Tool", "absorb_slivers",
-           "colour_labels", "colour_lines", "dedupe", "draw_picture", "find_lines", "hatch", "ink_lines",
+__all__ = ["CELS", "KINDS", "SURFACES", "TOOLS", "TOOL_NAMES", "Board", "Line", "Look", "Tool", "absorb_slivers",
+           "fill_rings", "colour_labels", "colour_lines", "dedupe", "draw_picture", "find_lines", "hatch", "ink_lines",
            "line_strength", "look", "markers", "order", "radii", "render", "smooth_path", "stamp", "surface", "thin",
            "timing", "trace"]

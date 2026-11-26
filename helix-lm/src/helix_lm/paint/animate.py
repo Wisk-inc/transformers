@@ -563,6 +563,9 @@ class Animation:
                 "markers": torch.tensor([line.marker for line in lines], dtype=torch.long),
                 "ages": torch.tensor([line.age for line in lines], dtype=torch.long),
                 "colours": torch.tensor([line.colour for line in lines], dtype=torch.float32).reshape(-1, 3),
+                "uids": torch.tensor([line.uid for line in lines], dtype=torch.long),
+                "ring_counts": torch.tensor([len(line.rings or ()) for line in lines], dtype=torch.long),
+                "rings": torch.tensor([n for line in lines for n in (line.rings or ())], dtype=torch.long),
                 "kept": sheet.kept, "new": sheet.new, "fresh": sheet.fresh})
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"version": VERSION, "sheets": frames, "palette": self.palette, "source": self.source,
@@ -576,11 +579,14 @@ class Animation:
         data = torch.load(Path(path), map_location="cpu", weights_only=True)
         sheets = []
         for f in data["sheets"]:
-            lines, at = [], 0
+            lines, at, ring_at = [], 0, 0
+            counts = f["ring_counts"].tolist() if "ring_counts" in f else [0] * len(f["sizes"])
             for i, n in enumerate(f["sizes"].tolist()):
+                rings = f["rings"][ring_at : ring_at + counts[i]].tolist() if counts[i] else None
+                ring_at += counts[i]
                 lines.append(Line(f["points"][at : at + n], f["pressure"][at : at + n], TOOL_NAMES[int(f["tools"][i])],
                                   f["colours"][i].tolist(), int(f["markers"][i]), KINDS[int(f["kinds"][i])],
-                                  int(f["ages"][i])))
+                                  int(f["ages"][i]), int(f["uids"][i]) if "uids" in f else None, rings))
                 at += n
             sheets.append(Sheet(lines, int(f["kept"]), int(f["new"]), bool(f["fresh"])))
         anim = cls(sheets, data["palette"], None, float(data["fps"]), data["words"], data["surface"],
