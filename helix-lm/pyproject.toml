@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "helix-lm"
-version = "2.5.0"
+version = "2.6.0"
 description = "HELIX, ANANSI and TriStream-2: linear-scaling sequence architectures with exact long-range recall, the engine that trains them (Muon, muP, growth), a music stack (analysis, frisson critic, conductor, separation, singing voice conversion), and Pinxit, a painter that works stroke by stroke"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,6 +31,8 @@ keywords = [
     "stroke-based-rendering",
     "painting",
     "style-transfer",
+    "animation",
+    "text-to-video",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -61,7 +63,7 @@ kernels = ["flash-linear-attention>=0.3"]
 eval = ["lm_eval>=0.4.5", "evalplus>=0.3"]
 jamaica = ["pypdf>=4"]
 music = ["soundfile>=0.12", "demucs>=4.0"]
-paint = ["pillow>=9", "transformers>=4.49"]
+paint = ["pillow>=9", "transformers>=4.49", "diffusers>=0.32", "peft>=0.13", "accelerate>=0.30", "imageio-ffmpeg>=0.5"]
 dev = ["pytest>=7", "ruff>=0.6"]
 all = ["helix-lm[kernels,eval,jamaica,music,paint]"]
 

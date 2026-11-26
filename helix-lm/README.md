@@ -149,6 +149,23 @@ HelixConfig(
 )
 ```
 
+## 2.6: Pinxit draws animations, and paints with an image model
+
+* **animation drawn by hand** ([docs/PINXIT_ANIMATE.md](docs/PINXIT_ANIMATE.md)): ask in words, an open video
+  model (AnimateLCM on a CPU, Wan 2.2 on a large GPU, a LoRA of your own on either) imagines the motion, and
+  Pinxit draws every frame on a whiteboard with a pen and markers, one frame after the other, each traced over
+  the last on a lightbox so the character keeps its look. `clip.making_of()` shows it being drawn with the pen
+  in hand; a `.pinxa` file keeps it all, to recolour, redraw with another pen or carry on with a next clip;
+* **paired with an image model**: `paint(photo, imagine=load_imaginer(), subject="...")` has Stable Diffusion
+  1.5 (held to the photo's edges) imagine the photo as a painting, and Pinxit paints that stroke by stroke;
+* **words**: the eye finds a thing named in words in a picture, and reads a feeling from a phrase.
+
+```python
+from helix_lm.paint import animate
+clip = animate("a cute cartoon fox running in the snow, side view")
+clip.save("fox.mp4"); clip.making_of("fox_being_drawn.mp4"); clip.save("fox.pinxa")
+```
+
 ## 2.5: Pinxit, a painter
 
 Pinxit (`helix_lm.paint`, [docs/PINXIT.md](docs/PINXIT.md)) paints a photo stroke by stroke. It does not start

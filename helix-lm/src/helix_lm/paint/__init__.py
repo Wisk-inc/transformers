@@ -14,7 +14,7 @@ from .painting import Painting, paint
 from .style import StyleCard, named_style, read_style, style_names
 
 _LATER = {"load_hand": "model", "ModelHand": "model", "Pinxit": "model", "PinxitConfig": "model", "load_eye": "eye",
-          "load_imaginer": "imagine"}
+          "load_imaginer": "imagine", "animate": "animate", "Animation": "animate", "load_animator": "video"}
 
 
 def __getattr__(name: str):
@@ -27,6 +27,6 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["EMOTIONS", "Feeling", "ModelHand", "Painting", "Pinxit", "PinxitConfig", "Settings", "StyleCard",
-           "feeling_of", "load_eye", "load_hand", "load_imaginer", "named_style", "paint", "read_emotion",
-           "read_style", "style_names"]
+__all__ = ["EMOTIONS", "Animation", "Feeling", "ModelHand", "Painting", "Pinxit", "PinxitConfig", "Settings",
+           "StyleCard", "animate", "feeling_of", "load_animator", "load_eye", "load_hand", "load_imaginer",
+           "named_style", "paint", "read_emotion", "read_style", "style_names"]

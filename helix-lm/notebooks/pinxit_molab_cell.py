@@ -1,5 +1,5 @@
 # Pinxit-1: one cell, plain Python. Runs in molab, Jupyter, or as "python pinxit_molab_cell.py" on a rented GPU.
-# Paste your Hugging Face token below and run it. It stops any earlier run by itself, installs helix-lm 2.5.0,
+# Paste your Hugging Face token below and run it. It stops any earlier run by itself, installs helix-lm 2.6.0,
 # pulls the latest checkpoint from the private repo CorxLabs/Pinxit-1 and goes on with the hours that are left.
 # The GPU starts on practice sheets at once; the paintings and photos are fetched beside it. A molab session ends
 # after 12 hours: the run saves, pushes and stops 30 minutes before that, so run this cell again in the next
@@ -13,7 +13,7 @@ HF_REPO = "CorxLabs/Pinxit-1"               # private: checkpoints, markers, the
 GPU_HOURS = 20                              # the GPU hours you have in total for this model
 SIZE = "px-base"                            # 45M parameters; "px-small" (11M) is faster, "px-large" is bigger
 ROOT = "auto"                               # "auto": the folder that already holds this run, else /workspace/pinxit
-HELIX = "2.5.0"
+HELIX = "2.6.0"
 
 import contextlib
 import os

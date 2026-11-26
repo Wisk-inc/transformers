@@ -7,6 +7,9 @@ back, saved with its memory and changed later.
 
 "Pinxit" is what painters wrote after their name: he painted it.
 
+Pinxit also draws animations, frame by frame with a pen and markers on a whiteboard, from words or from a
+video: [PINXIT_ANIMATE.md](PINXIT_ANIMATE.md).
+
 ```bash
 pip install "helix-lm[paint]"
 ```

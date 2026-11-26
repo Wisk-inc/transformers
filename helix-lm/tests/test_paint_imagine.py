@@ -3,6 +3,7 @@
 them: finding a thing, picking a picture, reading a feeling from a phrase. The image model is a stand-in here;
 the real one was run by hand (docs/PINXIT.md)."""
 
+import numpy as np
 import torch
 
 from helix_lm.paint import named_style, paint
@@ -28,8 +29,7 @@ class FakePipe:
 
     def __call__(self, **kwargs):
         self.asked.append(kwargs)
-        picture = torch.tensor(list(kwargs["image"].getdata()), dtype=torch.float32).T.reshape(
-            3, kwargs["image"].size[1], kwargs["image"].size[0]) / 255.0
+        picture = torch.from_numpy(np.array(kwargs["image"].convert("RGB"))).float().permute(2, 0, 1) / 255.0
         picture[2] = (picture[2] + 0.3).clamp(0, 1)
         return type("Out", (), {"images": picture[None]})()
 
@@ -45,7 +45,8 @@ def test_the_image_model_is_told_what_to_imagine():
     assert describe(None, None, "a cat").startswith("a cat, oil painting")
     words = describe(named_style("mona lisa"), "mystery", "a woman")
     assert "in the style of Leonardo da Vinci, Mona Lisa" in words and "sfumato" in words and "dusk" in words
-    assert "impasto" in describe(named_style("the starry night")) and "outlines" in describe(named_style("the bedroom"))
+    assert "impasto" in describe(named_style("the starry night"))
+    assert "outlines" in describe(named_style("the bedroom"))
 
 
 def test_the_imagined_picture_is_what_gets_painted():
