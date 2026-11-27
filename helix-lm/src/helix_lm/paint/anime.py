@@ -41,6 +41,7 @@ from .color import srgb_to_oklab
 from .detail import REDRAW, draw_details, find_details, follow, merge
 from .draw import CELS, Line, fill_rings
 from .flow import optical_flow, sample
+from .mind import simplify
 from .motion import exposure, keys, motion_amount, steady
 from .space import light_direction, normals, read_space
 
@@ -54,15 +55,20 @@ BACKGROUND_MARKERS = 100        # the background's colours are numbered from her
 
 
 def background_art(plate, palette: torch.Tensor | None, frame_size: tuple, *, lines: str = "pen",
-                   detail: float = 0.85, colours: int = 28) -> list:
+                   detail: float = 0.85, colours: int = 28, smooth: float = 0.6) -> list:
     """The set painted once (``plate``, :class:`helix_lm.paint.space.Plate`), its lines in board widths of a
     frame of ``frame_size (H, W)`` placed as frame 0 sees it. Background art is painted with more colours and
     finer detail than a character's cel (``colours`` of its own, found in the set; ``palette`` None), and its
-    colours are numbered from :data:`BACKGROUND_MARKERS`, so recolouring the character leaves the set alone."""
+    colours are numbered from :data:`BACKGROUND_MARKERS`, so recolouring the character leaves the set alone.
+    The set is first seen in planes (``smooth``, :func:`helix_lm.paint.mind.simplify`): the speckle of a wall's
+    texture is levelled out, its real light and dark kept, so it is not painted as blotches."""
     _, w = frame_size
     pw = plate.image.shape[-1]
-    own = palette_for([plate.image], colours) if palette is None else palette
-    drawn = paint_frame(plate.image, own, line_tool=lines, detail=detail, background=True)
+    image = plate.image
+    if smooth > 0:
+        image, _ = simplify(image.float().clamp(0.0, 1.0), torch.zeros(image.shape[-2:]), smooth, 0.5)
+    own = palette_for([image], colours) if palette is None else palette
+    drawn = paint_frame(image, own, line_tool=lines, detail=detail, background=True)
     ox, oy = plate.origin
     shift = torch.tensor([float(ox), float(oy)])
     out = []
