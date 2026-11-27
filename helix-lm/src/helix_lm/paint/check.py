@@ -79,9 +79,10 @@ def score(lines: list, image: torch.Tensor, palette: torch.Tensor | None = None,
     labels = _labels(image, palette)
     regions = {k: float(error[labels == k].mean()) for k in range(len(palette)) if bool((labels == k).any())}
     # wrong over more than a line's width: a band thinner than five pixels is a line drawn a little thinner
-    # or a little off, which drawing the place again with the same pens would not change
+    # or a little off, which drawing the place again with the same pens would not change. Bare board where
+    # the frame has colour is wrong however thin
     wrong = gaussian_blur(error, 1.0) > WRONG
-    bad = _open(wrong, 5) | _open(bare, 3)
+    bad = _open(wrong, 5) | bare
     if bool(bad.any()):                               # specks are not worth redrawing
         comp, n = components(bad)
         area = torch.bincount(comp[comp >= 0], minlength=n)

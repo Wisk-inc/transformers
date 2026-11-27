@@ -118,7 +118,8 @@ def _stats(comp: torch.Tensor, n: int, value: torch.Tensor) -> dict:
 
     return {"area": area, "x0": reduce(xs, "amin", big), "y0": reduce(ys, "amin", big),
             "x1": reduce(xs, "amax", -1.0) + 1, "y1": reduce(ys, "amax", -1.0) + 1,
-            "cx": reduce(xs + 0.5, "sum", 0.0) / area.clamp(min=1), "cy": reduce(ys + 0.5, "sum", 0.0) / area.clamp(min=1),
+            "cx": reduce(xs + 0.5, "sum", 0.0) / area.clamp(min=1),
+            "cy": reduce(ys + 0.5, "sum", 0.0) / area.clamp(min=1),
             "mean": reduce(value[ys, xs], "sum", 0.0) / area.clamp(min=1)}
 
 
@@ -260,7 +261,8 @@ def clip_lines(lines: list, box, scale: float, keep_inside: bool = True) -> list
         pts = line.points * scale
         if line.kind in CELS and line.rings is not None:
             lo, hi = pts.min(0).values, pts.max(0).values
-            apart = float(hi[0]) <= box[0] or float(lo[0]) >= box[2] or float(hi[1]) <= box[1] or float(lo[1]) >= box[3]
+            apart = (float(hi[0]) <= box[0] or float(lo[0]) >= box[2] or float(hi[1]) <= box[1]
+                     or float(lo[1]) >= box[3])
             if apart:
                 if not keep_inside:
                     out.append(line)
@@ -310,7 +312,8 @@ def _within(a, b) -> float:
 
 
 def _clamp_box(box, h: int, w: int) -> tuple:
-    return (max(0.0, float(box[0])), max(0.0, float(box[1])), min(float(w), float(box[2])), min(float(h), float(box[3])))
+    return (max(0.0, float(box[0])), max(0.0, float(box[1])), min(float(w), float(box[2])),
+            min(float(h), float(box[3])))
 
 
 def _small_dark(lab: torch.Tensor, side: int) -> torch.Tensor:
@@ -385,13 +388,10 @@ def _faces_by_eyes(image: torch.Tensor, lab: torch.Tensor) -> list:
     for base, a, b, d, (ex, ey) in sorted(pairs, key=lambda p: -p[0]):
         nx, ny = -ey, ex                                       # down the face, at right angles to the eye line
         mx, my = 0.5 * (a["c"][0] + b["c"][0]), 0.5 * (a["c"][1] + b["c"][1])
-
-        def at(s_along, s_down):
-            x = min(w - 1, max(0, int(mx + ex * s_along * d + nx * s_down * d)))
-            y = min(h - 1, max(0, int(my + ey * s_along * d + ny * s_down * d)))
-            return x, y
-
-        seeds = [at(0.0, 0.35), at(-0.5, 0.5), at(0.5, 0.5), at(0.0, 0.15)]
+        seeds = []
+        for u, v in ((0.0, 0.35), (-0.5, 0.5), (0.5, 0.5), (0.0, 0.15)):         # between and under the eyes
+            x, y = mx + (ex * u + nx * v) * d, my + (ey * u + ny * v) * d
+            seeds.append((min(w - 1, max(0, int(x))), min(h - 1, max(0, int(y)))))
         colours = torch.stack([flat[:, y * w + x] for x, y in seeds])
         skin = colours.median(0).values
         if float((colours - skin).norm(dim=1).max()) > 0.12 or float(skin[0]) < 0.35:
@@ -456,6 +456,13 @@ def _eye_part_box(e: dict, h: int, w: int) -> tuple:
     return _clamp_box((x0 - gx, y0 - gy, x1 + gx, y1 + 2.0 * gy), h, w)
 
 
+def _landmark_box(pts: torch.Tensor, ids, grow: float, h: int, w: int) -> tuple:
+    q = pts if ids is None else pts[ids]
+    lo, hi = q.min(0).values, q.max(0).values
+    g = grow * (hi - lo)
+    return _clamp_box((float(lo[0] - g[0]), float(lo[1] - g[1]), float(hi[0] + g[0]), float(hi[1] + g[1])), h, w)
+
+
 def _mediapipe_faces(image: torch.Tensor) -> list:
     """Human faces by MediaPipe's face landmarks, when the package is there (it is optional, and this path is
     not covered by the tests): ``[(face box, eye box, eye box, mouth box)]``, or ``[]``."""
@@ -470,16 +477,9 @@ def _mediapipe_faces(image: torch.Tensor) -> list:
         out = []
         for face in got.multi_face_landmarks or []:
             pts = torch.tensor([[p.x * w, p.y * h] for p in face.landmark])
-
-            def box(ids, grow=0.25):
-                q = pts[ids] if ids is not None else pts
-                lo, hi = q.min(0).values, q.max(0).values
-                g = grow * (hi - lo)
-                return _clamp_box((float(lo[0] - g[0]), float(lo[1] - g[1]), float(hi[0] + g[0]), float(hi[1] + g[1])),
-                                  h, w)
-
-            out.append((box(None, 0.08), box([33, 133, 159, 145, 160, 144]), box([362, 263, 386, 374, 387, 373]),
-                        box([61, 291, 0, 17, 13, 14])))
+            out.append(tuple(_landmark_box(pts, ids, grow, h, w) for ids, grow in (
+                (None, 0.08), ([33, 133, 159, 145, 160, 144], 0.25), ([362, 263, 386, 374, 387, 373], 0.25),
+                ([61, 291, 0, 17, 13, 14], 0.25))))
         return out
     except Exception:                                # not installed, or another version of its interface
         return []
@@ -532,7 +532,8 @@ def _dense_details(image: torch.Tensor, lab: torch.Tensor, labels, taken: list, 
         wx0, wy0, wx1, wy1 = max(0, x - k // 2), max(0, y - k // 2), min(w, x + k // 2 + 1), min(h, y + k // 2 + 1)
         window = detail[wy0:wy1, wx0:wx1]
         ys, xs = torch.nonzero(window > 0.3 * float(window.max()), as_tuple=True)
-        x0, y0, x1, y1 = float(xs.min()) + wx0, float(ys.min()) + wy0, float(xs.max()) + 1 + wx0, float(ys.max()) + 1 + wy0
+        x0, y0 = float(xs.min()) + wx0, float(ys.min()) + wy0
+        x1, y1 = float(xs.max()) + 1 + wx0, float(ys.max()) + 1 + wy0
         g = 0.08 * k
         cx, cy = 0.5 * (x0 + x1), 0.5 * (y0 + y1)
         half_w, half_h = max(0.5 * (x1 - x0) + g, 0.5 * least), max(0.5 * (y1 - y0) + g, 0.5 * least)
@@ -606,7 +607,8 @@ def _shaded(colour, opacity: float = TOOLS["marker"].opacity) -> tuple:
     return tuple(linear_to_srgb(lin * (1.0 - opacity * (1.0 - lin))).tolist())
 
 
-def on_board(palette: torch.Tensor, surface: str = "whiteboard", opacity: float = TOOLS["marker"].opacity) -> torch.Tensor:
+def on_board(palette: torch.Tensor, surface: str = "whiteboard",
+             opacity: float = TOOLS["marker"].opacity) -> torch.Tensor:
     """The colours ``palette (K, 3)`` (sRGB) markers leave on a bare ``surface``: they are see-through, so a
     marker looks lighter than its ink. Cel paint in these colours sits beside marker colouring unnoticed."""
     board = srgb_to_linear(torch.tensor(SURFACES.get(surface, SURFACES["whiteboard"])))
@@ -849,7 +851,7 @@ def merge(frame_lines: list, detail_lines: list, parts: list) -> list:
     edge) and the detail lines (:func:`draw_details`) put in. Marker colour of a shape that goes on past a
     part (the detail lines colour it there with that marker, at the frame's size) is kept as the frame drew
     it, so it runs on through the part's edge unbroken; the detail's strokes of that marker only fill what
-    the frame's leave bare."""
+    the frame's leave bare (hatched anew there, with the frame's nibs and slant)."""
     if not parts:
         return list(frame_lines)
     size = next((p.size for p in parts if isinstance(p, Part) and p.size[1]), None)
@@ -866,18 +868,21 @@ def merge(frame_lines: list, detail_lines: list, parts: list) -> list:
         through = [line for line in kept if line.kind in colour and (line.marker, line.kind) in keys]
         rest = [line for line in kept if not (line.kind in colour and (line.marker, line.kind) in keys)]
         kept = through + clip_lines(rest, box, scale, keep_inside=False)
-    new = []
-    stamps: dict = {}
-    for line in detail_lines:
-        key = (line.marker, line.kind)
-        if line.kind in colour and any(key in keys for keys in goes_on):
-            if key not in stamps:
-                stamps[key] = stamp([x for x in kept if (x.marker, x.kind) == key], h, w, scale)
-            pts = _dense_points(line, scale)
-            xi, yi = pts[:, 0].long().clamp(0, w - 1), pts[:, 1].long().clamp(0, h - 1)
-            if len(pts) and float(stamps[key][yi, xi].float().mean()) >= 0.6:
-                continue                             # the frame's own strokes colour this already
-        new.append(line)
+    new = [line for line in detail_lines if not (line.kind in colour and any((line.marker, line.kind) in keys
+                                                                              for keys in goes_on))]
+    for key in sorted(set().union(*goes_on)):        # where the part wants a marker the frame's strokes left bare
+        want = stamp([x for x in detail_lines if (x.marker, x.kind) == key], h, w, scale)
+        have = stamp([x for x in kept if (x.marker, x.kind) == key], h, w, scale)
+        gap = want & ~have
+        if not bool(gap.any()):
+            continue
+        sample = next(x for x in detail_lines if (x.marker, x.kind) == key)
+        pigments = torch.zeros(key[0] + 1, 3)
+        pigments[key[0]] = torch.tensor(sample.colour)
+        masks = {key[0]: gap} if key[1] == "fill" else {}
+        shades = {key[0]: gap} if key[1] == "shade" else {}
+        new += colour_lines(torch.zeros(h, w, dtype=torch.long), torch.zeros(h, w, dtype=torch.bool), pigments,
+                            scale, masks, shades)
     return _assemble(kept, new)
 
 
@@ -1029,6 +1034,6 @@ def follow(lines: list, part_box, before_frame: torch.Tensor, frame: torch.Tenso
     return move_lines(lines, matrix, float(frame.shape[-1])), change
 
 
-__all__ = ["KINDS", "REDRAW", "Part", "cel_shapes", "clip_lines", "clip_polyline", "clip_ring", "components",
-           "detail_map", "draw_crop", "draw_details", "enlarge", "joining", "accents", "find_details", "fit_similarity", "follow", "mask_rings", "merge", "move_box",
-           "move_lines", "on_board", "track"]
+__all__ = ["KINDS", "REDRAW", "Part", "accents", "cel_shapes", "clip_lines", "clip_polyline", "clip_ring",
+           "components", "detail_map", "draw_crop", "draw_details", "enlarge", "find_details", "fit_similarity",
+           "follow", "joining", "mask_rings", "merge", "move_box", "move_lines", "on_board", "track"]

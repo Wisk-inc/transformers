@@ -89,15 +89,56 @@ def _invert_flow(flow: torch.Tensor, rounds: int = 3) -> torch.Tensor:
 
 
 def _dilate(mask: torch.Tensor, radius: int) -> torch.Tensor:
+    """``mask (..., H, W)`` grown by a square ``2 * radius + 1`` wide (a row and then a column, the same thing
+    and much faster for a large square), worked out only in the box round the mask."""
     if radius <= 0:
         return mask
+    if mask.dim() > 2:
+        return torch.stack([_dilate(m, radius) for m in mask.reshape(-1, *mask.shape[-2:])]).reshape(mask.shape)
+    box = _bounds(mask, radius)
+    if box is None:
+        return mask.clone()
     k = 2 * radius + 1
-    m = mask.float().reshape(-1, 1, *mask.shape[-2:])
-    return (F.max_pool2d(m, k, 1, radius) > 0.5).reshape(mask.shape)
+    m = mask[box].float()[None, None]
+    m = F.max_pool2d(m, (1, k), 1, (0, radius))
+    m = F.max_pool2d(m, (k, 1), 1, (radius, 0))
+    out = torch.zeros_like(mask, dtype=torch.bool)
+    out[box] = m[0, 0] > 0.5
+    return out
+
+
+def _bounds(mask: torch.Tensor, margin: int) -> tuple[slice, slice] | None:
+    """The rows and columns round ``mask (H, W)``, ``margin`` pixels wider (None when it is empty)."""
+    rows, cols = mask.any(1).nonzero()[:, 0], mask.any(0).nonzero()[:, 0]
+    if len(rows) == 0:
+        return None
+    h, w = mask.shape
+    return (slice(max(0, int(rows[0]) - margin), min(h, int(rows[-1]) + margin + 1)),
+            slice(max(0, int(cols[0]) - margin), min(w, int(cols[-1]) + margin + 1)))
 
 
 def _erode(mask: torch.Tensor, radius: int) -> torch.Tensor:
-    return ~_dilate(~mask, radius)
+    """``mask`` shrunk by a square ``2 * radius + 1`` wide (the edge of the picture counts as on the mask)."""
+    if radius <= 0:
+        return mask
+    if mask.dim() > 2:
+        return torch.stack([_erode(m, radius) for m in mask.reshape(-1, *mask.shape[-2:])]).reshape(mask.shape)
+    box = _bounds(mask, 0)
+    if box is None:
+        return mask.clone()
+    k = 2 * radius + 1
+    m = F.pad(mask[box].float()[None, None], (radius,) * 4, value=0.0)
+    h, w = mask.shape
+    # beyond the edge of the picture counts as on the mask; inside the picture, beyond the box it is off
+    m[..., : radius, :] = 1.0 if box[0].start == 0 else 0.0
+    m[..., -radius:, :] = 1.0 if box[0].stop == h else 0.0
+    m[..., :, : radius] = torch.maximum(m[..., :, : radius], torch.tensor(1.0 if box[1].start == 0 else 0.0))
+    m[..., :, -radius:] = torch.maximum(m[..., :, -radius:], torch.tensor(1.0 if box[1].stop == w else 0.0))
+    m = -F.max_pool2d(-m, (1, k), 1, 0)
+    m = -F.max_pool2d(-m, (k, 1), 1, 0)
+    out = torch.zeros_like(mask, dtype=torch.bool)
+    out[box] = m[0, 0] > 0.5
+    return out
 
 
 def _box(x: torch.Tensor, radius: int) -> torch.Tensor:
@@ -149,16 +190,23 @@ def _components(mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 def _fill_holes(mask: torch.Tensor, largest: float) -> torch.Tensor:
     """``mask`` with the holes in it of at most ``largest`` pixels filled (a hole is a part of what is off the
-    mask that does not reach the edge of the picture)."""
-    label, area = _components(~mask)
+    mask that does not reach the edge of the picture). Only the box round the mask is looked at: all that lies
+    outside it is one with the edge of the picture."""
+    box = _bounds(mask, 1)
+    if box is None:
+        return mask
+    part = mask[box]
+    label, area = _components(~part)
     if not bool((label >= 0).any()):
         return mask
     edge = torch.cat([label[0], label[-1], label[:, 0], label[:, -1]])
     edge = edge[edge >= 0].unique()
-    reaches = torch.zeros(mask.numel() + 1, dtype=torch.bool)
+    reaches = torch.zeros(part.numel() + 1, dtype=torch.bool)
     reaches[edge] = True
     hole = (label >= 0) & ~reaches[label.clamp(min=0)] & (area <= largest)
-    return mask | hole
+    out = mask.clone()
+    out[box] = part | hole
+    return out
 
 
 def _drop_small(mask: torch.Tensor, least: float) -> torch.Tensor:
@@ -869,16 +917,14 @@ def separate(frames: torch.Tensor, flows: torch.Tensor | None = None, depth: tor
         masks = _colour_grow(lab, masks, max(3, round(0.06 * size)))
     # lay the outline on the frame's edges, then vote with the neighbours
     radius = max(2, round(0.008 * size))
-    soft = []
+    soft = torch.zeros(t_count, h, w)
     for t in range(t_count):
-        if not bool(masks[t].any()):
-            soft.append(torch.zeros(h, w))
+        box = _bounds(masks[t], 2 * radius + 2)          # farther out the filter gives 0 anyway
+        if box is None:
             continue
-        guide = [lab[t, 0], 2.0 * lab[t, 1], 2.0 * lab[t, 2]]
-        if depth is not None:
-            guide.append(depth[t])
-        soft.append(_guided(torch.stack(guide), masks[t].float(), radius, 1e-3).clamp(0.0, 1.0))
-    soft = torch.stack(soft)
+        guide = [lab[t, 0], 2.0 * lab[t, 1], 2.0 * lab[t, 2]] + ([depth[t]] if depth is not None else [])
+        guide = torch.stack(guide)[:, box[0], box[1]]
+        soft[t][box] = _guided(guide, masks[t][box].float(), radius, 1e-3).clamp(0.0, 1.0)
     out = []
     for t in range(t_count):
         m = soft[t] >= 0.5
