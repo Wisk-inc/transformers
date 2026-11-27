@@ -586,7 +586,12 @@ def find_details(image: torch.Tensor, labels: torch.Tensor | None = None, max_pa
     ``landmarks``), each followed by its eyes and its mouth, then other dense small detail (paws, fingers,
     toes, ears). ``labels (H, W)``, the shapes the picture is seen in (for example
     :attr:`helix_lm.paint.draw.Look.labels`), lets many small shapes count as detail too. Returns
-    :class:`Part` s, at most ``max_parts``."""
+    :class:`Part` s, at most ``max_parts``.
+
+    What it cannot do: a face is found only when both eyes are open and seen (a face in profile, with its
+    eyes closed or turned away is not; a head drawn that way still comes as dense detail, and a face found in
+    one frame can be followed through the next, :func:`follow`); a hand, a paw or an ear comes as ``detail``,
+    as it is not told apart from other dense detail (``hand`` is for a caller that knows)."""
     image = image.float().clamp(0.0, 1.0)
     h, w = image.shape[-2:]
     lab = image_to_oklab(image)
