@@ -233,6 +233,8 @@ def render(shapes: list, x0: int, y0: int, w: int, h: int, aa: float = 1.0) -> d
         sl = (slice(iy0 - y0, iy1 - y0), slice(ix0 - x0, ix1 - x0))
         every = (slice(None), *sl)
         colour, mat = s.colour[:, None, None], MATERIALS[s.material][:, None, None]
+        if s.material == SKIN:                               # skin is never one even colour
+            colour = colour * _mottle(s, tau, nrm, px, py)
         if isinstance(s, Cone) and (s.nail is not None or s.creases > 0):
             colour, mat = colour.expand(3, *cov.shape).clone(), mat.expand(4, *cov.shape).clone()
             _decals(s, tau, nrm, colour, mat)
@@ -252,6 +254,30 @@ def render(shapes: list, x0: int, y0: int, w: int, h: int, aa: float = 1.0) -> d
         torch.maximum(cover[sl], cov, out=cover[sl])
     normal.div_((normal * normal).sum(0, keepdim=True).sqrt().clamp(min=1e-6))
     return {"cover": cover, "height": height.clamp(min=0.0), "normal": normal, "albedo": albedo, "params": params}
+
+
+def _mottle(s, tau, nrm: torch.Tensor, px: torch.Tensor, py: torch.Tensor) -> torch.Tensor:
+    """A slow, uneven change in the skin's colour, a little redder in places, fixed to the shape (so it moves
+    with the hand): ``(3, h, w)`` factors near 1."""
+    if isinstance(s, Cone):
+        axis = torch.tensor([s.b[0] - s.a[0], s.b[1] - s.a[1], s.b[2] - s.a[2]])
+        length = float(axis.norm())
+        axis = axis / max(length, 1e-6)
+        up = torch.tensor([0.0, 0.0, 1.0]) if abs(float(axis[2])) < 0.9 else torch.tensor([1.0, 0.0, 0.0])
+        up = up - axis * float(up @ axis)
+        up = up / up.norm()
+        side = torch.linalg.cross(axis, up)
+        around = torch.atan2((nrm * side[:, None, None]).sum(0), (nrm * up[:, None, None]).sum(0))
+        x, y = tau * length / max(s.ra, 1.0) * 0.8, around
+        seed = 0.37 * (s.ra + s.rb)
+    else:
+        ca, sa = math.cos(s.angle), math.sin(s.angle)
+        x = ((px - s.c[0]) * ca + (py - s.c[1]) * sa) / s.axes[0] * 3.1
+        y = (-(px - s.c[0]) * sa + (py - s.c[1]) * ca) / s.axes[1] * 2.7
+        seed = 0.11 * s.axes[0]
+    m = 0.5 * torch.sin(1.7 * x + 2.1 * torch.sin(1.1 * y + seed)) + 0.5 * torch.sin(2.0 * y + 1.6 * torch.sin(1.3 * x
+                                                                                                         + 2 * seed))
+    return 1.0 + 0.045 * m * torch.tensor([1.0, 0.55, 0.45])[:, None, None]
 
 
 def _decals(s: Cone, tau: torch.Tensor, nrm: torch.Tensor, colour: torch.Tensor, mat: torch.Tensor) -> None:
@@ -537,23 +563,24 @@ def hand_shapes(pose: Pose, unit: float, tool: str | None, colour, skin=SKIN_TON
     out.append(Blob(world((-0.370, 0.125, 0.232), 0.9), (0.100 * u, 0.062 * u, 0.060 * u), pose.yaw - 0.90,
                     base, (0.0, 0.0), SKIN, 0, 0.05 * u))
     # the forearm, flush with the back of the hand at the wrist, out of the picture, and the sleeve over it
-    wx, wy, _ = world((-0.860, -0.095, 0.0), 1.0)
-    wrist = (wx, wy, max(_top(palm, wx, wy), 0.10 * u + lift) - 0.125 * u)
+    # (it starts well inside the hand, under its skin, so that it comes out of it smoothly at the wrist)
+    wx, wy, _ = world((-0.950, -0.095, 0.0), 1.0)
+    wrist = (wx, wy, max(_top(palm, wx, wy), 0.08 * u + lift) - 0.72 * 0.15 * u + 0.012 * u)
     ax, ay = math.cos(pose.arm), math.sin(pose.arm)
     rise = 0.20
 
     def arm(d: float, z0: float) -> tuple:
         return (wrist[0] + ax * d * u, wrist[1] + ay * d * u, wrist[2] + (z0 + rise * d) * u)
 
-    out.append(Cone(arm(0.0, 0.0), arm(0.6, 0.0), 0.148 * u, 0.185 * u, base, SKIN, 0, 0.15 * u, flat=0.7))
-    out.append(Cone(arm(0.6, 0.0), arm(1.25, 0.0), 0.185 * u, 0.212 * u, base, SKIN, 0, 0.0, flat=0.7))
+    out.append(Cone(arm(-0.3, 0.0), arm(0.45, 0.0), 0.130 * u, 0.170 * u, base, SKIN, 0, 0.22 * u, flat=0.72))
+    out.append(Cone(arm(0.45, 0.0), arm(0.9, 0.0), 0.170 * u, 0.190 * u, base, SKIN, 0, 0.0, flat=0.72))
     cloth = _lin((0.24, 0.25, 0.27))
-    out.append(Cone(arm(1.05, 0.03), arm(1.17, 0.03), 0.250 * u, 0.257 * u, cloth * 1.12, CLOTH, 2))
-    d = 1.15                                     # the sleeve in short pieces, so that each has a small box
+    out.append(Cone(arm(0.62, 0.035), arm(0.74, 0.035), 0.215 * u, 0.222 * u, cloth * 1.12, CLOTH, 2))
+    d = 0.72                                     # the sleeve in short pieces, so that each has a small box
     while d < reach:
         nxt = min(reach, d + 0.8)
-        out.append(Cone(arm(d, 0.03), arm(nxt, 0.03), (0.25 + 0.004 * (d - 1.15)) * u,
-                        (0.25 + 0.004 * (nxt - 1.15)) * u, cloth, CLOTH, 2))
+        out.append(Cone(arm(d, 0.035), arm(nxt, 0.035), (0.215 + 0.012 * (d - 0.72)) * u,
+                        (0.215 + 0.012 * (nxt - 0.72)) * u, cloth, CLOTH, 2))
         d = nxt
     # the fingers: three segments each, the knuckles of the hand at their roots and a bump at the middle joint
     for name, joints in JOINTS.items():

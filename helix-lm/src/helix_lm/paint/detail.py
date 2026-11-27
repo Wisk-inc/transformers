@@ -83,39 +83,35 @@ def _odd(x: float) -> int:
 
 def components(mask: torch.Tensor) -> tuple[torch.Tensor, int]:
     """The connected parts of ``mask (H, W)`` (pixels touching at a side or a corner): a number for each part
-    ``(H, W)`` long (-1 outside the mask), and how many there are. Each pixel takes the largest index in its
-    reach, with pointer jumping so long thin shapes do not take a step per pixel (SciPy's labelling is used
-    instead when it is installed; it is not needed)."""
+    ``(H, W)`` long (-1 outside the mask), numbered in the order their first pixels come row by row, and how
+    many there are. A union and find over the pixels: along every pair of neighbours the larger root is hooked
+    under the smaller, then every pixel's pointer is followed to its root, until no pair disagrees: a few
+    rounds, however long and winding the shapes (the same labels as SciPy's ``ndimage.label``)."""
     h, w = mask.shape
     mask = mask.bool()
     if not bool(mask.any()):
         return torch.full((h, w), -1, dtype=torch.long), 0
-    try:                                             # the same parts, much quicker, when SciPy is there
-        from scipy import ndimage
-
-        found, n = ndimage.label(mask.numpy(), structure=[[1, 1, 1], [1, 1, 1], [1, 1, 1]])
-        lab = torch.from_numpy(found).long() - 1
-        last = torch.full((n,), -1, dtype=torch.long).scatter_reduce(
-            0, lab[mask], torch.arange(h * w).view(h, w)[mask], "amax")
-        rank = torch.empty(n, dtype=torch.long)
-        rank[last.argsort()] = torch.arange(n)       # numbered as below: by the last pixel of each part
-        out = torch.full((h, w), -1, dtype=torch.long)
-        out[mask] = rank[lab[mask]]
-        return out, int(n)
-    except ImportError:
-        pass
-    index = torch.arange(h * w, dtype=torch.float64).view(h, w)
-    lab = torch.where(mask, index, torch.full_like(index, -1.0))
+    index = torch.arange(h * w).view(h, w)
+    pairs = []
+    for dy, dx in ((0, 1), (1, 0), (1, 1), (1, -1)):  # each pair of neighbours once
+        ys0, ys1 = slice(0, h - dy), slice(dy, h)
+        xs0, xs1 = (slice(0, w - dx), slice(dx, w)) if dx >= 0 else (slice(-dx, w), slice(0, w + dx))
+        both = mask[ys0, xs0] & mask[ys1, xs1]
+        pairs.append(torch.stack([index[ys0, xs0][both], index[ys1, xs1][both]]))
+    a, b = torch.cat(pairs, 1)
+    parent = torch.arange(h * w)
     while True:
-        grown = F.max_pool2d(lab[None, None], 3, 1, 1)[0, 0]
-        grown = torch.where(mask, grown, lab)
-        flat = grown.flatten()
-        jumped = flat[flat.clamp(min=0).long()].view(h, w)
-        grown = torch.where(mask, torch.maximum(grown, jumped), grown)
-        if torch.equal(grown, lab):
+        pa, pb = parent[a], parent[b]
+        differ = pa != pb
+        if not bool(differ.any()):
             break
-        lab = grown
-    roots, inverse = torch.unique(lab[mask], return_inverse=True)
+        parent.scatter_reduce_(0, torch.maximum(pa, pb)[differ], torch.minimum(pa, pb)[differ], "amin")
+        while True:                                   # every pointer straight to its root
+            nxt = parent[parent]
+            if torch.equal(nxt, parent):
+                break
+            parent = nxt
+    roots, inverse = torch.unique(parent.view(h, w)[mask], return_inverse=True)
     out = torch.full((h, w), -1, dtype=torch.long)
     out[mask] = inverse
     return out, len(roots)
