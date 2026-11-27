@@ -65,10 +65,13 @@ def main(argv: list[str] | None = None) -> int:
     anim.add_argument("words", nargs="?", default=None, help="what the animation shows (an open video model "
                                                             "imagines the motion)")
     anim.add_argument("--video", default=None, help="draw this video (a file or a folder of pictures) instead")
-    anim.add_argument("--model", default="auto", help="the video model: animatelcm, animatediff, wan, wan-1.3b, "
-                                                     "or a Hub name (auto: wan on a large GPU, else animatelcm)")
+    anim.add_argument("--model", default="auto", help="the video model (see helix_lm.paint.video.list_models): "
+                      "animatelcm, animatediff, wan, wan-1.3b, wan-14b, wan-i2v-14b, wan-animate, wan-vace, ltx, "
+                      "hunyuan, cogvideox, skyreels, or a Hub repository; auto picks by the GPU")
     anim.add_argument("--lora", default=None, help="a LoRA for the video model: a style or a character")
     anim.add_argument("--character", default=None, help="a picture of the character: the clip starts from it")
+    anim.add_argument("--motion", default=None, help="a video of someone moving: with wan-animate and --character, "
+                      "the character performs it")
     anim.add_argument("--frames", type=int, default=None)
     anim.add_argument("--size", type=int, default=None, help="the video model's frame size (square)")
     anim.add_argument("--fps", type=float, default=None)
@@ -100,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
 
             animator = load_animator(args.model, lora=args.lora)
         result = animate(args.words, video=args.video, animator=animator, frames=args.frames, size=args.size,
-                         fps=args.fps, seed=args.seed, character=args.character, lines=args.lines,
+                         fps=args.fps, seed=args.seed, character=args.character, motion=args.motion, lines=args.lines,
                          colour=None if args.no_colour else "marker", sketch=args.sketch, on=args.on,
                          log=print)
         result.surface = args.surface

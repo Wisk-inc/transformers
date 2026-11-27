@@ -320,7 +320,7 @@ def test_each_model_is_asked_with_the_arguments_it_takes(monkeypatch, diffusers)
     assert sky.pipe.scheduler.config["flow_shift"] == 8.0                # its repo says 1.0, its card 8.0
     sky("a fox", character=look)
     assert sky.still.scheduler.config["flow_shift"] == 5.0 and sky.still.asked[-1]["guidance_scale"] == 5.0
-    assert sky.pipe is None                                              # two 14B models do not both fit
+    assert sky.pipe is not None and sky.keep                             # 41 + 34 GB and its work: both fit
 
     with pytest.raises(ValueError, match="motion"):
         ltx("a fox", motion=torch.rand(5, 3, 32, 32))
@@ -421,6 +421,8 @@ def test_unknown_repo_ids_go_through_diffusion_pipeline(monkeypatch, diffusers):
     assert load_animator("someone/another").pipe.dtype == torch.bfloat16
     named = load_animator("Skywork/SkyReels-V2-T2V-14B-540P-Diffusers")              # a known repo id: by name
     assert named.kind == "skyreels" and named.pipe.scheduler.config["flow_shift"] == 8.0
+    with pytest.raises(ValueError, match="no video model"):
+        load_animator("wan-2b")                                          # a slip of the keyboard, not the Hub
 
 
 def test_the_list_of_models_says_what_each_is_and_needs():

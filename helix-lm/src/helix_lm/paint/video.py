@@ -37,8 +37,10 @@ Models (:func:`load_animator`):
 Everything but AnimateLCM and AnimateDiff needs a GPU. On one, the weights are bf16 and the memory is planned
 from the card's size: everything on the GPU when it fits, else one model at a time on it
 (``enable_model_cpu_offload``), else one layer at a time (slow), and the VAE decodes in tiles so a long clip
-fits (``offload=`` chooses by hand). On the 96 GB RTX PRO 6000 every model here fits whole. The 14B Wan T2V and
-I2V together do not: switching between words and a picture loads the other model again from the disk cache.
+fits (``offload=`` chooses by hand). By these estimates every model here fits whole on the 96 GB RTX PRO 6000;
+the 14B Wan T2V and I2V together do not, so switching between words and a picture loads the other one again
+from the disk cache (a minute or two), sharing the text encoder and the VAE. Loading also needs about as much
+CPU memory as the weights.
 
 The motion of someone else (:func:`motion_videos`). Wan-Animate does not take the driving video itself but two
 videos made from it: the pose (a stick figure drawn on black, at the size of the clip) and the face (the face
@@ -52,6 +54,9 @@ ViTPose-H, about 2.6 GB, onnxruntime). Its output can be given as it is: ``motio
 keypoints of the 133-point COCO-WholeBody kind from any detector are drawn in full:
 ``motion={"video": ..., "keypoints": ...}``. The pose is not fitted to the character's proportions (Wan's
 "retarget" step): a character with a big head and short legs moves with the driving person's proportions.
+The driving video should show a person (or something shaped like one): an animal has no pose to find. VACE
+takes the same stick figure as its control video, much like its own pose annotator draws it but not exactly
+(``motion={"control": ...}`` gives it a control video of one's own: depth, lines, a pose).
 
 Each is the part to fine-tune: ``lora=`` loads a LoRA made for it (a style, a character).
 
@@ -66,6 +71,7 @@ import colorsys
 import gc
 import inspect
 import math
+import os
 
 import torch
 import torch.nn.functional as F
@@ -865,6 +871,8 @@ def load_animator(name: str = "auto", device=None, lora: str | None = None, base
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     name = _auto(device) if name == "auto" else _BY_REPO.get(name, name)
     known = KNOWN.get(name)
+    if known is None and "/" not in name and not os.path.isdir(name):
+        raise ValueError(f"no video model {name!r}: one of auto, {', '.join(KNOWN)}, or a repo id on the Hub")
     if known is None:                                   # any video pipeline on the Hub
         from diffusers import DiffusionPipeline
 

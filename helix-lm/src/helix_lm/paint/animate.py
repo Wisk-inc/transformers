@@ -558,16 +558,18 @@ class Animation:
         self.history.append({"op": "retool", "lines": lines})
         return self
 
-    def extend(self, words: str, animator=None, frames: int | None = None, seed: int = 0, log=None) -> Animation:
+    def extend(self, words: str, animator=None, frames: int | None = None, seed: int = 0, motion=None,
+               log=None) -> Animation:
         """Go on with a next clip from where this one ends: the video model starts from the last frame (so the
         character and what is around it look the same), and the new frames are drawn over the last drawing
-        with the same markers."""
+        with the same markers. ``motion`` is a video of someone moving, for a model that makes the character
+        perform it (Wan-Animate)."""
         from .video import DRAWABLE, load_animator
 
         animator = animator or load_animator()
         h, w = self.size
         clip = animator(f"{words}, {DRAWABLE}", frames=frames, size=(h - h % 8, w - w % 8), seed=seed,
-                        character=self.frames[-1])
+                        character=self.frames[-1], **({"motion": motion} if motion is not None else {}))
         clip = F.interpolate(clip, size=(h, w), mode="bilinear", align_corners=False)
         on = int(self.settings.get("on", 1))
         clip = clip[on::on] if len(clip) > on else clip       # its first frame is the last one already drawn
@@ -643,7 +645,7 @@ def animate(words: str | None = None, *, video=None, animator=None, frames: int 
             fps: float | None = None, seed: int = 0, character=None, like: Animation | None = None,
             lines: str = "pen", colour: str | None = "marker", sketch: bool = False, detail: float = 0.5,
             colours: int = 10, surface: str = "whiteboard", work: int = 512, drawable: bool = True,
-            on: int | None = None, log=None) -> Animation:
+            on: int | None = None, motion=None, log=None) -> Animation:
     """
     An animation drawn by hand, frame by frame. Ask for it in ``words`` (an open video model imagines the
     motion: ``animator``, see :func:`helix_lm.paint.video.load_animator`), or give a ``video`` of your own (a
@@ -653,6 +655,8 @@ def animate(words: str | None = None, *, video=None, animator=None, frames: int 
     ``sketch`` puts a light pencil sketch under the ink. ``work`` is the longer side the frames are drawn at.
     ``on`` is how many video frames each drawing is held for, as animators say "on ones" or "on twos": by
     default twos for a video of 16 frames a second or more (12 drawings a second from 24), else ones.
+    ``motion`` is a video of someone moving (a file, a tensor or ``(video, fps)``): with Wan-Animate and a
+    ``character`` picture, the character performs that motion.
     """
     if (words is None) == (video is None):
         raise ValueError("ask for an animation in words, or give a video to draw")
@@ -665,7 +669,8 @@ def animate(words: str | None = None, *, video=None, animator=None, frames: int 
         animator = animator or load_animator()
         want = (animator.size if size is None else (size if isinstance(size, tuple) else (size, size)))
         clip = animator(f"{words}, {DRAWABLE}" if drawable else words, frames=frames,
-                        size=(want[0] - want[0] % 8, want[1] - want[1] % 8), seed=seed, character=character)
+                        size=(want[0] - want[0] % 8, want[1] - want[1] % 8), seed=seed, character=character,
+                        **({"motion": motion} if motion is not None else {}))
         fps = fps or animator.fps
         if log:
             log(f"the video model imagined {len(clip)} frames of {clip.shape[-1]}x{clip.shape[-2]}")
