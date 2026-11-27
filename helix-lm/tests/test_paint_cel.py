@@ -281,3 +281,89 @@ def test_the_same_palette_paints_the_next_frame_the_same_way():
 
     move = (face(b) - face(a)) * 160
     assert 2.0 < float(move[0]) < 4.5 and abs(float(move[1])) < 1.0        # the same shape, moved with the frame
+
+
+def face(size: int = 160) -> tuple[torch.Tensor, dict]:
+    """A face as a video model paints one: skin with a few soft darker blotches and a shadow under the fringe,
+    red hair with a dark side, two eyes (a lash line in the colour of the dark of the hair, touching it, and a
+    brown iris), a mouth, and the soft shadow the head casts on a cyan wall."""
+    s = size
+    yy, xx = torch.meshgrid(torch.arange(s).float() + 0.5, torch.arange(s).float() + 0.5, indexing="ij")
+    wall, cast = torch.tensor([0.1, 0.69, 0.82]), torch.tensor([0.05, 0.45, 0.55])
+    img = wall[:, None, None].expand(3, s, s).clone()
+    blob = ((xx - 0.8 * s) / 0.12) ** 2 + ((yy - 0.45 * s) / 0.3) ** 2 < s ** 2
+    soft = gaussian_blur(blob.float(), 4.0)
+    img = img * (1 - soft) + cast[:, None, None] * soft                   # the shadow on the wall, soft-edged
+    skin, blotch, fringe = (0.95, 0.7, 0.6), (0.9, 0.6, 0.5), (0.85, 0.53, 0.42)
+    head = ((xx - 0.5 * s) ** 2 + (yy - 0.55 * s) ** 2) < (0.3 * s) ** 2
+    hair = head & (yy < 0.38 * s) | ((((xx - 0.5 * s) ** 2 + (yy - 0.42 * s) ** 2) < (0.33 * s) ** 2) & (yy < 0.4 * s))
+    masks = {"head": head & ~hair, "hair": hair}
+    img[:, head] = torch.tensor(skin)[:, None]
+    g = torch.Generator().manual_seed(3)
+    for _ in range(5):                                                     # blotches a few pixels across
+        cx, cy = 0.3 * s + 0.4 * s * torch.rand(1, generator=g), 0.6 * s + 0.2 * s * torch.rand(1, generator=g)
+        spot = head & (((xx - cx) ** 2 + (yy - cy) ** 2) < (0.025 * s) ** 2)
+        img[:, spot] = torch.tensor(blotch)[:, None]
+    masks["fringe"] = head & ~hair & (yy < 0.46 * s)
+    img[:, masks["fringe"]] = torch.tensor(fringe)[:, None]
+    img[:, hair] = torch.tensor([0.75, 0.05, 0.03])[:, None]
+    dark = torch.tensor([0.25, 0.04, 0.05])
+    img[:, hair & (xx > 0.62 * s)] = dark[:, None]
+    lashes = torch.zeros(s, s, dtype=torch.bool)
+    irises = torch.zeros(s, s, dtype=torch.bool)
+    for ex in (0.38, 0.62):
+        lashes |= ((xx - ex * s).abs() < 0.07 * s) & ((yy - 0.52 * s).abs() < 1.6)
+        irises |= ((xx - ex * s) ** 2 + (yy - 0.56 * s) ** 2) < (0.03 * s) ** 2
+    lashes |= ((xx - 0.69 * s).abs() < 1.6) & (yy > 0.4 * s) & (yy < 0.53 * s)    # one runs up into the hair
+    masks["lashes"], masks["irises"] = lashes & ~hair, irises
+    img[:, lashes] = dark[:, None]
+    img[:, irises] = torch.tensor([0.4, 0.27, 0.2])[:, None]
+    masks["mouth"] = ((xx - 0.5 * s).abs() < 0.08 * s) & ((yy - 0.72 * s).abs() < 1.6)
+    img[:, masks["mouth"]] = torch.tensor([0.8, 0.15, 0.15])[:, None]
+    masks["cast"] = blob & (soft > 0.9) & ~head & ~hair
+    img = gaussian_blur(img, 0.6) + 0.008 * torch.randn(3, s, s, generator=g)
+    return img.clamp(0, 1), masks
+
+
+def test_skin_is_one_flat_colour_with_a_few_simple_shadow_shapes():
+    img, masks = face()
+    palette = palette_for([img])
+    labels = regions(img, palette)
+    shading = shade(img, labels, palette, relief=False)
+    middle = shading.regions[int(0.65 * 160), 80]
+    skin = shading.regions == middle
+    assert float((skin & masks["head"]).sum()) > 0.8 * float(masks["head"].sum() - masks["irises"].sum())
+    shadow, _ = shading.masks(int(middle))
+    pieces, count = parts(torch.where(shadow, 1, 0).long())
+    assert len(torch.unique(pieces[shadow])) <= 3                          # a few shapes, not a patchwork
+    assert iou(shadow, masks["fringe"]) > 0.6                              # the shadow under the fringe
+    lower = masks["head"] & (torch.arange(160)[:, None] > 0.58 * 160)
+    assert float(shadow[lower].float().mean()) < 0.05                     # the blotches painted as skin
+    lit = shading.colour[shading.tones[lower & skin & ~shadow]]
+    assert float((lit - lit[0]).abs().max()) == 0.0                         # one flat base colour
+    assert float((lower & skin).sum()) > 0.9 * float((lower & ~masks["mouth"] & ~masks["irises"]).sum())
+
+
+def test_the_features_of_a_face_stay_and_a_shadow_on_the_wall_is_background():
+    img, masks = face()
+    palette = palette_for([img])
+    labels = regions(img, palette)
+    shading = shade(img, labels, palette)
+    skin = int(shading.regions[int(0.65 * 160), 80])
+    hair = int(shading.regions[int(0.3 * 160), 80])
+    for name in ("lashes", "irises"):
+        on = shading.regions[masks[name]]
+        mine = float(((on != skin) & (on != hair)).float().mean())
+        assert mine > 0.7, name                                             # not swallowed by the skin or hair
+    lash = shading.colour[shading.tones[masks["lashes"]]]
+    assert float(srgb_to_oklab(lash)[:, 0].mean()) < 0.4                   # and painted dark
+    cast = shading.regions[masks["cast"]]
+    assert float(shading.back[cast].float().mean()) > 0.9                  # the cast shadow is the wall's
+    lines = paint_frame(img, palette)
+    assert all(line.tool == "brush pen" for line in lines if line.kind == "line")
+    inside = -torch.nn.functional.max_pool2d(-masks["cast"].float()[None, None], 5, 1, 2)[0, 0] > 0
+    for line in lines:
+        if line.kind == "line":
+            p = line.points * 160
+            xi, yi = p[:, 0].long().clamp(0, 159), p[:, 1].long().clamp(0, 159)
+            assert float(inside[yi, xi].float().mean()) < 0.05             # and gets no line

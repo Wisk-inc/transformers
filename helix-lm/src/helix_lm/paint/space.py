@@ -173,14 +173,20 @@ def _components(mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     flat_mask = mask.flatten()
     on = flat_mask.nonzero()[:, 0]
     index = torch.arange(n).reshape(h, w)
+    # every run of a row points to its first pixel at once; only runs of neighbouring rows are then joined,
+    # each pair of runs once
+    left = torch.zeros_like(mask)
+    left[:, 1:] = mask[:, :-1]
+    start = torch.where(mask & ~left, index, torch.full_like(index, -1)).cummax(dim=1).values
+    start = torch.where(mask, start, index)
     pairs = []
-    for a, b in ((mask[:, :-1] & mask[:, 1:], (index[:, :-1], index[:, 1:])),
-                 (mask[:-1] & mask[1:], (index[:-1], index[1:])),
-                 (mask[:-1, :-1] & mask[1:, 1:], (index[:-1, :-1], index[1:, 1:])),
-                 (mask[:-1, 1:] & mask[1:, :-1], (index[:-1, 1:], index[1:, :-1]))):
-        pairs.append(torch.stack([b[0][a], b[1][a]]))
-    u, v = torch.cat(pairs, 1)
-    parent = torch.arange(n)
+    for a, b in ((mask[:-1] & mask[1:], (start[:-1], start[1:])),
+                 (mask[:-1, :-1] & mask[1:, 1:], (start[:-1, :-1], start[1:, 1:])),
+                 (mask[:-1, 1:] & mask[1:, :-1], (start[:-1, 1:], start[1:, :-1]))):
+        pairs.append(b[0][a] * n + b[1][a])
+    joined = torch.cat(pairs).unique()
+    u, v = joined // n, joined % n
+    parent = start.flatten().clone()
     while True:
         pu, pv = parent[u], parent[v]
         differ = pu != pv
@@ -378,12 +384,35 @@ def _align(ref: torch.Tensor, ref_ok: torch.Tensor, img: torch.Tensor, img_ok: t
         res = (got[0, use] - r0[use]).double()
         sigma = max(float(1.4826 * res.abs().median()), 1e-4)
         robust = (1.345 * sigma / res.abs().clamp(min=1e-12)).clamp(max=1.0)      # Huber
-        lhs = rows.T @ (rows * robust[:, None]) + 1e-9 * torch.eye(rows.shape[1], dtype=torch.float64)
+        lhs = rows.T @ (rows * robust[:, None])
+        # a direction the set's detail does not show (a plain wall) is held where it is, not guessed
+        lhs = lhs + (1e-4 * float(lhs.diagonal().mean()) + 1e-12) * torch.eye(rows.shape[1], dtype=torch.float64)
         delta = -torch.linalg.solve(lhs, rows.T @ (res * robust))
         matrix = _compose(_matrix(delta, kind, centre.float(), scale), matrix)
         if float(delta.abs().max()) * scale < 1e-3:
             break
     return matrix
+
+
+def _misfit(ref: torch.Tensor, ref_ok: torch.Tensor, img: torch.Tensor, img_ok: torch.Tensor, matrices: list,
+            most: int = 40000) -> list:
+    """How badly each of ``matrices`` lines ``img`` up with ``ref`` (both lightness ``(H, W)``): the median
+    difference over the pixels that are the set in both under every one of them (None when too few are)."""
+    h, w = ref.shape
+    step = max(1, int(math.sqrt(h * w / most)))
+    q = _grid(h, w)[:, ::step, ::step].reshape(2, -1)
+    use = ref_ok[::step, ::step].reshape(-1).clone()
+    stack = torch.stack([img, img_ok.float()])
+    seen = []
+    for m in matrices:
+        p = _apply(m, q)
+        got = _look_up(stack, p[:, None, :])[:, 0]
+        use &= (p[0] >= 1.0) & (p[0] <= w - 1.0) & (p[1] >= 1.0) & (p[1] <= h - 1.0) & (got[1] > 0.99)
+        seen.append(got[0])
+    if int(use.sum()) < 50:
+        return [None] * len(matrices)
+    r0 = ref[::step, ::step].reshape(-1)[use]
+    return [float((g[use] - r0).abs().median()) for g in seen]
 
 
 def clip_flows(frames: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
@@ -405,19 +434,23 @@ def clip_flows(frames: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
 
 
 def camera(flows: torch.Tensor, background_masks: torch.Tensor | None = None, frames: torch.Tensor | None = None,
-           kind: str = "similarity", still: float = 0.25) -> torch.Tensor:
+           kind: str = "similarity", still: float = 1.0) -> torch.Tensor:
     """
     How the camera moves: ``(T, 2, 3)``, the matrix for frame t carrying a point of frame 0 to where that piece
     of background is in frame t (frame 0's is the identity). ``flows (T - 1, 2, H, W)`` are from
-    :func:`clip_flows`, ``background_masks (T, H, W)`` say where the background is (None: everywhere; what moves
-    on its own is outvoted anyway). ``kind`` is ``translation``, ``similarity`` (a pan, a zoom, a turn) or
-    ``affine``.
+    :func:`clip_flows`, ``background_masks (T, H, W)`` say where the background surely is (None: everywhere;
+    what moves on its own is outvoted, as long as it is not most of what has detail). ``kind`` is
+    ``translation``, ``similarity`` (a pan, a zoom, a turn) or ``affine``.
 
     Each step from one frame to the next is fitted to the flow of the background by reweighted least squares
     (Tukey), and the steps are chained. With ``frames`` given, each frame is then matched directly to frame 0
     (or, once the camera has moved too far for that, to the frame before), so that small errors of the flow do
-    not add up. A camera that moves less than ``still`` pixels anywhere in the picture over the whole clip is
-    taken to be still: every matrix is the identity, so the frames are used as they are, not resampled.
+    not add up.
+
+    The camera is called moving only for a clear motion: one that carries some point of the picture at least
+    ``still`` pixels, and (with ``frames``) lines the background up with frame 0 clearly better than not moving
+    at all does, in at least a quarter of the frames. Otherwise (a still shot, or a video model that breathes a
+    little) every matrix is the identity, so the frames are used as they are, not resampled.
     """
     t_count = len(flows) + 1
     h, w = flows.shape[-2:]
@@ -455,9 +488,14 @@ def camera(flows: torch.Tensor, background_masks: torch.Tensor | None = None, fr
     out = torch.stack(cams)
     corners = torch.tensor([[0.0, w, 0.0, w], [0.0, 0.0, h, h]])
     most = max(float((_apply(c, corners) - corners).abs().max()) for c in out)
-    if most < still:
-        out = _identity().expand(t_count, 2, 3).clone()
-    return out
+    clear = most >= still
+    if clear and frames is not None:
+        better = 0
+        for t in range(1, t_count):
+            moved, held = _misfit(lights[0], oks[0], lights[t], oks[t], [cams[t], _identity()])
+            better += moved is not None and held > 1.25 * moved + 1e-3
+        clear = better >= max(1, (t_count - 1) / 4)
+    return out if clear else _identity().expand(t_count, 2, 3).clone()
 
 
 # ---------------------------------------------------------------------------------------------- depth --
@@ -755,13 +793,79 @@ def _pop_out(depth: torch.Tensor, width: int) -> torch.Tensor:
     return (depth - back).clamp(min=0.0)
 
 
-def _tracks(labels: list, parts: list, moved: list, flows: torch.Tensor, enough: float) -> list:
+def _near_layer(depth: torch.Tensor) -> float | None:
+    """The depth that parts a near layer from the set behind it, when the clip's depths ``(T, H, W)`` fall
+    cleanly into two groups (Otsu's split explains most of their spread, the two groups lie far apart, and the
+    near one is neither a speck nor nearly all): a large character in front of a wall. None when they do not."""
+    values = depth.flatten()[:: max(1, depth.numel() // 200000)].double().clamp(0.0, 1.0)
+    bins = 64
+    hist = torch.histc(values, bins, 0.0, 1.0)
+    p = hist / hist.sum()
+    centres = (torch.arange(bins, dtype=torch.float64) + 0.5) / bins
+    w0 = p.cumsum(0)[:-1]
+    m0 = (p * centres).cumsum(0)[:-1]
+    mt = float((p * centres).sum())
+    between = (mt * w0 - m0) ** 2 / (w0 * (1 - w0)).clamp(min=1e-12)
+    k = int(between.argmax())
+    # every split in an empty gap parts the depths alike: take the middle of the gap, not its near edge
+    best = (between >= float(between[k]) * (1 - 1e-9)).nonzero()[:, 0]
+    split = float(centres[best].mean() + 0.5 / bins)
+    total = float(((centres - mt) ** 2 * p).sum())
+    near = values > split
+    share = float(near.double().mean())
+    if not 0.02 <= share <= 0.85 or total <= 1e-9:
+        return None
+    gap = float(values[near].mean() - values[~near].mean())
+    return split if float(between[k]) / total >= 0.75 and gap >= 0.3 else None
+
+
+LEEWAY = 0.1                     # how much farther than the split a near layer's own parts may be (a neck)
+
+
+def _near_parts(depth: torch.Tensor, split: float) -> torch.Tensor:
+    """The near layer of ``depth (H, W)``: what is nearer than ``split``, with what is joined to it and nearer
+    than ``split - LEEWAY`` (a neck under the chin, which a depth model sets a little back)."""
+    strong, weak = depth > split, depth > split - LEEWAY
+    label, _ = _components(weak)
+    table = torch.zeros(depth.numel() + 1, dtype=torch.bool)
+    table[label[strong & weak]] = True
+    return table[label.clamp(min=0)] & weak
+
+
+def _drop_spanning(mask: torch.Tensor) -> torch.Tensor:
+    """``mask (H, W)`` without its parts that run from one side of the picture to the other (a layer of the
+    set, like the ground in front)."""
+    label, _ = _components(mask)
+    drop = set(label[:, 0].tolist()) & set(label[:, -1].tolist()) | set(label[0].tolist()) & set(label[-1].tolist())
+    drop.discard(-1)
+    if not drop:
+        return mask
+    return mask & ~torch.isin(label, torch.tensor(sorted(drop)))
+
+
+def _shadowed(lab: torch.Tensor, under: torch.Tensor) -> torch.Tensor:
+    """Where OKLab ``lab (3, H, W)`` is the set ``under`` with a shadow on it: less light falls there, so its
+    colour is the set's scaled down (in OKLab, less light scales all three numbers alike), and a character's
+    soft shadow on the wall stays with the wall."""
+    s = lab[0] / under[0].clamp(min=1e-4)
+    off = (lab[1] - s * under[1]).abs() + (lab[2] - s * under[2]).abs()
+    return (s < 0.98) & (s > 0.2) & (off < 0.03)
+
+
+NEARER = 0.15                    # how much nearer than the set round it (in the clip's 0..1 depth) a figure is
+
+
+def _tracks(labels: list, parts: list, scores: list, flows: torch.Tensor, enough: float) -> list:
     """Which parts of every frame to keep (a list of ``(parts[t],)`` bools). ``labels[t] (H, W)`` numbers the
-    parts of frame t (-1 off them), ``moved[t]`` says how much each moves against the camera (-1: never keep).
-    A part and a part of the next frame that, carried over by the flow, cover each other by at least 30 per
-    cent of the smaller are one track; a track is kept when, over its frames, the upper quartile of how much it
-    moves is ``enough``, so a character that stops for a moment is kept and a still thing whose flow was poor
-    in one frame is not."""
+    parts of frame t (-1 off them); ``scores[t] (parts[t], 3)`` says for each how much it moves against the
+    camera as a whole (-1: never keep), how much its liveliest part moves (a waving hand), and how much nearer
+    it is than the set round it. A part and a part of the next frame that, carried over by the flow, cover each
+    other by at least 30 per cent of the smaller are one track. A track is kept when, over its frames, the upper
+    quartile of how much it moves is ``enough`` (so a character that stops for a moment is kept, and a still
+    thing whose flow was poor in one frame is not), or when it is plainly nearer than the set behind it
+    (:data:`NEARER`, the median over its frames) and some part of it moves (a large character that mostly
+    stands still; a still thing in front of the set, a table, stays with the set)."""
+    moved = [s[:, 0] for s in scores]
     t_count = len(labels)
     offsets = [0]
     for n in parts:
@@ -794,8 +898,14 @@ def _tracks(labels: list, parts: list, moved: list, flows: torch.Tensor, enough:
     for t in range(t_count):
         for i in range(parts[t]):
             frames_of = by_track.setdefault(find(offsets[t] + i), {})
-            frames_of[t] = max(frames_of.get(t, -1.0), float(moved[t][i]))
-    kept = {r for r, f in by_track.items() if float(torch.tensor(list(f.values())).quantile(0.75)) >= enough}
+            frames_of[t] = torch.maximum(frames_of.get(t, torch.full((3,), -1.0, dtype=torch.float64)),
+                                         scores[t][i].double())
+    kept = set()
+    for r, f in by_track.items():
+        s = torch.stack(list(f.values()))
+        whole, lively, nearer = float(s[:, 0].quantile(0.75)), float(s[:, 1].quantile(0.75)), float(s[:, 2].median())
+        if whole >= enough or (nearer >= NEARER and lively >= enough):
+            kept.add(r)
     return [torch.tensor([find(offsets[t] + i) in kept and float(moved[t][i]) >= 0 for i in range(parts[t])],
                          dtype=torch.bool) for t in range(t_count)]
 
@@ -808,12 +918,14 @@ def _colour_bins(lab: torch.Tensor, bins: int = 16) -> torch.Tensor:
     return (li * bins + ai) * bins + bi
 
 
-def _colour_grow(lab: torch.Tensor, masks: torch.Tensor, reach: int) -> torch.Tensor:
-    """``masks (T, H, W)`` grown by the small pieces next to them that have the character's colours and not
-    those of the set round it (a faint tail tip the depth missed): the colours of the character and of a ring
-    round it are counted over the whole clip, and a piece of the ring is added when its colours are far more
-    the character's. A piece that runs to the outside of the ring is a part of the set of a like colour (snow
-    under a white paw) and is left out."""
+def _colour_fix(lab: torch.Tensor, masks: torch.Tensor, reach: int, allowed: torch.Tensor | None = None
+                ) -> torch.Tensor:
+    """``masks (T, H, W)`` mended by colour. The colours of the character and of a ring round it are counted
+    over the whole clip. A piece at the edge of a mask whose colours are far more the set's than the
+    character's is given back to the set (a strip of wall that the depth model joined to an arm). Then the small
+    pieces next to a mask whose colours are far more the character's are added (a faint tail tip the depth
+    missed), where ``allowed``; a piece that runs to the outside of the ring is a part of the set of a like
+    colour (snow under a white paw) and is left out."""
     t_count, h, w = masks.shape
     bins = _colour_bins(lab)
     inner = torch.stack([_erode(m, 1) for m in masks])
@@ -828,15 +940,23 @@ def _colour_grow(lab: torch.Tensor, masks: torch.Tensor, reach: int) -> torch.Te
     for t in range(t_count):
         if not bool(masks[t].any()):
             continue
-        piece = near[t] & ~masks[t] & (share[bins[t]] >= 0.8)
+        setlike = masks[t] & (share[bins[t]] <= 0.2)
+        if bool(setlike.any()):
+            label, _ = _components(setlike)
+            table = torch.zeros(h * w + 1, dtype=torch.bool)
+            table[label[setlike & _dilate(~masks[t], 1)]] = True
+            out[t] = masks[t] & ~(table[label.clamp(min=0)] & setlike)
+        piece = near[t] & ~out[t] & (share[bins[t]] >= 0.8)
+        if allowed is not None:
+            piece &= allowed[t]
         if not bool(piece.any()):
             continue
         label, _ = _components(piece)
         outer = near[t] & ~_dilate(masks[t], reach - 1)
         table = torch.zeros(h * w + 1, dtype=torch.bool)
-        table[label[piece & _dilate(masks[t], 1)]] = True
+        table[label[piece & _dilate(out[t], 1)]] = True
         table[label[piece & outer]] = False
-        out[t] = masks[t] | (table[label.clamp(min=0)] & piece)
+        out[t] = out[t] | (table[label.clamp(min=0)] & piece)
     return out
 
 
@@ -876,46 +996,61 @@ def separate(frames: torch.Tensor, flows: torch.Tensor | None = None, depth: tor
         return torch.zeros(t_count, h, w, dtype=torch.bool)
     flows = clip_flows(frames) if flows is None else flows.float()
     grid = _grid(h, w)
-    residual = []                                     # the flow less the camera's own motion, (T - 1, 2, H, W)
-    for t in range(t_count - 1):
-        step, _ = _fit_motion(flows[t], None, kind)
-        residual.append(flows[t] - (_apply(step, grid) - grid))
-    residual = torch.stack(residual)
-    speed = (residual[:, 0] ** 2 + residual[:, 1] ** 2).sqrt()
-    noise = float(speed.flatten()[:: max(1, speed.numel() // 200000)].median())
-    enough = max(0.25, 1.5 * noise)
-    if cameras is None:
-        cameras = camera(flows, None, frames, kind)
     lab = image_to_oklab(frames)
-    candidates = []
-    if depth is None:
-        plate = background_plate(frames, torch.zeros(t_count, h, w, dtype=torch.bool), cameras, grow=0)
-        change = torch.stack([(lab[t] - image_to_oklab(place_background(plate, cameras[t], h, w))).norm(dim=0)
-                              for t in range(t_count)])
-        floor = float(change.flatten()[:: max(1, change.numel() // 200000)].median())
-        found = change > max(0.06, 8.0 * floor)
-        for t in range(t_count):
-            c = _erode(_dilate(found[t], 2), 2)
-            c = _fill_holes(c, 0.25 * area)
-            candidates.append(_drop_small(c, 0.002 * area))
-    else:
+    margin = max(2, round(0.03 * size))
+    candidates, surely, split = [], None, None
+    if depth is not None:
         depth = depth.float()
+        split = _near_layer(depth)
         for t in range(t_count):
             near = _pop_out(depth[t], round(0.3 * size)) > 0.035
+            if split is not None:                     # a near layer the depth parts cleanly from the set
+                near = near | _drop_spanning(_near_parts(depth[t], split))
             c = _erode(_dilate(near, 1), 1)
             c = _fill_holes(c, 0.02 * area)
             candidates.append(_drop_small(c, 0.002 * area))
+        # the camera is judged only by what is surely the set: far, and not next to anything near
+        surely = ~torch.stack([_dilate(c, margin) for c in candidates])
+    residual = []                                     # the flow less the camera's own motion, (T - 1, 2, H, W)
+    for t in range(t_count - 1):
+        weight = None if surely is None else (surely[t] & surely[t + 1]).float()
+        if weight is not None and float(weight.sum()) < 0.02 * area:
+            weight = None
+        step, _ = _fit_motion(flows[t], weight, kind)
+        residual.append(flows[t] - (_apply(step, grid) - grid))
+    residual = torch.stack(residual)
+    speed = (residual[:, 0] ** 2 + residual[:, 1] ** 2).sqrt()
+    still_part = speed if surely is None or not bool((surely[:-1] & surely[1:]).any()) else \
+        speed[surely[:-1] & surely[1:]]
+    noise = float(still_part.flatten()[:: max(1, still_part.numel() // 200000)].median())
+    enough = max(0.25, 1.5 * noise)
+    if cameras is None:
+        cameras = camera(flows, surely, frames, kind)
+    if depth is None:
+        plate = background_plate(frames, torch.zeros(t_count, h, w, dtype=torch.bool), cameras, grow=0)
+        found = []
+        for t in range(t_count):
+            set_lab = image_to_oklab(place_background(plate, cameras[t], h, w))
+            found.append(((lab[t] - set_lab).norm(dim=0), _shadowed(lab[t], set_lab)))
+        change = torch.stack([f[0] for f in found])
+        floor = float(change.flatten()[:: max(1, change.numel() // 200000)].median())
+        for t in range(t_count):
+            c = (found[t][0] > max(0.06, 8.0 * floor)) & ~found[t][1]
+            c = _erode(_dilate(c, 2), 2)
+            c = _fill_holes(c, 0.25 * area)
+            candidates.append(_drop_small(c, 0.002 * area))
     # which candidates are the character: each is followed through the clip (a track), and a track is the
-    # character when it moves against the camera in at least a quarter of its frames; a part that spans the
-    # picture from side to side is a layer of the set
-    labels, parts, moved = [], [], []
+    # character when it moves against the camera, or is plainly nearer than the set and moves in part
+    # (:func:`_tracks`); a part that spans the picture from side to side is a layer of the set
+    labels, parts, scores = [], [], []
     for t in range(t_count):
         label, _ = _components(candidates[t])
         on = label >= 0
         ids, which = torch.unique(label[on], return_inverse=True)
         count = torch.bincount(which, minlength=len(ids)).double().clamp(min=1)
         motion = torch.zeros(len(ids), dtype=torch.float64)
-        for i in ([t] if t < t_count - 1 else []) + ([t - 1] if t > 0 else []):
+        pairs = ([t] if t < t_count - 1 else []) + ([t - 1] if t > 0 else [])
+        for i in pairs:
             vx = torch.bincount(which, residual[i, 0][on].double(), len(ids)) / count
             vy = torch.bincount(which, residual[i, 1][on].double(), len(ids)) / count
             mag = torch.bincount(which, speed[i][on].double(), len(ids)) / count
@@ -923,14 +1058,25 @@ def separate(frames: torch.Tensor, flows: torch.Tensor | None = None, depth: tor
         full = torch.full((area,), -1, dtype=torch.long)
         full[on.flatten()] = which
         full = full.reshape(h, w)
+        here = torch.stack([speed[i] for i in pairs]).amax(0)
+        lively = torch.zeros(len(ids), dtype=torch.float64)
+        nearer = torch.zeros(len(ids), dtype=torch.float64)
+        for k in range(len(ids)):
+            inside = full == k
+            values = here[inside]
+            lively[k] = float(values[:: max(1, len(values) // 50000)].quantile(0.9)) - noise
+            if depth is not None:
+                ring = _dilate(inside, margin) & ~candidates[t]
+                if bool(ring.any()):
+                    nearer[k] = float(depth[t][inside].mean() - depth[t][ring].mean())
         for side_a, side_b in ((full[:, 0], full[:, -1]), (full[0], full[-1])):
             across = set(side_a[side_a >= 0].tolist()) & set(side_b[side_b >= 0].tolist())
             for p in across:
                 motion[p] = -1.0
         labels.append(full)
         parts.append(len(ids))
-        moved.append(motion)
-    keep = _tracks(labels, parts, moved, flows, enough)
+        scores.append(torch.stack([motion, lively, nearer], 1))
+    keep = _tracks(labels, parts, scores, flows, enough)
     backs = [_invert_flow(flows[t]) for t in range(t_count - 1)]
 
     def chosen(t: int) -> torch.Tensor:
@@ -938,6 +1084,15 @@ def separate(frames: torch.Tensor, flows: torch.Tensor | None = None, depth: tor
         return table[torch.where(labels[t] >= 0, labels[t], parts[t])]
 
     masks = torch.stack([chosen(t) for t in range(t_count)])
+    # a character that is a near layer the depth parts cleanly from the set is not grown into the far layer
+    # (there the depth is to be trusted: what is as far as the wall is the wall, or her shadow on it)
+    allowed = torch.ones(t_count, h, w, dtype=torch.bool)
+    if split is not None:
+        values = depth.flatten()[:: max(1, depth.numel() // 200000)]
+        far = float(values[values <= split].median())
+        for t in range(t_count):
+            if bool(masks[t].any()) and float((depth[t][masks[t]] > split).float().mean()) >= 0.7:
+                allowed[t] = depth[t] > min(split - LEEWAY, far + LEEWAY)
     # what still differs from the set right next to the character is the character too (a tail tip, a far leg
     # that the depth model saw as farther): the set there is known from the frames where it was not covered
     if bool(masks.any()):
@@ -948,15 +1103,16 @@ def separate(frames: torch.Tensor, flows: torch.Tensor | None = None, depth: tor
                 continue
             placed = place_background(plate, cameras[t], h, w)
             trusted = _place_count(plate, cameras[t], h, w) >= 3
-            differs = (lab[t] - image_to_oklab(placed)).norm(dim=0) > 0.05
-            grown = masks[t] | (differs & trusted & _dilate(masks[t], reach))
+            set_lab = image_to_oklab(placed)
+            differs = ((lab[t] - set_lab).norm(dim=0) > 0.05) & ~_shadowed(lab[t], set_lab)
+            grown = masks[t] | (differs & trusted & allowed[t] & _dilate(masks[t], reach))
             label, _ = _components(grown)
             touch = label[masks[t]].unique()
             table = torch.zeros(area + 1, dtype=torch.bool)
             table[touch] = True
             masks[t] = table[label.clamp(min=0)] & (label >= 0)
             masks[t] = _fill_holes(masks[t], 0.002 * area)
-        masks = _colour_grow(lab, masks, max(3, round(0.06 * size)))
+        masks = _colour_fix(lab, masks, max(3, round(0.06 * size)), allowed)
     # lay the outline on the frame's edges, then vote with the neighbours
     radius = max(2, round(0.008 * size))
     soft = torch.zeros(t_count, h, w)
@@ -986,19 +1142,17 @@ def separate(frames: torch.Tensor, flows: torch.Tensor | None = None, depth: tor
 class Plate:
     """One picture of the whole set: ``image (3, H', W')`` sRGB, in the coordinates of frame 0 moved by
     ``origin`` (the point of frame 0 at its top left corner, x then y), ``count (H', W')`` how many frames saw
-    the set at each pixel, and ``seen`` where at least one did (elsewhere it is filled in from round about)."""
+    the set at each pixel, and ``seen (H', W')`` where the plate shows what they saw (elsewhere it is filled in
+    from round about)."""
 
     image: torch.Tensor
     origin: tuple
     count: torch.Tensor
-
-    @property
-    def seen(self) -> torch.Tensor:
-        return self.count > 0
+    seen: torch.Tensor
 
 
 def background_plate(frames: torch.Tensor, fg_masks: torch.Tensor, cameras: torch.Tensor, grow: int | None = None,
-                     most: float = 3.0) -> Plate:
+                     most: float = 3.0, least: float = 0.15) -> Plate:
     """
     The set, painted once: one clean picture of all the background seen in ``frames (T, 3, H, W)``, in the
     coordinates of frame 0 and larger than a frame when the camera pans, with the character (``fg_masks (T, H,
@@ -1008,8 +1162,11 @@ def background_plate(frames: torch.Tensor, fg_masks: torch.Tensor, cameras: torc
     Every pixel of the plate is the median of what the frames show there where the set is visible (by lightness:
     the colour of the frame whose lightness is the median, so the colour is one that was really seen). The frames
     are lined up by the camera before the median, and moved with bicubic sampling (with a still camera they are
-    not moved at all), so the plate is as sharp as the frames, not an average of misaligned ones. What the
-    character covered in every frame is filled smoothly from round about.
+    not moved at all), so the plate is as sharp as the frames, not an average of misaligned ones.
+
+    What the character covered in every frame is filled smoothly from round about, and so is what it covered in
+    nearly every frame (the set seen in fewer than ``least`` of the frames that looked there): those few
+    glimpses are where a mask that missed a hand would leave a ghost of it.
     """
     frames = frames.float()
     t_count, _, h, w = frames.shape
@@ -1026,7 +1183,7 @@ def background_plate(frames: torch.Tensor, fg_masks: torch.Tensor, cameras: torc
     pw, ph = int(hi[0]) - origin[0], int(hi[1]) - origin[1]
     q = _grid(ph, pw) + torch.tensor([float(origin[0]), float(origin[1])])[:, None, None]
     covered = _dilate(fg_masks.bool(), grow)
-    colours, lights, oks = [], [], []
+    colours, lights, oks, looked = [], [], [], []
     for t in range(t_count):
         p = _apply(cameras[t], q)
         if _still(cameras[t]) and origin == (0, 0) and (ph, pw) == (h, w):
@@ -1040,12 +1197,13 @@ def background_plate(frames: torch.Tensor, fg_masks: torch.Tensor, cameras: torc
         colours.append(colour)
         lights.append(torch.where(ok, image_to_oklab(colour)[0], torch.full((ph, pw), float("nan"))))
         oks.append(ok)
+        looked.append(inside)
     count = torch.stack(oks).sum(0)
-    seen = count > 0
+    seen = (count > 0) & (count >= least * torch.stack(looked).sum(0))
     pick = torch.stack(lights).nanmedian(0).indices
     image = torch.stack(colours).gather(0, pick[None, None].expand(1, 3, ph, pw))[0]
     image = _fill(torch.where(seen[None], image, torch.zeros_like(image)), seen)
-    return Plate(image.clamp(0.0, 1.0), origin, count)
+    return Plate(image.clamp(0.0, 1.0), origin, count, seen)
 
 
 def _place_count(plate: Plate, camera_t: torch.Tensor, h: int, w: int) -> torch.Tensor:

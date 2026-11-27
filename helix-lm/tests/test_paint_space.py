@@ -96,6 +96,55 @@ def test_depth_finds_the_character_that_walks_on_the_spot():
     assert float((plate.image[0] - plate.image[2])[hole].max()) < 0.1          # set-coloured, not ball-coloured
 
 
+def test_a_large_near_character_that_barely_moves_is_found_and_her_shadow_stays_on_the_wall():
+    # a girl seen from the waist up fills about 40 per cent of the picture and runs out of it at the bottom; she
+    # sways a pixel and waves one hand; her soft shadow falls on the wall; and the video model makes the wall
+    # breathe by a fraction of a pixel. Her shirt has detail, so her sway is plain to the flow
+    size, count = 128, 8
+    world = texture(size, size, seed=3)
+    shirt = (1.0 - texture(size, size, seed=4)) * torch.tensor([1.0, 0.75, 0.35])[:, None, None]    # warm
+    yy, xx = torch.meshgrid(torch.arange(size).float() + 0.5, torch.arange(size).float() + 0.5, indexing="ij")
+    g = torch.Generator().manual_seed(2)
+    clip, masks, depth, shades = [], [], [], []
+    for t in range(count):
+        dx = (0, 1, 1, 0, -1, -1, 0, 1)[t]
+        head = ((xx - 64 - dx) / 17) ** 2 + ((yy - 38) / 20) ** 2 < 1
+        body = (((xx - 64 - dx) / 46) ** 2 + ((yy - 128) / 68) ** 2 < 1) & (yy > 58)
+        hand = (xx - 104 - 6 * math.sin(1.7 * t)) ** 2 + (yy - 52 - 4 * math.cos(1.7 * t)) ** 2 < 8 ** 2
+        her = head | body | hand
+        shadow = gaussian_blur(torch.roll(her.float(), (5, 9), (0, 1)), 3.0) * ~her
+        breath = torch.zeros(2, size, size)
+        breath[0], breath[1] = 0.35 * (torch.rand(2, generator=g) * 2 - 1)
+        wall = warp(world, breath) * (1 - 0.45 * shadow)
+        img = torch.where(her, torch.roll(shirt, dx, 1), wall)
+        img[:, head] = torch.tensor([0.95, 0.75, 0.62])[:, None]
+        img[:, hand] = torch.tensor([0.95, 0.75, 0.62])[:, None]
+        clip.append(img.clamp(0, 1))
+        masks.append(her)
+        shades.append(shadow)
+        near = 0.7 + 0.2 * (1 - ((xx - 64 - dx) / 46) ** 2).clamp(min=0)
+        depth.append(torch.where(her, near, 0.1 + 0.05 * yy / size) + 0.01 * torch.rand(size, size, generator=g))
+    frames, truth, depth, shades = torch.stack(clip), torch.stack(masks), torch.stack(depth), torch.stack(shades)
+    assert 0.35 < float(truth.float().mean()) < 0.5
+    flows = clip_flows(frames)
+    assert torch.equal(camera(flows, None, frames), torch.eye(2, 3).expand(count, 2, 3))   # not fooled by her
+    space = read_space(frames, depth)
+    assert torch.equal(space.cameras, torch.eye(2, 3).expand(count, 2, 3))     # still, though the wall breathes
+    assert min(iou(space.character[t], truth[t]) for t in range(count)) > 0.9
+    cast = (shades > 0.2) & ~truth                                              # where only her shadow is
+    assert float((space.character & cast).sum()) < 0.03 * float(cast.sum())    # it stays with the wall
+    plate = space.plate
+    always = truth.all(0)                                    # the wall she covered in every frame
+    assert bool(always.any()) and not bool(plate.seen[always].any())
+    hole = plate.image[:, always]                           # filled from the wall round it: no ghost of her
+    skin, warm = torch.tensor([0.95, 0.75, 0.62]), shirt[:, truth[0]].mean(1)
+    assert float((hole - skin[:, None]).norm(dim=0).min()) > 0.3
+    assert float((hole - warm[:, None]).norm(dim=0).min()) > 0.2
+    assert float((hole.mean(1) - world.mean((1, 2))).norm()) < 0.12
+    clean = plate.seen & (shades.amax(0) < 0.02)
+    assert float((plate.image - world)[:, clean].abs().mean()) < 0.03
+
+
 def test_a_panning_camera_is_recovered_and_the_plate_covers_all_of_the_set_it_saw():
     frames, truth, world = disc_clip(frames=8, size=112, step=6.0, pan=2)
     flows = clip_flows(frames)
