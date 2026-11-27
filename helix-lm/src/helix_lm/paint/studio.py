@@ -199,13 +199,15 @@ def _blob(s: Blob, px: torch.Tensor, py: torch.Tensor, aa: float):
 
 def render(shapes: list, x0: int, y0: int, w: int, h: int, aa: float = 1.0) -> dict:
     """Shapes seen from above, in the box ``x0, y0, w, h`` (pixels): their coverage ``(h, w)``, height above the
-    board ``(h, w)``, normal ``(3, h, w)``, colour (linear RGB, unlit) ``(3, h, w)`` and material numbers."""
+    board ``(h, w)``, normal ``(3, h, w)``, colour (linear RGB, unlit) ``(3, h, w)`` and material ``(4, h, w)``.
+    Each shape is worked out in its own box only; the shapes of one group melt into each other (a smooth
+    maximum of their heights), the others lie on top of or under each other."""
     height = torch.full((h, w), -1e9)
     normal = torch.zeros(3, h, w)
     normal[2] = 1.0
     albedo = torch.zeros(3, h, w)
     params = torch.zeros(4, h, w)
-    group = torch.full((h, w), -1, dtype=torch.long)
+    group = torch.full((h, w), -1, dtype=torch.int8)
     cover = torch.zeros(h, w)
     for s in shapes:
         bx0, by0, bx1, by1 = _box(s, aa)
@@ -215,39 +217,38 @@ def render(shapes: list, x0: int, y0: int, w: int, h: int, aa: float = 1.0) -> d
             continue
         px = torch.arange(ix0, ix1, dtype=torch.float32)[None, :] + 0.5
         py = torch.arange(iy0, iy1, dtype=torch.float32)[:, None] + 0.5
-        tau = None
         if isinstance(s, Cone):
             cov, top, nrm, tau = _cone(s, px, py, aa)
         else:
-            cov, top, nrm = _blob(s, px, py, aa)
-        if not bool((cov > 0).any()):
+            (cov, top, nrm), tau = _blob(s, px, py, aa), None
+        has = cov > 0
+        if not bool(has.any()):
             continue
         sl = (slice(iy0 - y0, iy1 - y0), slice(ix0 - x0, ix1 - x0))
-        colour = s.colour[:, None, None].expand(3, *cov.shape).clone()
-        mat = MATERIALS[s.material][:, None, None].expand(4, *cov.shape).clone()
+        every = (slice(None), *sl)
+        colour, mat = s.colour[:, None, None], MATERIALS[s.material][:, None, None]
         if isinstance(s, Cone) and (s.nail is not None or s.creases > 0):
-            _decals(s, tau, nrm, top, colour, mat)
+            colour, mat = colour.expand(3, *cov.shape).clone(), mat.expand(4, *cov.shape).clone()
+            _decals(s, tau, nrm, colour, mat)
         old_h, old_g = height[sl], group[sl]
-        empty, has = old_h < -1e8, cov > 0
-        same = (old_g == s.group) & (s.k > 0) & ~empty
+        empty = old_h < -1e8
+        same = (old_g == s.group) & ~empty if s.k > 0 else torch.zeros_like(empty)
         k = max(s.k, 1e-3)
         blend = (0.5 + 0.5 * (top - old_h) / k).clamp(0.0, 1.0)
         mix = torch.where(same, blend, (top > old_h).float() * cov)       # another group: on top or under
-        mix = torch.where(empty, torch.ones_like(mix), mix) * has
-        new_h = torch.where(same, old_h + (top - old_h) * blend + k * blend * (1.0 - blend),
-                            torch.maximum(top, old_h))
+        mix = torch.where(empty, 1.0, mix) * has
+        new_h = torch.where(same, old_h + (top - old_h) * blend + k * blend * (1.0 - blend), torch.maximum(top, old_h))
         height[sl] = torch.where(has, torch.where(empty, top, new_h), old_h)
-        n = normal[(slice(None), *sl)] * (1.0 - mix) + nrm * mix
-        normal[(slice(None), *sl)] = n / n.norm(dim=0, keepdim=True).clamp(min=1e-6)
-        albedo[(slice(None), *sl)] = albedo[(slice(None), *sl)] * (1.0 - mix) + colour * mix
-        params[(slice(None), *sl)] = params[(slice(None), *sl)] * (1.0 - mix) + mat * mix
-        group[sl] = torch.where(mix > 0.5, torch.full_like(old_g, s.group), old_g)
-        cover[sl] = torch.maximum(cover[sl], cov)
+        n = normal[every].lerp_(nrm, mix)
+        n.div_(n.norm(dim=0, keepdim=True).clamp(min=1e-6))
+        albedo[every].lerp_(colour.expand_as(albedo[every]), mix)
+        params[every].lerp_(mat.expand_as(params[every]), mix)
+        group[sl] = torch.where(mix > 0.5, s.group, old_g).to(torch.int8)
+        torch.maximum(cover[sl], cov, out=cover[sl])
     return {"cover": cover, "height": height.clamp(min=0.0), "normal": normal, "albedo": albedo, "params": params}
 
 
-def _decals(s: Cone, tau: torch.Tensor, nrm: torch.Tensor, top: torch.Tensor, colour: torch.Tensor,
-            mat: torch.Tensor) -> None:
+def _decals(s: Cone, tau: torch.Tensor, nrm: torch.Tensor, colour: torch.Tensor, mat: torch.Tensor) -> None:
     """A nail on top of a finger's last segment, creases across a joint: colour and material, in place."""
     length = math.dist(s.a, s.b)
     axis = torch.tensor([s.b[0] - s.a[0], s.b[1] - s.a[1], s.b[2] - s.a[2]]) / max(length, 1e-6)
@@ -276,24 +277,41 @@ def _decals(s: Cone, tau: torch.Tensor, nrm: torch.Tensor, top: torch.Tensor, co
 
 def shade(g: dict, unit: float, lift: float = 0.0) -> torch.Tensor:
     """The rendered shapes lit (linear RGB ``(3, h, w)``): wrapped diffuse light with a red band where it turns
-    to shadow on skin, light from the room, a soft sheen, darker where the shapes crowd each other."""
-    n, albedo, p = g["normal"], g["albedo"], g["params"]
-    wrap, scatter, shine, sharp = p[0], p[1], p[2], p[3].clamp(min=1.0)
+    to shadow on skin, light from the room, a soft sheen, shadows the shapes cast on each other, darker where
+    they crowd each other. Only the pixels they cover are lit."""
+    cover = g["cover"]
+    h, w = cover.shape
     height = g["height"] - lift
-    near = gaussian_blur(height, max(1.0, 0.05 * unit))
-    crowd = (1.0 - 2.6 * (near - height).clamp(min=0.0) / unit).clamp(0.4, 1.0)
-    ndl = (n * LIGHT[:, None, None]).sum(0)
-    diffuse = ((ndl + wrap) / (1.0 + wrap)).clamp(min=0.0) * (1.0 - 0.8 * _self_shadow(height, unit))
+    # what needs the neighbours (crowding, shadows), worked out at half the size
+    small = F.avg_pool2d(height[None, None], 2, ceil_mode=True)[0, 0] if min(h, w) > 8 else height
+    near = gaussian_blur(small, max(0.5, 0.025 * unit))
+    crowd = (1.0 - 2.6 * (near - small).clamp(min=0.0) / unit).clamp(0.4, 1.0)
+    dark = _self_shadow(small, unit / (2.0 if small is not height else 1.0))
+    if small is not height:
+        both = F.interpolate(torch.stack([crowd, dark])[None], scale_factor=2, mode="bilinear",
+                             align_corners=False)[0, :, :h, :w]
+        crowd, dark = both[0], both[1]
+    where = (cover > 0).flatten().nonzero().flatten()
+    n = g["normal"].reshape(3, -1)[:, where]
+    albedo = g["albedo"].reshape(3, -1)[:, where]
+    p = g["params"].reshape(4, -1)[:, where]
+    crowd, dark = crowd.flatten()[where], dark.flatten()[where]
+    wrap, scatter, shine, sharp = p[0], p[1], p[2], p[3].clamp(min=1.0)
+    ndl = (n * LIGHT[:, None]).sum(0)
+    diffuse = ((ndl + wrap) / (1.0 + wrap)).clamp(min=0.0) * (1.0 - 0.8 * dark)
     band = _smooth(0.0, 0.32, diffuse) * _smooth(0.64, 0.32, diffuse) * scatter
-    red = torch.tensor([0.22, 0.05, 0.015])[:, None, None] * band
-    ndh = (n * HALF[:, None, None]).sum(0).clamp(min=0.0)
-    gloss = shine * ndh ** sharp * crowd
-    sun = torch.tensor(SUN)[:, None, None]
-    sky = torch.tensor(SKY)[:, None, None] * (0.55 + 0.45 * n[2]) * crowd
-    metal = (p[2] > 0.7).float()                                       # metal shows the room more than lamp
-    out = albedo * (sun * diffuse * (0.9 + 0.1 * crowd) + sky) + albedo * red + sun * gloss
-    out = out + metal * 0.25 * albedo * (0.5 + 0.5 * n[1].neg()) * crowd
-    return out
+    edge = (1.0 - n[2]).clamp(min=0.0) ** 2 * scatter                  # thin skin at the edges looks redder
+    red = torch.tensor([0.22, 0.05, 0.015])[:, None] * band + torch.tensor([0.06, 0.0, -0.01])[:, None] * edge
+    ndh = (n * HALF[:, None]).sum(0).clamp(min=0.0)
+    gloss = shine * ndh ** sharp * crowd * (1.0 - 0.7 * dark)
+    sun = torch.tensor(SUN)[:, None]
+    sky = torch.tensor(SKY)[:, None] * (0.55 + 0.45 * n[2]) * crowd
+    metal = (p[2] > 0.7).float()                                       # metal shows the room more than the lamp
+    lit = albedo * (sun * diffuse * (0.9 + 0.1 * crowd) + sky) + albedo * red + sun * gloss
+    lit = lit + metal * 0.25 * albedo * (0.5 - 0.5 * n[1]) * crowd
+    out = torch.zeros(3, h * w)
+    out[:, where] = lit
+    return out.reshape(3, h, w)
 
 
 def _self_shadow(height: torch.Tensor, unit: float) -> torch.Tensor:
@@ -304,18 +322,19 @@ def _self_shadow(height: torch.Tensor, unit: float) -> torch.Tensor:
     rise = float(LIGHT[2] / LIGHT[:2].norm())
     soft = 0.012 * unit + 0.5
     worst = torch.zeros_like(height)
-    step = 1.5
+    step, seen = 1.0, set()
     while step < 0.4 * unit:
         dx, dy = round(float(away[0]) * step), round(float(away[1]) * step)
-        if abs(dx) < w and abs(dy) < h:
-            moved = torch.zeros_like(height)
-            ys, yd = (slice(max(0, dy), h + min(0, dy)), slice(max(0, -dy), h + min(0, -dy)))
-            xs, xd = (slice(max(0, dx), w + min(0, dx)), slice(max(0, -dx), w + min(0, -dx)))
-            moved[yd, xd] = height[ys, xs]
-            reach = math.hypot(dx, dy)
-            worst = torch.maximum(worst, ((moved - reach * rise - height) / soft).clamp(0.0, 1.0))
         step *= 1.45
-    return gaussian_blur(worst, 0.6 + 0.004 * unit)
+        if (dx, dy) in seen or abs(dx) >= w or abs(dy) >= h:
+            continue
+        seen.add((dx, dy))
+        moved = torch.zeros_like(height)
+        ys, yd = slice(max(0, dy), h + min(0, dy)), slice(max(0, -dy), h + min(0, -dy))
+        xs, xd = slice(max(0, dx), w + min(0, dx)), slice(max(0, -dx), w + min(0, -dx))
+        moved[yd, xd] = height[ys, xs]
+        worst = torch.maximum(worst, ((moved - math.hypot(dx, dy) * rise - height) / soft).clamp(0.0, 1.0))
+    return gaussian_blur(worst, 0.5 + 0.004 * unit)
 
 
 def _smooth(a: float, b: float, x: torch.Tensor) -> torch.Tensor:
@@ -517,11 +536,16 @@ def hand_shapes(pose: Pose, unit: float, tool: str | None, colour, skin=SKIN_TON
     def arm(d: float, z0: float) -> tuple:
         return (wrist[0] + ax * d * u, wrist[1] + ay * d * u, wrist[2] + (z0 + rise * d) * u)
 
-    out.append(Cone(arm(-0.05, 0.0), arm(1.25, 0.0), 0.135 * u, 0.200 * u, base, SKIN, 0, 0.09 * u))
-    out.append(Cone(arm(1.25, 0.0), arm(reach, 0.0), 0.200 * u, 0.215 * u, base, SKIN, 0, 0.03 * u))
+    out.append(Cone(arm(-0.05, 0.0), arm(0.6, 0.0), 0.135 * u, 0.170 * u, base, SKIN, 0, 0.09 * u))
+    out.append(Cone(arm(0.6, 0.0), arm(1.25, 0.0), 0.170 * u, 0.200 * u, base, SKIN, 0, 0.0))
     cloth = _lin((0.24, 0.25, 0.27))
     out.append(Cone(arm(1.05, 0.02), arm(1.17, 0.02), 0.235 * u, 0.242 * u, cloth * 1.12, CLOTH, 2))
-    out.append(Cone(arm(1.15, 0.02), arm(reach, 0.02), 0.235 * u, 0.25 * u, cloth, CLOTH, 2))
+    d = 1.15                                     # the sleeve in short pieces, so that each has a small box
+    while d < reach:
+        nxt = min(reach, d + 0.8)
+        out.append(Cone(arm(d, 0.02), arm(nxt, 0.02), (0.235 + 0.004 * (d - 1.15)) * u,
+                        (0.235 + 0.004 * (nxt - 1.15)) * u, cloth, CLOTH, 2))
+        d = nxt
     # the fingers: three segments each, the knuckles of the hand at their roots
     for name, joints in JOINTS.items():
         radii = RADII[name]
@@ -552,6 +576,7 @@ ACCENT = (226, 84, 58)              # the playhead red, for the frame being draw
 DESK = (0.705, 0.695, 0.675)        # matte warm grey (sRGB)
 TRAY = (0.645, 0.636, 0.618)
 ALUMINIUM = (0.78, 0.79, 0.80)
+INK_WEIGHT = 3.5                    # how much slower the time-lapse runs while lines are drawn than for colour
 
 
 @dataclass
@@ -615,8 +640,18 @@ def _u8(image: torch.Tensor) -> torch.Tensor:
     return (image.clamp(0.0, 1.0) * 255.0 + 0.5).byte().permute(1, 2, 0).contiguous()
 
 
+_TO_LINEAR = srgb_to_linear(torch.arange(256, dtype=torch.float32) / 255.0)
+_TO_BYTES = (linear_to_srgb(torch.arange(4096, dtype=torch.float32) / 4095.0) * 255.0 + 0.5).byte()
+
+
 def _from_u8(pixels: torch.Tensor) -> torch.Tensor:
-    return srgb_to_linear(pixels.permute(2, 0, 1).float() / 255.0)
+    """``(h, w, 3)`` sRGB bytes -> linear ``(3, h, w)``, by table."""
+    return _TO_LINEAR[pixels.permute(2, 0, 1).long()]
+
+
+def _to_u8(linear: torch.Tensor) -> torch.Tensor:
+    """Linear ``(3, h, w)`` -> ``(h, w, 3)`` sRGB bytes, by table."""
+    return _TO_BYTES[(linear.clamp(0.0, 1.0) * 4095.0 + 0.5).long()].permute(1, 2, 0).contiguous()
 
 
 def _noise(h: int, w: int, amount: float, seed: float = 0.0) -> torch.Tensor:
@@ -936,7 +971,7 @@ class Studio:
             desk[:, y0 - 1: y0 + bh + 1, x0 - 1] = _lin((0.58, 0.59, 0.60))[:, None]
         tx0, ty0, tx1, ty1 = self.tray.box
         desk[:, ty0 + 1: ty1 + 2, tx0 + 1: tx1 + 2] *= 0.88    # the tray stands a little off the desk
-        out = _u8(linear_to_srgb(desk))
+        out = _to_u8(desk)
         out[: lay.bar] = torch.tensor(BAR, dtype=torch.uint8)
         return out
 
@@ -956,10 +991,10 @@ class Studio:
     def _show(self, canvas: torch.Tensor, box=None) -> None:
         """Put a board canvas (linear), or the part of it in ``box``, on the picture."""
         if box is None:
-            self.board_px = _u8(linear_to_srgb(canvas))
+            self.board_px = _to_u8(canvas)
             return
         x0, y0, x1, y1 = box
-        self.board_px[y0:y1, x0:x1] = _u8(linear_to_srgb(canvas[:, y0:y1, x0:x1]))
+        self.board_px[y0:y1, x0:x1] = _to_u8(canvas[:, y0:y1, x0:x1])
 
     def _clean(self, lines: list, frame: int, start: torch.Tensor | None) -> torch.Tensor:
         """A sheet drawn again without the lightbox under it, the way the animation shows it."""
@@ -992,7 +1027,9 @@ class Studio:
                 shapes.append(None)
             else:
                 d = float(times[-1] - begin)
-                raw.append(max(d, 1e-3))
+                # the time-lapse is cut slower for the lines than for the colouring: lines are what one
+                # wants to see drawn
+                raw.append(max(d, 1e-3) * (INK_WEIGHT if line.kind in ("line", "sketch") else 1.0))
                 shapes.append((times - begin) / d if d > 0 else torch.linspace(0.0, 1.0, len(times)))
         starts = [self._at(line, 0.0) for line in lines]
         ends = [self._at(line, 1.0) for line in lines]
@@ -1211,7 +1248,7 @@ class Studio:
         missing = item_key(holding) if tip is not None else None
         if missing != self.missing:
             tx0, ty0, tx1, ty1 = self.tray.box
-            self.base[ty0:ty1, tx0:tx1] = _u8(linear_to_srgb(self.tray.picture(missing)))
+            self.base[ty0:ty1, tx0:tx1] = _to_u8(self.tray.picture(missing))
             self.missing = missing
         out = self.base.clone()
         out[: lay.bar] = bar
@@ -1219,7 +1256,7 @@ class Studio:
         out[y0: y0 + self.bh, x0: x0 + self.bw] = self.board_px
         if live is not None and box is not None:
             bx0, by0, bx1, by1 = box
-            out[y0 + by0: y0 + by1, x0 + bx0: x0 + bx1] = _u8(linear_to_srgb(live[:, by0:by1, bx0:bx1]))
+            out[y0 + by0: y0 + by1, x0 + bx0: x0 + bx1] = _to_u8(live[:, by0:by1, bx0:bx1])
         if tip is not None and holding is not None:
             self._hand(out, tip, lift, holding)
         return out
@@ -1256,7 +1293,7 @@ class Studio:
         iy, ix = by0 - cy0, bx0 - cx0
         inner = region[:, iy: iy + c.shape[0], ix: ix + c.shape[1]]
         region[:, iy: iy + c.shape[0], ix: ix + c.shape[1]] = inner * (1.0 - c) + lit * c
-        out[cy0:cy1, cx0:cx1] = _u8(linear_to_srgb(region))
+        out[cy0:cy1, cx0:cx1] = _to_u8(region)
 
     # ----------------------------------------------------------------------------------- all of it --
     def _where_now(self, step: Step, share: float) -> tuple:
@@ -1341,7 +1378,7 @@ class Studio:
                 bg_canvas = clean
             else:
                 last_clean = clean
-                self.played[frame] = _u8(linear_to_srgb(clean))
+                self.played[frame] = _to_u8(clean)
         self.live = None
         last = len(self.anim) - 1
         bar = self._bar(last, len(self.anim.sheets[last].lines), len(self.anim.sheets[last].lines))

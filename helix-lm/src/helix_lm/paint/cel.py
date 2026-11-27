@@ -718,22 +718,22 @@ class Shading:
 
 
 def _backdrop(ids: torch.Tensor, n: int, lab: torch.Tensor, subject=None) -> torch.Tensor:
-    """Which parts are background ``(n,)``. A character is a compact group of parts in colours of its own; the
-    background is what is left: large parts that reach the edge of the picture, very large parts (a twentieth of
-    it or more), parts that stretch over most of it (a pillar), parts that share at least half their border with
-    the background and are near its colour there or a lighter or darker tone of it (a glow in the sky, snow in
-    the air), and tiny parts almost wholly inside it (a snowflake). With a ``subject`` mask ``(H, W)``, the
-    parts mostly outside it."""
+    """Which parts are background ``(n,)``. A character is a compact group of parts in colours of its own, set
+    off from what is round it; the background is what is left. It starts from the large parts that reach the
+    edge of the picture, the very large parts (a twentieth of it or more) and the parts that stretch over most of
+    it (a pillar), and spreads from part to part across every border of some length where the colour changes
+    only a little or to a lighter or darker tone of itself (a glow in the sky, snow in the air, the lit side of
+    a pillar). It does not cross the silhouette of a character, where the colour jumps. Tiny parts almost wholly
+    inside the background are background too (a snowflake). With a ``subject`` mask ``(H, W)``, the parts
+    mostly outside it."""
     h, w = ids.shape
     flat = ids.flatten()
     area = torch.bincount(flat, minlength=n).float()
     if subject is not None:
         inside = torch.zeros(n).index_add_(0, flat, torch.as_tensor(subject).float().flatten())
         return inside / area.clamp(min=1) < 0.5
-    ys = torch.arange(h).repeat_interleave(w)
-    xs = torch.arange(w).repeat(h)
     span = []
-    for c in (xs, ys):
+    for c in (torch.arange(w).repeat(h), torch.arange(h).repeat_interleave(w)):
         lo = torch.full((n,), 1 << 30).scatter_reduce(0, flat, c, "amin")
         hi = torch.full((n,), -1).scatter_reduce(0, flat, c, "amax")
         span.append((hi - lo + 1).float())
@@ -744,16 +744,18 @@ def _backdrop(ids: torch.Tensor, n: int, lab: torch.Tensor, subject=None) -> tor
         return back
     a, b, count = _adjacency(ids, n)
     border = torch.zeros(n).index_add_(0, a, count.float())
-    like = (_distance(lab[a], lab[b]) < 0.16) | _family(lab[a], lab[b])
-    for _ in range(8):
-        share = torch.zeros(n).index_add_(0, a, count.float() * back[b].float()) / border.clamp(min=1)
-        near = torch.zeros(n, dtype=torch.bool)
-        near[a[like & back[b]]] = True
-        grow = ~back & (((share >= 0.5) & near) | ((share >= 0.97) & (area < 0.001 * h * w)))
-        if not bool(grow.any()):
+    gentle = ((_distance(lab[a], lab[b]) < 0.16) | _family(lab[a], lab[b])) & \
+        (count.float() >= torch.minimum(0.1 * border[b], torch.full_like(border[b], 12.0)))
+    a, b = a[gentle], b[gentle]
+    for _ in range(64):
+        grow = torch.zeros(n, dtype=torch.bool)
+        grow[b[back[a]]] = True
+        if bool((grow & ~back).sum() == 0):
             break
         back = back | grow
-    return back
+    a, b, count = _adjacency(ids, n)
+    share = torch.zeros(n).index_add_(0, a, count.float() * back[b].float()) / border.clamp(min=1)
+    return back | ((share >= 0.97) & (area < 0.001 * h * w))
 
 
 def _relief(mask: torch.Tensor, to_light: torch.Tensor, radius: float) -> torch.Tensor:

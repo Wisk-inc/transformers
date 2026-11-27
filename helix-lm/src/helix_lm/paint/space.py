@@ -150,16 +150,23 @@ def _box(x: torch.Tensor, radius: int) -> torch.Tensor:
 
 
 def _components(mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """The 8-connected parts of ``mask (H, W)``: for every pixel the smallest flat index of its part (-1 off the
-    mask), and the size of the part it is in (0 off the mask). Every pixel points to a smaller one of its part;
-    along each pair of neighbours the larger root is hung under the smaller, and the pointers are followed to
-    their roots (Shiloach and Vishkin, 1982), so even a long winding part takes few rounds."""
+    """The 8-connected parts of ``mask (H, W)``: for every pixel a number for its part, below ``H * W`` (-1 off
+    the mask), and the size of the part it is in (0 off the mask). Every pixel points to a smaller one of its
+    part; along each pair of neighbours the larger root is hung under the smaller, and the pointers are followed
+    to their roots (Shiloach and Vishkin, 1982), so even a long winding part takes few rounds. Only the box round
+    the mask is worked on."""
     h, w = mask.shape
+    box = _bounds(mask, 0)
+    if box is None:
+        return torch.full((h, w), -1, dtype=torch.long), torch.zeros(h, w, dtype=torch.long)
+    if (box[0].stop - box[0].start) * (box[1].stop - box[1].start) < h * w:
+        part_label, part_area = _components(mask[box])
+        label, area = torch.full((h, w), -1, dtype=torch.long), torch.zeros(h, w, dtype=torch.long)
+        label[box], area[box] = part_label, part_area
+        return label, area
     n = h * w
     flat_mask = mask.flatten()
     on = flat_mask.nonzero()[:, 0]
-    if len(on) == 0:
-        return torch.full((h, w), -1, dtype=torch.long), torch.zeros(h, w, dtype=torch.long)
     index = torch.arange(n).reshape(h, w)
     pairs = []
     for a, b in ((mask[:, :-1] & mask[:, 1:], (index[:, :-1], index[:, 1:])),
@@ -322,12 +329,14 @@ def _fit_motion(flow: torch.Tensor, weight: torch.Tensor | None = None, kind: st
     robust = torch.ones_like(wt)
     theta = torch.zeros(jac.shape[-1], dtype=torch.float64)
     spread = 0.0
+    p = jac.shape[-1]
+    rows = jac.reshape(-1, p)                         # x and y of every point, one row each
+    goal = target.reshape(-1)
     for _ in range(rounds):
-        ww = wt * robust
-        lhs = torch.einsum("nip,niq,n->pq", jac, jac, ww) + 1e-12 * torch.eye(jac.shape[-1], dtype=torch.float64)
-        rhs = torch.einsum("nip,ni,n->p", jac, target, ww)
-        theta = torch.linalg.solve(lhs, rhs)
-        off = (torch.einsum("nip,p->ni", jac, theta) - target).norm(dim=-1) * scale
+        ww = (wt * robust).repeat_interleave(2)
+        lhs = rows.T @ (rows * ww[:, None]) + 1e-12 * torch.eye(p, dtype=torch.float64)
+        theta = torch.linalg.solve(lhs, rows.T @ (goal * ww))
+        off = (rows @ theta - goal).reshape(-1, 2).norm(dim=-1) * scale
         spread = float(1.4826 * off.median())
         cut = 4.685 * max(spread, 0.05)
         robust = ((1.0 - (off / cut) ** 2).clamp(min=0.0)) ** 2
@@ -714,9 +723,11 @@ def _pop_out(depth: torch.Tensor, width: int) -> torch.Tensor:
     small = F.avg_pool2d(depth[None, None], f, ceil_mode=True) if f > 1 else depth[None, None]
     r = max(1, round(width / f / 2))
     sh, sw = small.shape[-2:]
+    k = 2 * r + 1
     padded = F.pad(small, (2 * r, 2 * r, 2 * r, 2 * r), mode="replicate")
-    low = -F.max_pool2d(-padded, 2 * r + 1, 1, r)
-    low = F.max_pool2d(low, 2 * r + 1, 1, r)[..., 2 * r : 2 * r + sh, 2 * r : 2 * r + sw]
+    low = -F.max_pool2d(-F.max_pool2d(-padded, (1, k), 1, (0, r)), (k, 1), 1, (r, 0))
+    low = F.max_pool2d(F.max_pool2d(low, (1, k), 1, (0, r)), (k, 1), 1, (r, 0))[..., 2 * r : 2 * r + sh,
+                                                                                 2 * r : 2 * r + sw]
     low = F.avg_pool2d(low, 3, 1, 1, count_include_pad=False)
     back = F.interpolate(low, size=(h, w), mode="bilinear", align_corners=False)[0, 0]
     return (depth - back).clamp(min=0.0)
@@ -840,7 +851,8 @@ def separate(frames: torch.Tensor, flows: torch.Tensor | None = None, depth: tor
         step, _ = _fit_motion(flows[t], None, kind)
         residual.append(flows[t] - (_apply(step, grid) - grid))
     residual = torch.stack(residual)
-    noise = float(residual.norm(dim=1).flatten()[:: max(1, residual[:, 0].numel() // 200000)].median())
+    speed = (residual[:, 0] ** 2 + residual[:, 1] ** 2).sqrt()
+    noise = float(speed.flatten()[:: max(1, speed.numel() // 200000)].median())
     enough = max(0.25, 1.5 * noise)
     if cameras is None:
         cameras = camera(flows, None, frames, kind)
@@ -873,10 +885,10 @@ def separate(frames: torch.Tensor, flows: torch.Tensor | None = None, depth: tor
         ids, which = torch.unique(label[on], return_inverse=True)
         count = torch.bincount(which, minlength=len(ids)).double().clamp(min=1)
         motion = torch.zeros(len(ids), dtype=torch.float64)
-        for r in ([residual[t]] if t < t_count - 1 else []) + ([residual[t - 1]] if t > 0 else []):
-            vx = torch.bincount(which, r[0][on].double(), len(ids)) / count
-            vy = torch.bincount(which, r[1][on].double(), len(ids)) / count
-            mag = torch.bincount(which, r.norm(dim=0)[on].double(), len(ids)) / count
+        for i in ([t] if t < t_count - 1 else []) + ([t - 1] if t > 0 else []):
+            vx = torch.bincount(which, residual[i, 0][on].double(), len(ids)) / count
+            vy = torch.bincount(which, residual[i, 1][on].double(), len(ids)) / count
+            mag = torch.bincount(which, speed[i][on].double(), len(ids)) / count
             motion = torch.maximum(motion, torch.maximum((vx * vx + vy * vy).sqrt(), mag - noise))
         full = torch.full((area,), -1, dtype=torch.long)
         full[on.flatten()] = which
