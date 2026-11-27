@@ -692,13 +692,13 @@ def _fit(clip: torch.Tensor, work: int) -> torch.Tensor:
 
 
 def _anime(clip: torch.Tensor, fps: float, words: str, *, work: int, like, colours, lines: str, detail: float,
-           depth, shading: str, details: bool, on, surface: str, seed: int, log) -> Animation:
+           depth, shading: str, details: bool, check: bool, on, surface: str, seed: int, log) -> Animation:
     from .anime import STYLE_WAVER, draw_anime
 
     clip = _fit(clip, work)
     got = draw_anime(clip, fps, palette=like.palette.clone() if like is not None else None, colours=colours or 16,
                      lines=lines, detail=detail, depth=depth, base=int(on or 2), shading=shading, details=details,
-                     log=log)
+                     check=check, log=log)
     settings = {"style": "anime", "lines": lines, "detail": detail, "seed": seed, "on": int(on or 2),
                 "waver": STYLE_WAVER, "shading": shading, "checks": got["checks"]}
     anim = Animation(got["sheets"], got["palette"], clip[got["drawn"]], fps, words, surface,
@@ -713,7 +713,7 @@ def animate(words: str | None = None, *, video=None, animator=None, frames: int 
             lines: str = "pen", colour: str | None = "marker", sketch: bool = False, detail: float = 0.5,
             colours: int | None = None, surface: str = "whiteboard", work: int = 512, drawable: bool = True,
             on: int | None = None, motion=None, style: str = "anime", depth="model", shading: str = "frame",
-            details: bool = True, log=None) -> Animation:
+            details: bool = True, check: bool = True, log=None) -> Animation:
     """
     An animation drawn by hand, frame by frame. Ask for it in ``words`` (an open video model imagines the
     motion: ``animator``, see :func:`helix_lm.paint.video.load_animator`), or give a ``video`` of your own (a
@@ -730,7 +730,8 @@ def animate(words: str | None = None, *, video=None, animator=None, frames: int 
     painted once and held, the character inked and painted as a cel on each drawing, timed on ones, twos and
     threes from how fast it moves (``on`` then sets the usual timing, twos by default), faces and small parts
     drawn with care (``details``), every line steadied through time; ``depth`` "model" uses a depth model for
-    the space (None goes without), ``shading`` "frame" or "3d". ``style`` "marker" draws every frame whole with
+    the space (None goes without), ``shading`` "frame" or "3d", ``check`` draws again what is clearly off its
+    frame. ``style`` "marker" draws every frame whole with
     see-through markers, as the first version did.
     """
     if (words is None) == (video is None):
@@ -758,8 +759,8 @@ def animate(words: str | None = None, *, video=None, animator=None, frames: int 
     clip, fps = clip.float(), float(fps or 8.0)
     if style == "anime":
         return _anime(clip, fps, words or str(video), work=work, like=like, colours=colours, lines=lines,
-                      detail=detail, depth=depth, shading=shading, details=details, on=on, surface=surface,
-                      seed=seed, log=log)
+                      detail=detail, depth=depth, shading=shading, details=details, check=check, on=on,
+                      surface=surface, seed=seed, log=log)
     colours = colours or 10
     on = max(1, int(on or (2 if fps >= 16 else 1)))
     if on > 1 and len(clip) > on:

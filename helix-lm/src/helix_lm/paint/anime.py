@@ -36,7 +36,7 @@ import time
 import torch
 
 from .cel import paint_frame, palette_for
-from .check import score
+from .check import fix, score
 from .detail import REDRAW, draw_details, find_details, follow, merge
 from .draw import CELS, Line
 from .flow import optical_flow, sample
@@ -212,8 +212,8 @@ def detail_pass(frame: torch.Tensor, lines: list, palette: torch.Tensor, drawer,
 # ----------------------------------------------------------------------------------------- the clip --
 def draw_anime(frames: torch.Tensor, fps: float, *, palette: torch.Tensor | None = None, colours: int = 16,
                lines: str = "pen", detail: float = 0.6, depth="model", base: int = 2, shading: str = "frame",
-               details: bool = True, steadiness: float = 1.0, start=None, background: list | None = None,
-               log=None) -> dict:
+               details: bool = True, check: bool = True, steadiness: float = 1.0, start=None,
+               background: list | None = None, log=None) -> dict:
     """
     Draw ``frames (T, 3, H, W)`` (sRGB, ``fps`` frames a second) as anime, as the module's notes tell. Returns a
     dict: ``sheets`` (one :class:`helix_lm.paint.animate.Sheet` a drawing), ``holds`` (frames each drawing is
@@ -224,7 +224,9 @@ def draw_anime(frames: torch.Tensor, fps: float, *, palette: torch.Tensor | None
     for most movement (2: twos; 1: every frame; 3: threes). ``shading`` "frame" takes shadow shapes from the
     frame's own light and dark, "3d" from the surface's direction (depth) and one light for the whole clip,
     which cannot flicker. ``start`` is ``(sheet, frame)`` of a drawing to go on from (the next clip), and
-    ``background`` the background art already painted for it (it is then not painted again).
+    ``background`` the background art already painted for it (it is then not painted again). ``check``
+    draws the places where a drawing is clearly off its frame again (:func:`helix_lm.paint.check.fix`), keeping
+    only what matches better.
     """
     from .animate import Sheet
 
@@ -274,11 +276,14 @@ def draw_anime(frames: torch.Tensor, fps: float, *, palette: torch.Tensor | None
         if details:
             before = (last_frame, last_parts) if last_parts else None
             own, last_parts, counts = detail_pass(frame, own, palette, drawer, before=before)
+        under = background_for(background, space.cameras[i], w)
+        if check:
+            own = fix(own, frame, drawer, palette, rounds=1, under=under)
         carried = 0
         if last_lines is not None:
             flow = optical_flow(last_frame, frame)
             carried = carry_names(last_lines, own, flow, float(w))
-        mark = _score(own, frame, palette, background_for(background, space.cameras[i], w))
+        mark = _score(own, frame, palette, under)
         checks.append({"frame": i, "error": round(float(mark["error"]), 4), "bare": round(float(mark["bare"]), 4),
                        "chamfer": round(float(mark["chamfer"]), 2)})
         sheets.append(Sheet(own, carried, len(own) - carried, last_lines is None))
