@@ -149,21 +149,27 @@ HelixConfig(
 )
 ```
 
-## 2.6: Pinxit draws animations, and paints with an image model
+## 2.6: Pinxit draws anime, and paints with an image model
 
-* **animation drawn by hand** ([docs/PINXIT_ANIMATE.md](docs/PINXIT_ANIMATE.md)): ask in words, an open video
-  model (AnimateLCM on a CPU, Wan 2.2 on a large GPU, a LoRA of your own on either) imagines the motion, and
-  Pinxit draws every frame on a whiteboard with a pen and markers, one frame after the other, each traced over
-  the last on a lightbox so the character keeps its look. `clip.making_of()` shows it being drawn with the pen
-  in hand; a `.pinxa` file keeps it all, to recolour, redraw with another pen or carry on with a next clip;
+* **anime drawn by hand** ([docs/PINXIT_ANIMATE.md](docs/PINXIT_ANIMATE.md)): ask in words, and an open video
+  model (Wan 2.2 14B on a large GPU, Wan-Animate to make your character perform a motion, AnimateLCM on a CPU,
+  or LTX, Hunyuan, CogVideoX, any of them with a LoRA of your own) imagines the motion. Pinxit then draws it
+  as a studio does: the background painted once and held, the character inked and painted as a cel on every
+  drawing, timed on ones, twos and threes, faces and hands drawn again at three times the size and carried over
+  rigidly, every line steadied through time, every drawing checked against its frame and fixed where it is
+  off. Depth, the character's outline and the camera come from the clip itself;
+* **the desk**: `clip.making_of()` shows it being drawn, the background first, then each drawing on the
+  lightbox, a shaded 3D hand holding the brush pen, an exposure sheet along the top;
+* **memory**: a `.pinxa` file keeps it all, to recolour (shadows stay shadows), redraw with another pen, play at
+  any frame rate or carry on with a next clip;
 * **paired with an image model**: `paint(photo, imagine=load_imaginer(), subject="...")` has Stable Diffusion
   1.5 (held to the photo's edges) imagine the photo as a painting, and Pinxit paints that stroke by stroke;
 * **words**: the eye finds a thing named in words in a picture, and reads a feeling from a phrase.
 
 ```python
 from helix_lm.paint import animate
-clip = animate("a cute cartoon fox running in the snow, side view")
-clip.save("fox.mp4"); clip.making_of("fox_being_drawn.mp4"); clip.save("fox.pinxa")
+clip = animate("a cheerful anime girl with short red hair waving hello, upper body, in a sunny park")
+clip.save("girl.mp4", fps=24); clip.making_of("girl_being_drawn.mp4"); clip.save("girl.pinxa")
 ```
 
 ## 2.5: Pinxit, a painter

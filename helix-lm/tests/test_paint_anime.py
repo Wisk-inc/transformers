@@ -138,3 +138,15 @@ def test_white_teeth_and_the_shine_in_an_eye_stay_white():
     shine = Line(square * 0.02 + 0.3, torch.ones(4), "brush", (0.98, 0.98, 0.98), marker=0, kind="cel", rings=(4,))
     assert tidy_spots([lips, teeth, shine], 200, 200) == 0
     assert teeth.colour == (0.95, 0.93, 0.91) and shine.colour == (0.98, 0.98, 0.98)
+
+
+def test_a_ring_of_wall_round_a_head_is_not_taken_for_the_character():
+    from helix_lm.paint.anime import _on_character
+
+    square = torch.tensor([[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]])
+    inner = square * 0.5 + 0.25
+    wall = Line(torch.cat([square, inner.flip(0)]), torch.ones(8), "brush", (0.2, 0.4, 0.9), kind="cel", rings=(4, 4))
+    head = Line(inner, torch.ones(4), "brush", (0.9, 0.5, 0.1), kind="cel", rings=(4,))
+    subject = torch.zeros(100, 100, dtype=torch.bool)
+    subject[30:70, 30:70] = True                                   # the head; its middle is the wall ring's middle too
+    assert _on_character([wall, head], subject, 100.0) == [head]

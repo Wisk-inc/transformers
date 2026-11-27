@@ -14,7 +14,9 @@ from .painting import Painting, paint
 from .style import StyleCard, named_style, read_style, style_names
 
 _LATER = {"load_hand": "model", "ModelHand": "model", "Pinxit": "model", "PinxitConfig": "model", "load_eye": "eye",
-          "load_imaginer": "imagine", "animate": "animate", "Animation": "animate", "load_animator": "video"}
+          "load_imaginer": "imagine", "animate": "animate", "Animation": "animate", "load_animator": "video",
+          "list_models": "video", "draw_anime": "anime", "read_space": "space", "paint_frame": "cel",
+          "making_of": "studio"}
 
 
 def __getattr__(name: str):
@@ -28,5 +30,6 @@ def __getattr__(name: str):
 
 
 __all__ = ["EMOTIONS", "Animation", "Feeling", "ModelHand", "Painting", "Pinxit", "PinxitConfig", "Settings",
-           "StyleCard", "animate", "feeling_of", "load_animator", "load_eye", "load_hand", "load_imaginer",
-           "named_style", "paint", "read_emotion", "read_style", "style_names"]
+           "StyleCard", "animate", "draw_anime", "feeling_of", "list_models", "load_animator", "load_eye", "load_hand",
+           "load_imaginer", "making_of", "named_style", "paint", "paint_frame", "read_emotion", "read_space",
+           "read_style", "style_names"]

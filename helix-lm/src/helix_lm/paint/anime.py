@@ -221,9 +221,10 @@ def _inside(lines: list, box, scale: float) -> list:
 
 
 def _on_character(lines: list, subject: torch.Tensor | None, scale: float, grow: int = 2) -> list:
-    """The lines that belong to the character: a cel shape whose middle, an ink line most of whose points, lie
-    on ``subject (H, W)`` (grown by ``grow`` pixels). A part's box takes in some of the set round it, which the
-    background art already paints."""
+    """The lines that belong to the character: a cel shape most of whose area, an ink line most of whose
+    points, lie on ``subject (H, W)`` (grown by ``grow`` pixels). A part's box takes in some of the set round it,
+    which the background art already paints (a ring of wall round a head has its middle on the head, so the
+    middle alone would not tell)."""
     if subject is None:
         return lines
     h, w = subject.shape
@@ -236,8 +237,12 @@ def _on_character(lines: list, subject: torch.Tensor | None, scale: float, grow:
     kept = []
     for line in lines:
         if line.kind in CELS and line.rings:
-            centre, area = _centre_area(line, 1.0)
-            if area > 0 and bool(on(centre[None])[0]):
+            got = fill_rings(line.points * scale, line.rings, h, w, ss=1)
+            if got is None:
+                continue
+            y0, x0, cov = got
+            inside = (cov * near[y0 : y0 + cov.shape[0], x0 : x0 + cov.shape[1]]).sum()
+            if float(inside) >= 0.5 * float(cov.sum()):
                 kept.append(line)
         elif float(on(line.points).float().mean()) >= 0.5:
             kept.append(line)
@@ -351,7 +356,11 @@ def draw_anime(frames: torch.Tensor, fps: float, *, palette: torch.Tensor | None
                                                   subject=None if whole else space.character[i])
         under = background_for(background, space.cameras[i], w)
         if check:
-            own = fix(own, frame, drawer, palette, rounds=1, under=under)
+            had = {id(line) for line in own}
+            fixed = fix(own, frame, drawer, palette, rounds=1, under=under)
+            added = _on_character([line for line in fixed if id(line) not in had],
+                                  None if whole else space.character[i], w)
+            own = [line for line in fixed if id(line) in had] + added   # a redrawn box keeps only the character
         spots = tidy_spots(own, h, w)
         carried = 0
         if last_lines is not None:
