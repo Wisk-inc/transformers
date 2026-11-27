@@ -163,10 +163,10 @@ Checked here, on a CPU (four cores):
   (shape kept to 0.997 IoU after a turn), the self-check, the camera on a pan, the desk video, saving and
   opening, recolouring with shadows kept, playing at another frame rate.
 
-Weak spots seen on those two clips: a few faint light-blue dots stay on her cheeks in some drawings; the wall
-behind her is painted with some lighter patches where the frame's texture was; her shadow on the wall stays
-where it is when her hand moves; the fox's legs are rougher than its body; a face is found only where both eyes
-are open (11 of the girl's 16 frames, and carried over between).
+Weak spots seen on those two clips: her shadow on the wall stays where it is when her hand moves; her hands
+and the fox's legs are drawn rougher than their faces and bodies (the video model moves them most, and they are
+small); the snow spray in the fox's sky is too fine to keep; a face is found only where both eyes are open (11
+of the girl's 16 frames, and carried over between).
 
 Not checked:
 
