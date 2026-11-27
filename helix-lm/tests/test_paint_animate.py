@@ -151,7 +151,7 @@ def test_how_a_frame_moves_is_measured():
 def test_each_frame_is_traced_over_the_last_so_the_character_keeps_its_look():
     clip = torch.stack([scene(t) for t in range(5)])
     said = []
-    anim = animate(video=(clip, 8.0), work=160, colours=6, log=said.append)
+    anim = animate(video=(clip, 8.0), work=160, colours=6, style="marker", log=said.append)
     assert len(anim) == 5 and anim.sheets[0].fresh and not any(s.fresh for s in anim.sheets[1:])
     for sheet in anim.sheets[1:]:
         assert sheet.kept > 2 * sheet.new                        # most of it traced, a little drawn new
@@ -170,7 +170,7 @@ def test_each_frame_is_traced_over_the_last_so_the_character_keeps_its_look():
 
 def test_an_animation_is_kept_played_changed_and_shown_being_drawn(tmp_path):
     clip = torch.stack([scene(t, 96) for t in range(3)])
-    anim = animate(video=(clip, 6.0), work=96, colours=5)
+    anim = animate(video=(clip, 6.0), work=96, colours=5, style="marker")
     anim.save(tmp_path / "a.pinxa")
     back = Animation.load(tmp_path / "a.pinxa")
     assert len(back) == 3 and torch.equal(back.frame(2, 96), anim.frame(2, 96)) and back.fps == 6.0
@@ -207,7 +207,7 @@ def test_the_video_model_is_asked_for_a_drawable_clip():
     clip = animator("a fox", seed=1)
     assert clip.shape == (4, 3, 64, 64) and pipe.asked[-1]["num_inference_steps"] == 6
     still.__call__ = None
-    anim = animate("a fox running", animator=animator, work=64, colours=4)
+    anim = animate("a fox running", animator=animator, work=64, colours=4, style="marker")
     assert "2d cartoon animation, clean bold outlines" in pipe.asked[-1]["prompt"] and len(anim) == 4
     pictures = [torch.rand(32, 48, 3).numpy() for _ in range(2)]
     assert _frames(type("Out", (), {"frames": [pictures]})()).shape == (2, 3, 32, 48)
@@ -228,9 +228,9 @@ def test_the_video_model_is_asked_for_a_drawable_clip():
 def test_a_fast_video_is_drawn_on_twos_and_goes_on_from_its_last_frame():
     clip = torch.stack([scene(t, 64) for t in range(6)])
     said = []
-    anim = animate(video=(clip, 24.0), work=64, colours=4, log=said.append)
+    anim = animate(video=(clip, 24.0), work=64, colours=4, style="marker", log=said.append)
     assert len(anim) == 3 and anim.fps == 12.0 and anim.settings["on"] == 2 and "drawn on 2s" in said[0]
-    assert len(animate(video=(clip[:3], 24.0), work=64, colours=4, on=1)) == 3
+    assert len(animate(video=(clip[:3], 24.0), work=64, colours=4, on=1, style="marker")) == 3
 
     class Moving:
         def __call__(self, **kwargs):

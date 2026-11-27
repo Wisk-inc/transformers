@@ -358,6 +358,7 @@ class Animation:
         self.settings = settings or {}
         self.background = background
         self.holds = holds
+        self.cameras: torch.Tensor | None = None       # how the camera saw the background in each drawing
         self._backdrops: dict = {}
 
     def __len__(self) -> int:
@@ -367,19 +368,26 @@ class Animation:
         """For how many frames of the video drawing ``index`` is shown."""
         return max(1, int(self.holds[index])) if self.holds else 1
 
-    def board(self, index: int, width: int | None = None, waver: float = 0.35) -> Board:
+    def board(self, index: int, width: int | None = None, waver: float | None = None) -> Board:
         """A board ready for drawing ``index``: bare, or with the background art already on it. The frame's own
         paint then covers the background but stays under the frame's own ink."""
+        from .anime import background_for, still_camera
+
         h, w = self.size
         width = width or 2 * w
+        waver = self.settings.get("waver", 0.35) if waver is None else waver
         board = Board(width, round(width * h / w), self.surface, waver=waver, seed=index)
         if self.background:
-            key = (width, self.surface)
+            camera = None if self.cameras is None or index >= len(self.cameras) else self.cameras[index]
+            moving = camera is not None and not still_camera(camera)
+            key = (width, self.surface, tuple(round(float(v), 3) for v in camera.flatten()) if moving else None)
             if key not in self._backdrops:
                 under = Board(width, round(width * h / w), self.surface, waver=waver, seed=10_007)
-                for line in self.background:
+                for line in background_for(self.background, camera, w) if moving else self.background:
                     under.draw(line)
-                self._backdrops = {key: under.canvas}            # one size at a time is enough
+                if len(self._backdrops) > 24:                    # a panning camera: keep the last few
+                    self._backdrops.clear()
+                self._backdrops[key] = under.canvas
             board.canvas = self._backdrops[key].clone()
         return board
 
@@ -394,7 +402,7 @@ class Animation:
         """The frames it was drawn from, sRGB ``(T, 3, H, W)``."""
         return None if self.source is None else self.source.float() / 255.0
 
-    def frame(self, index: int, width: int | None = None, waver: float = 0.35) -> torch.Tensor:
+    def frame(self, index: int, width: int | None = None, waver: float | None = None) -> torch.Tensor:
         """Frame ``index`` drawn, sRGB ``(3, H, W)``, ``width`` pixels wide (twice the frames' size when not
         given)."""
         board = self.board(index, width, waver)
@@ -530,9 +538,15 @@ class Animation:
         colour = tuple(float(c) for c in to)
         # every line of that marker moves by the same step in OKLab: the base colour becomes `to` exactly, and
         # its shadow, highlight and colour trace lines keep how they stood to it
-        step = linear_to_oklab(srgb_to_linear(torch.tensor(colour))) - \
-            linear_to_oklab(srgb_to_linear(self.palette[marker].clone()))
-        self.palette[marker] = torch.tensor(colour)
+        if marker < len(self.palette):
+            base = self.palette[marker].clone()
+            self.palette[marker] = torch.tensor(colour)
+        else:                                   # one of the background's own colours: its base shape tells
+            ours = [line for line in self._all_lines() if line.marker == marker]
+            if not ours:
+                raise ValueError(f"no colour number {marker} in this animation")
+            base = torch.tensor(next((line.colour for line in ours if line.kind in ("cel", "fill")), ours[0].colour))
+        step = linear_to_oklab(srgb_to_linear(torch.tensor(colour))) - linear_to_oklab(srgb_to_linear(base))
         for line in self._all_lines():
             if line.marker == marker:
                 was = linear_to_oklab(srgb_to_linear(torch.tensor(line.colour)))
@@ -568,9 +582,14 @@ class Animation:
 
         animator = animator or load_animator()
         h, w = self.size
-        clip = animator(f"{words}, {DRAWABLE}", frames=frames, size=(h - h % 8, w - w % 8), seed=seed,
-                        character=self.frames[-1], **({"motion": motion} if motion is not None else {}))
-        clip = F.interpolate(clip, size=(h, w), mode="bilinear", align_corners=False)
+        anime = self.settings.get("style") == "anime"
+        if anime:
+            from .anime import ASK
+        clip = animator(f"{words}, {ASK if anime else DRAWABLE}", frames=frames, size=(h - h % 8, w - w % 8),
+                        seed=seed, character=self.frames[-1], **({"motion": motion} if motion is not None else {}))
+        clip = F.interpolate(clip, size=(h, w), mode="bilinear", align_corners=False).clamp(0, 1)
+        if anime:
+            return self._go_on_anime(clip[1:] if len(clip) > 1 else clip, float(animator.fps), words, log)
         on = int(self.settings.get("on", 1))
         clip = clip[on::on] if len(clip) > on else clip       # its first frame is the last one already drawn
         sheets, _ = draw_frames(clip, self.palette, lines=self.settings.get("lines", "pen"),
@@ -579,6 +598,25 @@ class Animation:
         self.sheets += sheets
         self.source = torch.cat([self.source, (clip.clamp(0, 1) * 255).round().byte()])
         self.history.append({"op": "extend", "words": words, "frames": len(sheets)})
+        return self
+
+    def _go_on_anime(self, clip: torch.Tensor, fps: float, words: str, log) -> Animation:
+        from .anime import draw_anime, then
+
+        got = draw_anime(clip, fps, palette=self.palette, lines=self.settings.get("lines", "pen"),
+                         detail=self.settings.get("detail", 0.6), base=int(self.settings.get("on", 2)),
+                         shading=self.settings.get("shading", "frame"), background=self.background,
+                         start=(self.sheets[-1], self.frames[-1]), log=log)
+        before = len(self.sheets)
+        self.holds = (self.holds or [1] * before) + got["holds"]
+        last = self.cameras[-1] if self.cameras is not None and len(self.cameras) else torch.eye(2, 3)
+        cameras = torch.stack([then(c, last) for c in got["cameras"]])
+        self.cameras = cameras if self.cameras is None else torch.cat([self.cameras, cameras])
+        self.sheets += got["sheets"]
+        self.source = torch.cat([self.source, (clip[got["drawn"]] * 255).round().byte()])
+        self.settings["checks"] = self.settings.get("checks", []) + got["checks"]
+        self._backdrops = {}
+        self.history.append({"op": "extend", "words": words, "frames": len(got["sheets"]), "style": "anime"})
         return self
 
     def summary(self) -> dict:
@@ -623,6 +661,8 @@ class Animation:
         extra = {"background": self._pack(self.background)} if self.background else {}
         if self.holds:
             extra["holds"] = torch.tensor(self.holds, dtype=torch.long)
+        if self.cameras is not None:
+            extra["cameras"] = self.cameras.float()
         torch.save(extra | {"version": VERSION, "sheets": frames, "palette": self.palette, "source": self.source,
                     "fps": self.fps, "words": self.words, "surface": self.surface, "history": json.dumps(self.history),
                     "settings": json.dumps({k: v for k, v in self.settings.items() if k != "size"} | {"size": list(
@@ -638,14 +678,42 @@ class Animation:
         anim = cls(sheets, data["palette"], None, float(data["fps"]), data["words"], data["surface"],
                    json.loads(data["history"]), json.loads(data["settings"]), background, holds)
         anim.source = data["source"]
+        anim.cameras = data.get("cameras")
         return anim
+
+
+def _fit(clip: torch.Tensor, work: int) -> torch.Tensor:
+    if max(clip.shape[-2:]) == work:
+        return clip.clamp(0, 1)
+    h, w = clip.shape[-2:]
+    f = work / max(h, w)
+    return F.interpolate(clip, size=(round(h * f), round(w * f)), mode="bilinear", align_corners=False,
+                         antialias=True).clamp(0, 1)
+
+
+def _anime(clip: torch.Tensor, fps: float, words: str, *, work: int, like, colours, lines: str, detail: float,
+           depth, shading: str, details: bool, on, surface: str, seed: int, log) -> Animation:
+    from .anime import STYLE_WAVER, draw_anime
+
+    clip = _fit(clip, work)
+    got = draw_anime(clip, fps, palette=like.palette.clone() if like is not None else None, colours=colours or 16,
+                     lines=lines, detail=detail, depth=depth, base=int(on or 2), shading=shading, details=details,
+                     log=log)
+    settings = {"style": "anime", "lines": lines, "detail": detail, "seed": seed, "on": int(on or 2),
+                "waver": STYLE_WAVER, "shading": shading, "checks": got["checks"]}
+    anim = Animation(got["sheets"], got["palette"], clip[got["drawn"]], fps, words, surface,
+                     [{"op": "animate", "words": words, "frames": len(got["sheets"]), "style": "anime"}], settings,
+                     background=got["background"], holds=got["holds"])
+    anim.cameras = got["cameras"]
+    return anim
 
 
 def animate(words: str | None = None, *, video=None, animator=None, frames: int | None = None, size=None,
             fps: float | None = None, seed: int = 0, character=None, like: Animation | None = None,
             lines: str = "pen", colour: str | None = "marker", sketch: bool = False, detail: float = 0.5,
-            colours: int = 10, surface: str = "whiteboard", work: int = 512, drawable: bool = True,
-            on: int | None = None, motion=None, log=None) -> Animation:
+            colours: int | None = None, surface: str = "whiteboard", work: int = 512, drawable: bool = True,
+            on: int | None = None, motion=None, style: str = "anime", depth="model", shading: str = "frame",
+            details: bool = True, log=None) -> Animation:
     """
     An animation drawn by hand, frame by frame. Ask for it in ``words`` (an open video model imagines the
     motion: ``animator``, see :func:`helix_lm.paint.video.load_animator`), or give a ``video`` of your own (a
@@ -657,6 +725,13 @@ def animate(words: str | None = None, *, video=None, animator=None, frames: int 
     default twos for a video of 16 frames a second or more (12 drawings a second from 24), else ones.
     ``motion`` is a video of someone moving (a file, a tensor or ``(video, fps)``): with Wan-Animate and a
     ``character`` picture, the character performs that motion.
+
+    ``style`` "anime" (the default) draws as a studio does (:mod:`helix_lm.paint.anime`): the background
+    painted once and held, the character inked and painted as a cel on each drawing, timed on ones, twos and
+    threes from how fast it moves (``on`` then sets the usual timing, twos by default), faces and small parts
+    drawn with care (``details``), every line steadied through time; ``depth`` "model" uses a depth model for
+    the space (None goes without), ``shading`` "frame" or "3d". ``style`` "marker" draws every frame whole with
+    see-through markers, as the first version did.
     """
     if (words is None) == (video is None):
         raise ValueError("ask for an animation in words, or give a video to draw")
@@ -668,13 +743,24 @@ def animate(words: str | None = None, *, video=None, animator=None, frames: int 
 
         animator = animator or load_animator()
         want = (animator.size if size is None else (size if isinstance(size, tuple) else (size, size)))
-        clip = animator(f"{words}, {DRAWABLE}" if drawable else words, frames=frames,
+        if drawable:
+            from .anime import ASK
+
+            words_for_model = f"{words}, {ASK if style == 'anime' else DRAWABLE}"
+        else:
+            words_for_model = words
+        clip = animator(words_for_model, frames=frames,
                         size=(want[0] - want[0] % 8, want[1] - want[1] % 8), seed=seed, character=character,
                         **({"motion": motion} if motion is not None else {}))
         fps = fps or animator.fps
         if log:
             log(f"the video model imagined {len(clip)} frames of {clip.shape[-1]}x{clip.shape[-2]}")
     clip, fps = clip.float(), float(fps or 8.0)
+    if style == "anime":
+        return _anime(clip, fps, words or str(video), work=work, like=like, colours=colours, lines=lines,
+                      detail=detail, depth=depth, shading=shading, details=details, on=on, surface=surface,
+                      seed=seed, log=log)
+    colours = colours or 10
     on = max(1, int(on or (2 if fps >= 16 else 1)))
     if on > 1 and len(clip) > on:
         clip, fps = clip[::on], fps / on

@@ -373,6 +373,14 @@ class Board:
         self._ink(line)
         self.count += 1
 
+    def settle(self) -> None:
+        """Make what is on the board one layer under what comes next: later cel paint then covers its ink too
+        (a character's cel laid over the background art)."""
+        self.ink.zero_()
+        self.ink_cover.zero_()
+        self.wet.zero_()
+        self.wet_key = None
+
     def peek(self, line: Line, upto: int) -> torch.Tensor:
         """The board as it looks with the first ``upto`` points of ``line`` drawn, without drawing it."""
         canvas = self.canvas.clone()
@@ -385,9 +393,14 @@ class Board:
 
 
 def render(lines: list, width: int, height: int, kind: str = "whiteboard", waver: float = 0.35, seed: int = 0,
-           scale: float | None = None, origin: tuple = (0.0, 0.0)) -> torch.Tensor:
-    """A drawing as an sRGB picture ``(3, height, width)``."""
+           scale: float | None = None, origin: tuple = (0.0, 0.0), under: list | None = None) -> torch.Tensor:
+    """A drawing as an sRGB picture ``(3, height, width)``. ``under`` (lines) is drawn first as a layer of its
+    own, such as the background art under a character's cel."""
     board = Board(width, height, kind, scale, origin, waver, seed)
+    if under:
+        for line in under:
+            board.draw(line)
+        board.settle()
     for line in lines:
         board.draw(line)
     return board.picture()
