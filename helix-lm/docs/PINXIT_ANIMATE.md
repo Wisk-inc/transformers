@@ -26,6 +26,12 @@ helix paint animate "she dances" --model wan-animate --character me.png --motion
 
 On a large GPU the cell [notebooks/pinxit_animate_cell.py](../notebooks/pinxit_animate_cell.py) does all of it.
 
+![a frame of the video model's clip, and the same frame drawn](pinxit/anime_girl.jpg)
+
+![the fox, from the video model and drawn](pinxit/anime_fox.jpg)
+
+![the desk: the background done, the first drawing being inked, the brush in hand](pinxit/anime_desk.jpg)
+
 ## 1. Who does what
 
 | part | module | what it does |
@@ -140,7 +146,27 @@ clip.save("girl.mp4", fps=30)
 
 Checked here, on a CPU (four cores):
 
-RESULTS
+- two real clips made with AnimateLCM on DreamShaper 8 (16 frames, 512 by 512, about 17 and 29 minutes each on
+  the CPU): a cartoon fox walking in snow, and a semi-realistic anime girl with red hair waving in front of a
+  blue wall. Drawn as anime at 512 pixels, the whole clip took 2 minutes (the fox) and 3.6 minutes (the girl),
+  depth model included; the making-of of the girl at 1280 pixels (66 seconds of video) took 2.7 minutes;
+- by eye, at full size: the fox keeps its shape, its orange and its white fur, with an eye, a nose and an ear;
+  the girl is flat teal and skin with simple shadow shapes, her hair a vivid red base with one shadow and a
+  highlight, two eyes with lashes and a smile with teeth; the background is painted once and held, no ghost of
+  the character in it;
+- the check against the frames: colour off by 0.025 (fox) and 0.046 (girl) on average (mean OKLab distance),
+  no board left bare;
+- the space: the fox found in 3 to 4 percent of the picture and the girl in 44 to 47, the camera still in both,
+  the set picture with the character taken out;
+- tests for every part: exact fills with holes, paint under the ink, line identity, the timing, steadying (a
+  shaky path brought to within 0.25 pixel of the true one, its arc kept), in-betweens, rigid carrying of an eye
+  (shape kept to 0.997 IoU after a turn), the self-check, the camera on a pan, the desk video, saving and
+  opening, recolouring with shadows kept, playing at another frame rate.
+
+Weak spots seen on those two clips: a few faint light-blue dots stay on her cheeks in some drawings; the wall
+behind her is painted with some lighter patches where the frame's texture was; her shadow on the wall stays
+where it is when her hand moves; the fox's legs are rougher than its body; a face is found only where both eyes
+are open (11 of the girl's 16 frames, and carried over between).
 
 Not checked:
 
