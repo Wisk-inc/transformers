@@ -34,7 +34,6 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -45,7 +44,6 @@ from .draw import (
     TOOLS,
     Board,
     Line,
-    _cover,
     colour_lines,
     dedupe,
     draw_picture,
@@ -54,7 +52,6 @@ from .draw import (
     markers,
     order,
     stamp,
-    timing,
     trace,
 )
 from .flow import nearest, optical_flow, sample
@@ -272,77 +269,9 @@ def read_video(path, most: int | None = None, max_side: int = 640) -> tuple[torc
         return torch.stack([load_image(p, max_side=max_side) for p in files]), fps
 
 
-# --------------------------------------------------------------------------------------- the whiteboard --
-WALL, LEDGE = (0.83, 0.82, 0.79), (0.74, 0.75, 0.77)
+# ---------------------------------------------------------------------------------------- the animation --
 
 
-def _capsule(canvas: torch.Tensor, a, b, radius: float, colour, alpha: float = 1.0, aa: float = 1.2) -> None:
-    """A rounded bar from ``a`` to ``b`` (pixels) painted on ``canvas`` (linear RGB, in place)."""
-    pts = torch.tensor([a, b], dtype=torch.float32)
-    got = _cover(pts, torch.tensor([radius, radius]), canvas.shape[1], canvas.shape[2], aa)
-    if got is None:
-        return
-    y0, x0, cov = got
-    h, w = cov.shape
-    ink = srgb_to_linear(torch.tensor(colour, dtype=torch.float32))[:, None, None]
-    region = canvas[:, y0 : y0 + h, x0 : x0 + w]
-    region.mul_(1.0 - alpha * cov).add_(ink * alpha * cov)
-
-
-def _in_hand(canvas: torch.Tensor, tip, tool: str, colour, size: float) -> None:
-    """The tool being drawn with, its point at ``tip`` (pixels), held the way a right hand holds it."""
-    x, y = float(tip[0]), float(tip[1])
-    lean = torch.tensor([0.42, 0.91])
-    length = 0.24 * size
-    end = (x + lean[0] * length, y + lean[1] * length)
-    shade = (x + lean[0] * length + 0.02 * size, y + lean[1] * length + 0.025 * size)
-    thick = {"pen": 0.011, "brush pen": 0.012, "pencil": 0.012, "marker": 0.02, "fine marker": 0.016}[tool] * size
-    _capsule(canvas, (x + 0.01 * size, y + 0.012 * size), shade, thick * 1.1, (0.0, 0.0, 0.0), 0.18, 4.0)
-    near = (x + lean[0] * 0.05 * size, y + lean[1] * 0.05 * size)
-    if tool == "pencil":
-        _capsule(canvas, near, end, thick, (0.95, 0.76, 0.18))
-        _capsule(canvas, (x, y), near, 0.45 * thick, (0.86, 0.68, 0.46))
-        _capsule(canvas, (x, y), (x + lean[0] * 0.012 * size, y + lean[1] * 0.012 * size), 0.25 * thick,
-                 (0.22, 0.22, 0.24))
-        rubber = (end[0] - lean[0] * 0.02 * size, end[1] - lean[1] * 0.02 * size)
-        _capsule(canvas, rubber, end, thick, (0.9, 0.5, 0.55))
-    elif tool in ("marker", "fine marker"):
-        _capsule(canvas, near, end, thick, (0.94, 0.94, 0.93))
-        band = (near[0] + lean[0] * 0.03 * size, near[1] + lean[1] * 0.03 * size)
-        _capsule(canvas, near, band, thick * 1.02, colour)
-        _capsule(canvas, (x, y), near, 0.4 * thick, colour)
-    else:
-        _capsule(canvas, near, end, thick, (0.13, 0.13, 0.15))
-        grip = (near[0] + lean[0] * 0.05 * size, near[1] + lean[1] * 0.05 * size)
-        _capsule(canvas, near, grip, thick * 1.05, (0.3, 0.3, 0.33))
-        _capsule(canvas, (x, y), near, 0.3 * thick, (0.6, 0.6, 0.62))
-
-
-def _ledge(canvas: torch.Tensor, top: int, palette: torch.Tensor, holding, size: float) -> None:
-    """The ledge under the board with the pens and markers on it; the one in hand is missing."""
-    h, w = canvas.shape[1:]
-    canvas[:, top : top + max(2, int(0.012 * size))] = srgb_to_linear(torch.tensor((0.9, 0.9, 0.91)))[:, None, None]
-    y = top + 0.04 * size
-    x = 0.04 * size
-    gap = 0.03 * size
-    things = [("pencil", TOOLS["pencil"].ink), ("pen", TOOLS["pen"].ink)] + [("marker", tuple(c.tolist()))
-                                                                            for c in palette]
-    for tool, colour in things:
-        length = 0.11 * size if tool == "marker" else 0.13 * size
-        if x + length > w - 0.02 * size:
-            break
-        if holding is None or (tool, tuple(round(c, 3) for c in colour)) != holding:
-            if tool == "marker":
-                _capsule(canvas, (x, y), (x + length, y), 0.013 * size, (0.94, 0.94, 0.93))
-                _capsule(canvas, (x + length - 0.025 * size, y), (x + length, y), 0.0135 * size, colour)
-            elif tool == "pencil":
-                _capsule(canvas, (x, y), (x + length, y), 0.007 * size, (0.95, 0.76, 0.18))
-            else:
-                _capsule(canvas, (x, y), (x + length, y), 0.006 * size, (0.13, 0.13, 0.15))
-        x += length + gap
-
-
-# -------------------------------------------------------------------------------------------- animation --
 class Animation:
     """A drawn animation and its memory: every frame's lines, the markers, and the frames it was drawn from.
     ``background`` is the background art, drawn once and kept under every frame (None: each frame is drawn
@@ -446,83 +375,17 @@ class Animation:
             return path
         return write_video(self.play(width, fps), path, fps or self.fps)
 
-    def making_of(self, path, width: int = 720, fps: int = 24, first: float = 14.0, later: float = 3.0,
-                  loops: int = 2, onion: float = 0.16) -> Path:
-        """A video of the animation being drawn on a whiteboard: the pen or marker in hand moving as a hand
-        would, the markers on the ledge, every frame drawn over a faint copy of the last (the lightbox), and the
-        finished animation played ``loops`` times at the end. The first frame takes about ``first`` seconds,
-        every next one about ``later`` (traced lines go faster than new ones)."""
-        from PIL import ImageDraw, ImageFont
+    def making_of(self, path, width: int = 1280, fps: int = 24, first: float = 14.0, later: float = 3.0,
+                  loops: int = 2, onion: float = 0.16, hand: bool = True) -> Path:
+        """A video of the animation being drawn (:func:`helix_lm.paint.studio.making_of`): the background art
+        first, then every drawing over a faint copy of the last (the lightbox), a hand holding the pen, brush or
+        marker and moving as a hand does, the tools in their tray, an exposure sheet along the top, and the
+        finished animation played ``loops`` times at the end. The first drawing takes about ``first`` seconds,
+        every next one about ``later``."""
+        from .studio import making_of
 
-        h, w = self.size
-        margin = round(0.04 * width)
-        bw = width - 2 * margin
-        bh = round(bw * h / w)
-        ledge = round(0.1 * width)
-        height = margin + bh + margin + ledge
-        height += height % 2
-        wall = srgb_to_linear(torch.tensor(WALL))[:, None, None].expand(3, height, width).clone()
-        frame_colour = srgb_to_linear(torch.tensor((0.62, 0.63, 0.65)))[:, None, None]
-        rim = max(2, round(0.008 * width))
-        wall[:, margin - rim : margin + bh + rim, margin - rim : margin + bw + rim] = frame_colour
-        font = ImageFont.load_default()
-        writer = VideoWriter(path, fps)
-        last = None
+        return making_of(self, path, width, fps, first, later, loops, onion, hand)
 
-        ledges: dict = {}                                    # the ledge drawn once for each tool in hand
-
-        def show(canvas: torch.Tensor, tip=None, holding=None, number: int = 0) -> None:
-            scene = wall.clone()
-            scene[:, margin : margin + bh, margin : margin + bw] = canvas
-            if holding not in ledges:
-                strip = wall.clone()
-                _ledge(strip, margin + bh + rim + 2, self.palette, holding, width)
-                ledges[holding] = strip[:, margin + bh + rim :]
-            scene[:, margin + bh + rim :] = ledges[holding]
-            if tip is not None:
-                _in_hand(scene, (tip[0] + margin, tip[1] + margin), holding[0] if holding else "pen",
-                         holding[1] if holding else (0.1, 0.1, 0.1), width)
-            picture = to_pil(linear_to_srgb(scene.clamp(0, 1)))
-            ImageDraw.Draw(picture).text((margin, max(2, margin // 4)), f"frame {number} of {len(self)}",
-                                         fill=(70, 70, 75), font=font)
-            writer.add(torch.from_numpy(np.asarray(picture).copy()).permute(2, 0, 1).float() / 255.0)
-
-        for i, sheet in enumerate(self.sheets):
-            board = Board(bw, bh, self.surface, seed=i)
-            if last is not None and onion > 0:               # the last frame on the lightbox, under the new sheet
-                board.canvas = board.canvas * (1.0 - onion) + last * onion
-            times = timing(sheet.lines)
-            total = float(times[-1][1][-1]) if times else 0.0
-            speed = max(1e-6, total / (first if i == 0 else later))
-            step = speed / fps
-            clock, done = 0.0, 0
-            while done < len(sheet.lines):
-                clock += step
-                while done < len(sheet.lines) and float(times[done][1][-1]) <= clock:
-                    board.draw(sheet.lines[done])
-                    done += 1
-                if done >= len(sheet.lines):
-                    break
-                line, (begin, stamps) = sheet.lines[done], times[done]
-                holding = (line.tool, tuple(round(c, 3) for c in line.colour))
-                if clock < begin:                              # between lines: the pen on its way to the next one
-                    show(board.canvas, board.pixels(line)[0], holding, i + 1)
-                    continue
-                upto = int((stamps <= clock).sum())
-                show(board.peek(line, upto), board.pixels(line)[max(0, upto - 1)], holding, i + 1)
-            last = board.canvas.clone()
-            for _ in range(round(0.4 * fps)):
-                show(board.canvas, None, None, i + 1)
-        for _ in range(loops):
-            for i in range(len(self)):
-                board = Board(bw, bh, self.surface, seed=i)
-                for line in self.sheets[i].lines:
-                    board.draw(line)
-                for _ in range(max(1, round(fps / self.fps))):
-                    show(board.canvas, None, None, i + 1)
-        return writer.close()
-
-    # ------------------------------------------------------------------------------------------ changes --
     def marker_at(self, where: tuple, frame: int = 0) -> int:
         """The marker that colours the point ``where = (x, y)`` (shares of the picture) of a frame."""
         h, w = self.size

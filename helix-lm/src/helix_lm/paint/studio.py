@@ -445,9 +445,9 @@ def tool_parts(tool: str, posted: bool = True) -> list:
                 ("clip", 0.035, 0.14, 0.006, GREY)]
         if not posted:
             return caps + barrel
-        nib = [(0.0, 0.035, 0.007, 0.016, MATTE, FELT)] if tool == "marker" else \
-            [(0.0, 0.03, 0.003, 0.008, MATTE, FELT)]
-        collar = [(0.03, 0.08, 0.022, 0.030, PLASTIC, GREY), (0.08, 0.15, 0.032, 0.039, PLASTIC, PEN_BODY)]
+        nib = [(0.0, 0.055, 0.009, 0.020, MATTE, FELT)] if tool == "marker" else \
+            [(0.0, 0.05, 0.004, 0.011, MATTE, FELT)]
+        collar = [(0.05, 0.09, 0.022, 0.030, PLASTIC, GREY), (0.09, 0.15, 0.032, 0.039, PLASTIC, PEN_BODY)]
         return nib + collar + barrel + [(0.66, 0.78, 0.045, 0.045, PLASTIC, GREY),
                                         (0.78, 0.81, 0.045, 0.041, PLASTIC, CAP), ("clip", 0.67, 0.78, 0.006, GREY)]
     # the cel brush: bristles wet with paint, a steel ferrule, a lacquered handle
@@ -519,19 +519,23 @@ RADII = {
 class Pose:
     """Where the hand is: the point of the tool (pixels), how high it is lifted (pixels), which way the hand
     points (radians, the direction of its fingers on the screen), how far the back of the hand has given
-    (pixels, x y) and which way the forearm goes (radians)."""
+    (pixels, x y), which way the forearm goes (radians) and where the shoulder is (pixels, off the picture; None:
+    the arm goes on straight)."""
 
     tip: tuple
     lift: float = 0.0
     yaw: float = -2.2
     give: tuple = (0.0, 0.0)
     arm: float = -2.4
+    shoulder: tuple | None = None
 
 
 def hand_shapes(pose: Pose, unit: float, tool: str | None, colour, skin=SKIN_TONE, reach: float = 4.0,
                 hand: bool = True) -> list:
     """The shapes of a right hand holding ``tool`` (or only the tool when not ``hand``), posed by ``pose``,
-    ``unit`` pixels to a hand length. The forearm reaches ``reach`` hand lengths away (off the picture)."""
+    ``unit`` pixels to a hand length: the tool, the fingers, the back of the hand, the forearm and a sleeve from
+    just above the wrist. With ``pose.shoulder`` the arm bends at the elbow and the upper arm rises from it toward
+    the shoulder for ``reach`` hand lengths (off the picture); without, the forearm goes on that far."""
     fx, fy = math.cos(pose.yaw), math.sin(pose.yaw)
     lx, ly = fy, -fx
     tx, ty = pose.tip
@@ -571,8 +575,8 @@ def hand_shapes(pose: Pose, unit: float, tool: str | None, colour, skin=SKIN_TON
                     base, (0.12, 0.0), SKIN, 0, 0.06 * u))
     out.append(Blob(world((-0.370, 0.125, 0.232), 0.9), (0.100 * u, 0.062 * u, 0.060 * u), pose.yaw - 0.90,
                     base, (0.0, 0.0), SKIN, 0, 0.05 * u))
-    # the forearm, flush with the back of the hand at the wrist, out of the picture, and the sleeve over it
-    # (it starts well inside the hand, under its skin, so that it comes out of it smoothly at the wrist)
+    # the forearm, flush with the back of the hand at the wrist, and the sleeve over it (it starts well inside
+    # the hand, under its skin, so that it comes out of it smoothly at the wrist)
     wx, wy, _ = world((-0.950, -0.095, 0.0), 1.0)
     wrist = (wx, wy, max(_top(palm, wx, wy), 0.08 * u + lift) - 0.72 * 0.15 * u + 0.012 * u)
     ax, ay = math.cos(pose.arm), math.sin(pose.arm)
@@ -583,14 +587,29 @@ def hand_shapes(pose: Pose, unit: float, tool: str | None, colour, skin=SKIN_TON
 
     out.append(Cone(arm(-0.3, 0.0), arm(0.45, 0.0), 0.130 * u, 0.170 * u, base, SKIN, 0, 0.14 * u, flat=0.72))
     out.append(Cone(arm(0.45, 0.0), arm(0.9, 0.0), 0.170 * u, 0.190 * u, base, SKIN, 0, 0.0, flat=0.72))
-    cloth = _lin((0.24, 0.25, 0.27))
+    cloth = _lin((0.40, 0.405, 0.42))
     out.append(Cone(arm(0.62, 0.035), arm(0.74, 0.035), 0.215 * u, 0.222 * u, cloth * 1.12, CLOTH, 2))
+    elbow = 1.3 if pose.shoulder is not None else reach
     d = 0.72                                     # the sleeve in short pieces, so that each has a small box
-    while d < reach:
-        nxt = min(reach, d + 0.8)
-        out.append(Cone(arm(d, 0.035), arm(nxt, 0.035), (0.215 + 0.012 * (d - 0.72)) * u,
-                        (0.215 + 0.012 * (nxt - 0.72)) * u, cloth, CLOTH, 2))
+    while d < elbow:
+        nxt = min(elbow, d + 0.6)
+        out.append(Cone(arm(d, 0.035), arm(nxt, 0.035), (0.215 + 0.02 * (d - 0.72)) * u,
+                        (0.215 + 0.02 * (nxt - 0.72)) * u, cloth, CLOTH, 2))
         d = nxt
+    if pose.shoulder is not None:                # the upper arm, from the elbow up toward the shoulder and camera
+        ex, ey, ez = arm(elbow, 0.035)
+        sx, sy = pose.shoulder
+        span = max(1e-3, math.hypot(sx - ex, sy - ey))
+        ux, uy = (sx - ex) / span, (sy - ey) / span
+        r0 = (0.215 + 0.02 * (elbow - 0.72)) * u
+        out.append(Cone((ex, ey, ez), (ex, ey, ez), r0 * 1.04, r0 * 1.04, cloth, CLOTH, 2, 0.03 * u))
+        d = 0.0
+        while d < reach:
+            nxt = min(reach, d + 0.5)
+            out.append(Cone((ex + ux * d * u, ey + uy * d * u, ez + 0.55 * d * u),
+                            (ex + ux * nxt * u, ey + uy * nxt * u, ez + 0.55 * nxt * u),
+                            r0 + 0.03 * d * u, r0 + 0.03 * nxt * u, cloth, CLOTH, 2, 0.03 * u if d == 0 else 0.0))
+            d = nxt
     # the fingers: three segments each, the knuckles of the hand at their roots and a bump at the middle joint
     for name, joints in JOINTS.items():
         radii = RADII[name]
@@ -654,7 +673,7 @@ ACCENT = (226, 84, 58)              # the playhead red, for the frame being draw
 DESK = (0.705, 0.695, 0.675)        # matte warm grey (sRGB)
 TRAY = (0.645, 0.636, 0.618)
 ALUMINIUM = (0.78, 0.79, 0.80)
-INK_WEIGHT = 3.5                    # how much slower the time-lapse runs while lines are drawn than for colour
+INK_WEIGHT = 5.5                    # how much slower the time-lapse runs while lines are drawn than for colour
 
 
 @dataclass
@@ -820,25 +839,46 @@ def _pot(canvas: torch.Tensor, cx: float, cy: float, radius: float, colour) -> N
 
 
 class Tray:
-    """The tray of tools beside the board, drawn once for each tool that can be missing from it."""
+    """The tray of tools beside the board, drawn once for each tool that can be missing from it. Markers, the
+    brush and a pencil or a few pens lie in it side by side; many pens (the coloured lines of anime) stand in a
+    cup, their caps up; the pots of cel paint stand below, as large as the room left allows."""
 
     def __init__(self, items: list, lay: Layout, pots: list) -> None:
         self.lay, self.items, self.pots = lay, items, pots
         x0, y0, x1, y1 = lay.tray
         u, g = lay.unit, lay.grid
         pad = max(2, round(2 * g))
-        y = y0 + pad + 0.06 * u
-        for item in items:
-            r = max(max(p[2], p[3]) for p in tool_parts(item.tool, posted=False) if p[0] != "clip") * u
+        pens = [it for it in items if it.tool in ("pen", "brush pen")]
+        self.standing = pens if len(pens) > 3 else []
+        lying = [it for it in items if it not in self.standing]
+        gap = max(2.0, 0.6 * g + 0.02 * u)
+        y = y0 + pad + 0.04 * u
+        for item in lying:
+            r = _thickness(item.tool) * u
             item.at = (x0 + pad + 0.02 * u, y + r)
-            y += 2 * r + max(3.0, 1.1 * g + 0.035 * u)
+            y += 2 * r + gap
+        self.cup = None
+        if self.standing:                                 # caps up in a cup, packed as pens pack
+            cap = 0.027 * u
+            step = 2.3 * cap
+            spots = sorted(((i + 0.5 * (j % 2)) * step, j * step * 0.866) for i in range(-6, 7) for j in range(-7, 8))
+            spots = sorted(spots, key=lambda p: math.hypot(*p))[: len(self.standing)]
+            reach = (max(math.hypot(*p) for p in spots) + cap * 1.2) / 0.78     # inside the rim
+            cx, cy = x0 + pad + reach, y + reach
+            for item, (dx, dy) in zip(self.standing, spots, strict=True):
+                item.at = (cx + dx, cy + dy)
+            self.cup = (cx, cy, reach, cap)
+            y += 2 * reach + gap
+        room_w, room_h = x1 - x0 - 2 * pad, y1 - pad - y
         radius = max(3.0, 0.085 * u)
-        across = max(1, int((x1 - x0 - 2 * pad) // (2.6 * radius)))
-        y += radius * 0.6
+        while radius > 3.0 and pots and (room_w // (2.5 * radius)) * max(0, room_h // (2.5 * radius)) < len(pots):
+            radius *= 0.92
+        across = max(1, int(room_w // (2.5 * radius)))
         for i, pot in enumerate(pots):
-            col, row = i % across, i // across
-            pot.at = (x0 + pad + radius + col * 2.6 * radius, y + radius + row * 2.5 * radius)
-        last = max([it.at[1] + 0.06 * u for it in items] + [p.at[1] + radius for p in pots] + [y0 + 4 * g])
+            pot.at = (x0 + pad + radius * 1.1 + (i % across) * 2.5 * radius, y + radius * 1.1 + (i // across) * 2.5 *
+                      radius)
+        last = max([it.at[1] + 0.06 * u for it in lying] + [p.at[1] + radius for p in pots] + [y0 + 4 * g] +
+                   ([self.cup[1] + self.cup[2]] if self.cup else []))
         self.box = (x0, y0, x1, min(y1, int(last + pad)))
         self.radius = radius
         self.cache: dict = {}
@@ -855,11 +895,20 @@ class Tray:
             tray[:, :2] *= 0.86
             tray[:, :, :2] *= 0.88
         u = self.lay.unit
+        if self.cup is not None:
+            cx, cy, reach, _ = self.cup
+            _pot(tray, cx - x0, cy - y0, reach, (0.16, 0.16, 0.17))
         shapes = []
         for item in self.items:
             if item.key == missing:
                 continue
-            r = max(max(p[2], p[3]) for p in tool_parts(item.tool, posted=False) if p[0] != "clip") * u
+            if item in self.standing:
+                ink = _tool_colours(item.tool, item.colour)[CAP]
+                top = (item.at[0] - x0, item.at[1] - y0, 0.3 * u)
+                shapes.append(Cone((top[0], top[1], 0.1 * u), top, self.cup[3], self.cup[3], ink, PLASTIC, 1,
+                                   flat=0.35))
+                continue
+            r = _thickness(item.tool) * u
             start = (item.at[0] - x0, item.at[1] - y0, r)
             shapes += tool_shapes(item.tool, item.colour, start, (1.0, 0.0, 0.0), (0.0, 0.0, 1.0), u, posted=False)
         if shapes:
@@ -872,6 +921,11 @@ class Tray:
             _pot(tray, pot.at[0] - x0, pot.at[1] - y0, self.radius, pot.colour)
         self.cache[missing] = tray
         return tray
+
+
+def _thickness(tool: str) -> float:
+    """The largest radius of a tool lying in the tray, in hand lengths."""
+    return max(max(p[2], p[3]) for p in tool_parts(tool, posted=False) if p[0] != "clip")
 
 
 # ------------------------------------------------------------------------------------------------ motion --
@@ -933,8 +987,10 @@ class Motion:
     little and comes back, the hand turns about the point and the forearm follows the wrist, all on damped
     springs, so they lag and overshoot a little as a real arm does."""
 
-    def __init__(self, fps: float, unit: float, shoulder: tuple) -> None:
-        self.dt, self.unit, self.shoulder = 1.0 / fps, unit, shoulder
+    def __init__(self, fps: float, unit: float, shoulder) -> None:
+        self.dt, self.unit = 1.0 / fps, unit
+        self.shoulder = shoulder if callable(shoulder) else (lambda tip: shoulder)
+        self.body = Spring(0.6, 0.9)                          # the body leans slowly
         self.yaw = Spring(1.5, 0.5, angle=True)
         self.give = Spring(2.6, 0.42)
         self.arm = Spring(1.1, 0.65, angle=True)
@@ -944,7 +1000,8 @@ class Motion:
         u = self.unit
         vx, vy = ((tip[0] - self.last[0]) / self.dt, (tip[1] - self.last[1]) / self.dt) if self.last else (0.0, 0.0)
         self.last = tip
-        towards = math.atan2(tip[1] - self.shoulder[1], tip[0] - self.shoulder[0])
+        sx, sy = (float(v) for v in self.body(self.shoulder(tip), self.dt))
+        towards = math.atan2(tip[1] - sy, tip[0] - sx)
         fx, fy = math.cos(towards), math.sin(towards)
         speed = math.hypot(vx, vy)
         side = (vx * fy - vy * fx) / (speed + 1.5 * u)       # moving across the hand turns the wrist with it
@@ -957,12 +1014,12 @@ class Motion:
         give = self.give((gx, gy), self.dt)
         fx, fy = math.cos(yaw), math.sin(yaw)
         wrist = (tip[0] + u * (-0.96 * fx - 0.085 * fy), tip[1] + u * (-0.96 * fy + 0.085 * fx))
-        to_shoulder = math.atan2(self.shoulder[1] - wrist[1], self.shoulder[0] - wrist[0])
+        to_shoulder = math.atan2(sy - wrist[1], sx - wrist[0])
         arm = float(self.arm(to_shoulder, self.dt))
         back = yaw + math.pi
         bend = (arm - back + math.pi) % (2 * math.pi) - math.pi
         arm = back + max(-0.55, min(0.55, bend))
-        return Pose(tip, lift, yaw, (float(give[0]), float(give[1])), arm)
+        return Pose(tip, lift, yaw, (float(give[0]), float(give[1])), arm, (sx, sy))
 
 
 # ------------------------------------------------------------------------------------------------ the studio --
@@ -1006,7 +1063,7 @@ class Studio:
         self.rate = float(animation.fps) * on               # exposure frames a second
         x0, y0, self.bw, self.bh = lay.board
         self.origin = (x0, y0)
-        self.shoulder = (lay.width * 1.35, lay.height * 1.05)     # off the picture, to the right and below
+        self.shoulder = self._shoulder
         self.fonts: dict = {}
         self.cel_tables: dict = {}
         self.thumbs: dict = {}
@@ -1016,6 +1073,7 @@ class Studio:
         self.live = None                                     # the thumbnail of the frame being drawn
         self.board_px: torch.Tensor | None = None            # the board as shown, bytes (bh, bw, 3)
         self.missing = "nothing yet"
+        self.pot_of: dict = {}
         self.items, self.pots = self._things()
         self.tray = Tray(self.items, lay, self.pots)
         self.where = {thing.key: thing.at for thing in self.items + self.pots}
@@ -1025,6 +1083,15 @@ class Studio:
         self.prints: dict = {}
         self.motion = Motion(fps, lay.unit, self.shoulder)
 
+    def _shoulder(self, tip: tuple) -> tuple:
+        """Where the drawer's shoulder is, off the picture: below and to the right while the hand is high on
+        the board, more to the right as it comes down, so that the arm keeps clear of the drawing's lower part
+        and the hand stays on the picture."""
+        lay = self.lay
+        top, bottom = self.origin[1], self.origin[1] + self.bh
+        low = min(1.0, max(0.0, (tip[1] - top) / max(1.0, bottom - top))) ** 1.3
+        return (lay.width * (1.0 + 0.3 * low), lay.height * (1.8 - 0.75 * low))
+
     # ----------------------------------------------------------------------------------- the still parts --
     def font(self, size: float, mono: bool = False):
         key = (round(size), mono)
@@ -1033,7 +1100,8 @@ class Studio:
         return self.fonts[key]
 
     def _things(self) -> tuple:
-        """The tools in the tray in the order they are first used, and the pots of cel paint."""
+        """The tools in the tray in the order they are first used, and the pots of cel paint (paints that
+        look the same share a pot: ``pot_of`` gives the pot of each paint)."""
         items, pots, seen = [], [], set()
         for line in self.background + [line for sheet in self.anim.sheets for line in sheet.lines]:
             holding = held(line)
@@ -1042,9 +1110,13 @@ class Studio:
                 seen.add(key)
                 tool = "marker" if key[0] == "marker" else holding[0]
                 items.append(Item(key, tool, holding[1]))
-            if holding[0] == "brush" and ("pot", holding[1]) not in seen:
-                seen.add(("pot", holding[1]))
-                pots.append(Item(("pot", holding[1]), "pot", holding[1]))
+            if holding[0] == "brush" and holding[1] not in self.pot_of:
+                near = next((p for p in pots if max(abs(a - b) for a, b in zip(p.colour, holding[1], strict=True))
+                             < 0.04), None)
+                if near is None:
+                    near = Item(("pot", holding[1]), "pot", holding[1])
+                    pots.append(near)
+                self.pot_of[holding[1]] = near.key
         return items, pots
 
     def _chrome(self) -> torch.Tensor:
@@ -1165,7 +1237,8 @@ class Studio:
         for line in lines:
             kinds.append(self._between(before, held(line)))
             before = held(line)
-        hops = [0.05 + math.dist(here if i == 0 else ends[i - 1], starts[i]) / scale / 1.8 if k == "hop" else 0.0
+        hops = [(0.05 + math.dist(here if i == 0 else ends[i - 1], starts[i]) / scale / 1.8) *
+                (INK_WEIGHT if lines[i].kind in ("line", "sketch") else 1.0) if k == "hop" else 0.0
                 for i, k in enumerate(kinds)]
         trips, turns = kinds.count("tray") + kinds.count("dip"), kinds.count("turn")
         trip = min(0.7, 0.3 * phase.budget / trips) if trips else 0.0
@@ -1184,7 +1257,7 @@ class Studio:
                 steps.append(Step("move", t, t + turn, a, starts[i], 0.12 * u, swap=want))
                 t += turn
             else:
-                spot = self.where[("pot", want[1])] if kinds[i] == "dip" else self.where[item_key(want)]
+                spot = self.where[self.pot_of[want[1]]] if kinds[i] == "dip" else self.where[item_key(want)]
                 if kinds[i] == "tray":
                     spot = (spot[0] + 0.08 * u, spot[1])
                 steps.append(Step("move", t, t + 0.4 * trip, a, spot, 0.24 * u))
@@ -1423,10 +1496,13 @@ class Studio:
         fx, fy = math.cos(pose.yaw), math.sin(pose.yaw)
         wrist = (tip[0] - 0.96 * u * fx, tip[1] - 0.96 * u * fy)
         ax, ay = math.cos(pose.arm), math.sin(pose.arm)
-        reach = 9.0
-        for d in (1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 9.0):    # the forearm goes on off the picture
-            ex, ey = wrist[0] + ax * d * u, wrist[1] + ay * d * u
-            if ex < -0.4 * u or ex > W + 0.4 * u or ey < -0.4 * u or ey > H + 0.4 * u:
+        ex, ey = wrist[0] + 1.3 * u * ax, wrist[1] + 1.3 * u * ay          # the elbow
+        sx, sy = pose.shoulder
+        span = max(1e-3, math.hypot(sx - ex, sy - ey))
+        reach = 5.0
+        for d in (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0):    # the upper arm goes on off the picture
+            px, py = ex + (sx - ex) / span * d * u, ey + (sy - ey) / span * d * u
+            if px < -0.3 * u or px > W + 0.3 * u or py < -0.3 * u or py > H + 0.3 * u:
                 reach = d
                 break
         shapes = hand_shapes(pose, u, holding[0], holding[1], self.skin, reach, self.hand)

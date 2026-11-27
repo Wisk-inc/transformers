@@ -121,7 +121,7 @@ def test_cel_shapes_and_a_background_are_painted_with_the_brush():
     assert top[2] > top[0] + 20                                   # the background's sky, in every frame
 
 
-def test_an_anime_animation_is_drawn_background_first_then_each_cel(tmp_path):
+def test_an_anime_animation_is_drawn_background_first_then_each_cel():
     clip = torch.stack([scene(3 * t, 96) for t in range(5)])
     anim = animate(video=(clip, 12.0), work=96, style="anime", depth=None, details=False)
     assert anim.background and any(line.kind in CELS for sheet in anim.sheets for line in sheet.lines)
@@ -133,10 +133,9 @@ def test_an_anime_animation_is_drawn_background_first_then_each_cel(tmp_path):
     pictures = list(studio.shots(loops=1))
     assert pictures[0].frame == -1 and [s.frame for s in pictures if s.frame is not None][-1] == len(anim) - 1
     assert any(s.holding and s.holding[0] == "brush" and s.doing == "drawing" for s in pictures if s.frame >= 0)
-    x0, y0 = studio.origin
     for i in range(len(anim)):                                    # it plays the frames as the animation draws them
         want = (anim.frame(i, studio.bw) * 255 + 0.5).byte().permute(1, 2, 0)
-        assert torch.equal(studio.played[i], want) or float((studio.played[i].float() - want.float()).abs().max()) <= 1
+        assert int((studio.played[i].int() - want.int()).abs().max()) <= 1
     playing = [s for s in pictures if s.frame is None]
     assert len(playing) == round(sum(anim.holds) / anim.fps * 8)
 
