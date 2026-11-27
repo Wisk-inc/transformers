@@ -253,6 +253,15 @@ def palette_for(frames, count: int = 16, *, side: int = 256, least: float = 0.00
 
 
 # -------------------------------------------------------------------------------------------- regions --
+def _parts_within(labels: torch.Tensor, subject=None) -> tuple[torch.Tensor, int]:
+    """:func:`parts`, and with a ``subject`` mask ``(H, W)`` no part goes across its edge: a shirt in nearly
+    the colour of the wall behind it is then never one part with the wall."""
+    if subject is None:
+        return parts(labels)
+    inside = torch.as_tensor(subject).bool().long()
+    return parts(labels * 2 + inside)
+
+
 def parts(labels: torch.Tensor) -> tuple[torch.Tensor, int]:
     """The connected parts of a label map ``(H, W)`` (pixels side by side with the same label, 4-connected):
     ``(ids (H, W) long, count)``, numbered in the order their first pixel comes, row by row."""
@@ -1017,7 +1026,7 @@ def shade(image: torch.Tensor, labels: torch.Tensor, palette: torch.Tensor, norm
     image = image.float().clamp(0.0, 1.0)
     labels = torch.as_tensor(labels).long()
     h, w = labels.shape
-    ids, n = parts(labels)
+    ids, n = _parts_within(labels, subject)
     pigments = srgb_to_oklab(palette.float())
     flat_ids = ids.flatten()
     paint = torch.zeros(n, dtype=torch.long).scatter_(0, flat_ids, labels.flatten())
@@ -1119,7 +1128,7 @@ def shade(image: torch.Tensor, labels: torch.Tensor, palette: torch.Tensor, norm
 
 def _flat_shading(labels: torch.Tensor, palette: torch.Tensor | None, image: torch.Tensor, subject=None) -> Shading:
     """A :class:`Shading` with no shadows: each region one tone, its palette colour (or the frame's mean)."""
-    ids, n = parts(labels)
+    ids, n = _parts_within(torch.as_tensor(labels).long(), subject)
     flat = ids.flatten()
     paint = torch.zeros(n, dtype=torch.long).scatter_(0, flat, torch.as_tensor(labels).long().flatten())
     if palette is not None:

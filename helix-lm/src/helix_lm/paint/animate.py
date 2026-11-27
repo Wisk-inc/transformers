@@ -585,7 +585,7 @@ def _anime(clip: torch.Tensor, fps: float, words: str, *, work: int, like, colou
 
 def animate(words: str | None = None, *, video=None, animator=None, frames: int | None = None, size=None,
             fps: float | None = None, seed: int = 0, character=None, like: Animation | None = None,
-            lines: str = "pen", colour: str | None = "marker", sketch: bool = False, detail: float = 0.5,
+            lines: str | None = None, colour: str | None = "marker", sketch: bool = False, detail: float = 0.5,
             colours: int | None = None, surface: str = "whiteboard", work: int = 512, drawable: bool = True,
             on: int | None = None, motion=None, style: str = "anime", depth="model", shading: str = "frame",
             details: bool = True, check: bool = True, log=None) -> Animation:
@@ -594,7 +594,8 @@ def animate(words: str | None = None, *, video=None, animator=None, frames: int 
     motion: ``animator``, see :func:`helix_lm.paint.video.load_animator`), or give a ``video`` of your own (a
     file or a folder of pictures). ``character`` is a picture of how the character looks: the clip starts from
     it. ``like`` is an earlier animation whose markers to use, so a character keeps its colours from one clip to
-    the next. ``lines`` is the pen (``pen``, ``brush pen``, ``pencil``), ``colour`` None draws lines only,
+    the next. ``lines`` is the pen (``pen``, ``brush pen``, ``pencil``; the bolder brush pen for anime, the pen
+    for markers by default), ``colour`` None draws lines only,
     ``sketch`` puts a light pencil sketch under the ink. ``work`` is the longer side the frames are drawn at.
     ``on`` is how many video frames each drawing is held for, as animators say "on ones" or "on twos": by
     default twos for a video of 16 frames a second or more (12 drawings a second from 24), else ones.
@@ -633,10 +634,10 @@ def animate(words: str | None = None, *, video=None, animator=None, frames: int 
             log(f"the video model imagined {len(clip)} frames of {clip.shape[-1]}x{clip.shape[-2]}")
     clip, fps = clip.float(), float(fps or 8.0)
     if style == "anime":
-        return _anime(clip, fps, words or str(video), work=work, like=like, colours=colours, lines=lines,
-                      detail=detail, depth=depth, shading=shading, details=details, check=check, on=on,
-                      surface=surface, seed=seed, log=log)
-    colours = colours or 10
+        return _anime(clip, fps, words or str(video), work=work, like=like, colours=colours,
+                      lines=lines or "brush pen", detail=detail, depth=depth, shading=shading, details=details,
+                      check=check, on=on, surface=surface, seed=seed, log=log)
+    colours, lines = colours or 10, lines or "pen"
     on = max(1, int(on or (2 if fps >= 16 else 1)))
     if on > 1 and len(clip) > on:
         clip, fps = clip[::on], fps / on

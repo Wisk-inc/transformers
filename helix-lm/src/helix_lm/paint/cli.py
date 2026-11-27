@@ -82,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     anim.add_argument("--no-depth", action="store_true", help="go without the depth model")
     anim.add_argument("--no-check", action="store_true", help="do not draw again what is off its frame")
     anim.add_argument("--seed", type=int, default=0)
-    anim.add_argument("--lines", default="pen", help="pen, brush pen (bolder anime lines) or pencil")
+    anim.add_argument("--lines", default=None, help="brush pen (bold, the anime default), pen or pencil")
     anim.add_argument("--no-colour", action="store_true", help="lines only, no markers")
     anim.add_argument("--sketch", action="store_true", help="a light pencil sketch under the ink")
     anim.add_argument("--surface", default="whiteboard", help="whiteboard or paper")

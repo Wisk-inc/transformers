@@ -35,10 +35,11 @@ import time
 
 import torch
 
-from .cel import paint_frame, palette_for
+from .cel import light_colour, paint_frame, palette_for
 from .check import fix, score
+from .color import srgb_to_oklab
 from .detail import REDRAW, draw_details, find_details, follow, merge
-from .draw import CELS, Line
+from .draw import CELS, Line, fill_rings
 from .flow import optical_flow, sample
 from .motion import exposure, keys, motion_amount, steady
 from .space import light_direction, normals, read_space
@@ -158,6 +159,42 @@ def carry_names(before: list, after: list, flow: torch.Tensor, scale: float, *, 
     return carried
 
 
+def tidy_spots(lines: list, height: int, width: int, *, most: float = 0.0004, gap: float = 0.05) -> int:
+    """Give a small light spot painted inside a bigger cel shape of another hue that shape's highlight colour
+    (:func:`helix_lm.paint.cel.light_colour`): the shine on a cheek is a lighter skin, never a spot of the sky's
+    blue, which is what the nearest colour of the palette can be. ``most`` is the largest spot, as a share of
+    the picture; ``gap`` how far apart (OKLab, a and b) the hues must be. Returns how many were changed."""
+    cels = [line for line in lines if line.kind in CELS and line.rings]
+    if not cels:
+        return 0
+    sizes = [(_centre_area(line, float(width))) for line in cels]
+    small = most * height * width
+    under = torch.full((height, width), -1, dtype=torch.long)
+    for k, (line, (_, area)) in enumerate(zip(cels, sizes, strict=True)):
+        if area <= small:
+            continue
+        got = fill_rings(line.points * width, line.rings, height, width, ss=1)
+        if got is None:
+            continue
+        y0, x0, cov = got
+        h, w = cov.shape
+        under[y0 : y0 + h, x0 : x0 + w][cov > 0.5] = k
+    changed = 0
+    for line, (centre, area) in zip(cels, sizes, strict=True):
+        if area <= 0 or area > small:
+            continue
+        x, y = int(centre[0].clamp(0, width - 1)), int(centre[1].clamp(0, height - 1))
+        k = int(under[y, x])
+        if k < 0:
+            continue
+        mine = srgb_to_oklab(torch.tensor(line.colour))
+        theirs = srgb_to_oklab(torch.tensor(cels[k].colour))
+        if float(mine[0]) > float(theirs[0]) and float((mine[1:] - theirs[1:]).norm()) > gap:
+            line.colour = tuple(float(c) for c in light_colour(torch.tensor(cels[k].colour)).clamp(0.0, 1.0))
+            changed += 1
+    return changed
+
+
 # ---------------------------------------------------------------------------------- faces and details --
 def _iou(a, b) -> float:
     x0, y0 = max(a[0], b[0]), max(a[1], b[1])
@@ -177,8 +214,32 @@ def _inside(lines: list, box, scale: float) -> list:
     return out
 
 
+def _on_character(lines: list, subject: torch.Tensor | None, scale: float, grow: int = 2) -> list:
+    """The lines that belong to the character: a cel shape whose middle, an ink line most of whose points, lie
+    on ``subject (H, W)`` (grown by ``grow`` pixels). A part's box takes in some of the set round it, which the
+    background art already paints."""
+    if subject is None:
+        return lines
+    h, w = subject.shape
+    near = torch.nn.functional.max_pool2d(subject.float()[None, None], 2 * grow + 1, 1, grow)[0, 0] > 0.5
+
+    def on(points: torch.Tensor) -> torch.Tensor:
+        p = (points * scale).round().long()
+        return near[p[:, 1].clamp(0, h - 1), p[:, 0].clamp(0, w - 1)]
+
+    kept = []
+    for line in lines:
+        if line.kind in CELS and line.rings:
+            centre, area = _centre_area(line, 1.0)
+            if area > 0 and bool(on(centre[None])[0]):
+                kept.append(line)
+        elif float(on(line.points).float().mean()) >= 0.5:
+            kept.append(line)
+    return kept
+
+
 def detail_pass(frame: torch.Tensor, lines: list, palette: torch.Tensor, drawer, *, before=None, most: int = 6,
-                scale_up: int = 3) -> tuple[list, list, dict]:
+                scale_up: int = 3, subject: torch.Tensor | None = None) -> tuple[list, list, dict]:
     """The drawing ``lines`` of ``frame`` with its faces and small parts drawn again with care. ``before`` is
     ``(frame, parts, detail lines)`` of the drawing before: a part that is the same part moved is carried over
     rigidly when it did not change. Returns the new lines, the parts with their detail lines (for the next
@@ -202,7 +263,7 @@ def detail_pass(frame: torch.Tensor, lines: list, palette: torch.Tensor, drawer,
                 if change < REDRAW and moved:
                     own, carried = moved, carried + 1
         if own is None:
-            own = draw_details(frame, [part], palette, drawer=drawer, scale_up=scale_up)
+            own = _on_character(draw_details(frame, [part], palette, drawer=drawer, scale_up=scale_up), subject, w)
             drawn += 1
         kept_parts.append((part, own))
         detail_lines += own
@@ -238,8 +299,14 @@ def draw_anime(frames: torch.Tensor, fps: float, *, palette: torch.Tensor | None
     say(f"read the clip's space in {time.time() - began:.0f} s: the character in "
         f"{float(space.character.float().mean()):.0%} of the picture, the camera "
         f"{'still' if all(still_camera(c) for c in space.cameras) else 'moving'}")
-    palette = palette_for(list(frames) + [space.plate.image], colours) if palette is None else palette
-    if background is None:
+    palette = palette_for(list(frames), colours) if palette is None else palette   # the set has colours of its own
+    found = [float(m.float().mean()) >= 0.002 for m in space.character]
+    if not any(found):
+        # no character told apart from the set: the clean picture of the set would still hold the character,
+        # and held under the drawings it would show through as a ghost; so every drawing is painted whole
+        say("no character told apart from the set: every drawing is painted whole, with its background")
+        background = []
+    elif background is None:
         background = background_art(space.plate, None, (h, w), lines=lines)
         say(f"painted the background once: {len(background)} shapes and lines")
 
@@ -268,17 +335,18 @@ def draw_anime(frames: torch.Tensor, fps: float, *, palette: torch.Tensor | None
         extra = {}
         if light is not None:
             extra = {"normals": normals(space.depth[i]), "light": light}
-        subject = space.character[i]
-        if float(subject.float().mean()) < 0.002:       # no character found in this frame: the painter judges
-            subject = None
-        own = paint_frame(frame, palette, line_tool=lines, detail=detail, background=False, subject=subject, **extra)
+        whole = not found[i]                              # no character found here: the whole frame is painted
+        own = paint_frame(frame, palette, line_tool=lines, detail=detail, background=whole,
+                          subject=None if whole else space.character[i], **extra)
         counts = {}
         if details:
             before = (last_frame, last_parts) if last_parts else None
-            own, last_parts, counts = detail_pass(frame, own, palette, drawer, before=before)
+            own, last_parts, counts = detail_pass(frame, own, palette, drawer, before=before,
+                                                  subject=None if whole else space.character[i])
         under = background_for(background, space.cameras[i], w)
         if check:
             own = fix(own, frame, drawer, palette, rounds=1, under=under)
+        spots = tidy_spots(own, h, w)
         carried = 0
         if last_lines is not None:
             flow = optical_flow(last_frame, frame)
@@ -288,7 +356,8 @@ def draw_anime(frames: torch.Tensor, fps: float, *, palette: torch.Tensor | None
                        "chamfer": round(float(mark["chamfer"]), 2)})
         sheets.append(Sheet(own, carried, len(own) - carried, last_lines is None))
         say(f"drawing {k + 1} of {len(drawn)} (frame {i + 1}, held {holds[k]}): {len(own)} lines, {carried} the same "
-            f"lines moved, {counts.get('parts', 0)} faces and parts ({counts.get('carried', 0)} carried over); "
+            f"lines moved, {counts.get('parts', 0)} faces and parts ({counts.get('carried', 0)} carried over), "
+            f"{spots} shine spots given their shape's light colour; "
             f"colour off by {checks[-1]['error']:.3f}, bare {checks[-1]['bare']:.1%}")
         last_lines, last_frame = own, frame
     if steadiness > 0 and len(sheets) >= 4:
@@ -318,4 +387,4 @@ def background_for(background: list, camera: torch.Tensor, width: int) -> list:
 
 
 __all__ = ["ASK", "BACKGROUND_MARKERS", "STYLE_WAVER", "background_art", "background_for", "carry_names",
-           "detail_pass", "draw_anime", "on_camera", "still_camera", "then"]
+           "detail_pass", "draw_anime", "on_camera", "still_camera", "then", "tidy_spots"]

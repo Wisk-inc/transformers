@@ -103,3 +103,16 @@ def test_an_animation_plays_at_any_frame_rate_with_its_timing_kept(tmp_path):
         gif.seek(k)
         shown.append(gif.info.get("duration", 0))
     assert abs(sum(shown) - 500) <= 30                             # still half a second
+
+
+def test_a_shine_on_skin_is_a_lighter_skin_not_a_spot_of_sky():
+    from helix_lm.paint.anime import tidy_spots
+
+    square = torch.tensor([[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]])
+    skin = Line(square, torch.ones(4), "brush", (0.93, 0.72, 0.62), marker=2, kind="cel", rings=(4,))
+    dot = Line(square * 0.02 + 0.5, torch.ones(4), "brush", (0.75, 0.92, 0.98), marker=0, kind="cel", rings=(4,))
+    red = Line(square * 0.02 + 0.3, torch.ones(4), "brush", (0.5, 0.1, 0.1), marker=1, kind="cel", rings=(4,))
+    assert tidy_spots([skin, dot, red], 200, 200) == 1
+    r, g, b = dot.colour
+    assert r > g > b and sum(dot.colour) > sum(skin.colour)        # a lighter skin tone, warm, not blue
+    assert red.colour == (0.5, 0.1, 0.1)                           # a darker mark (a mole, a lash) is left alone

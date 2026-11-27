@@ -1,8 +1,9 @@
 # Pinxit Animate
 
-Ask for an animation in words. An open video model imagines how it moves. Then Pinxit draws it by hand, one
-frame after the other, on a whiteboard: the lines with a pen, the colour with markers, each frame traced over
-the last one on a lightbox, so the character keeps its look from frame to frame.
+Ask for an animation in words. An open video model imagines how it moves. Then Pinxit draws it as anime, the
+way a studio does: the background painted once and held, the character inked and painted as a cel on every
+drawing, timed on ones, twos and threes, faces drawn again with care, every line steadied through time, every
+drawing checked against its frame. You can watch it being drawn at a desk, a hand holding the pen.
 
 ```bash
 pip install "helix-lm[paint]"
@@ -11,144 +12,146 @@ pip install "helix-lm[paint]"
 ```python
 from helix_lm.paint.animate import animate
 
-clip = animate("a cute cartoon fox running in the snow, side view")
-clip.save("fox.mp4")                      # the animation
-clip.making_of("fox_being_drawn.mp4")     # the whiteboard, the pen in hand, every frame drawn
-clip.save("fox.pinxa")                    # everything, to change or carry on later
+clip = animate("a cheerful anime girl with short red hair waving hello, upper body, in a sunny park")
+clip.save("girl.mp4", fps=24)              # the animation, at any frame rate
+clip.making_of("girl_being_drawn.mp4")     # the desk, the hand, every drawing made
+clip.save("girl.pinxa")                    # everything, to change or carry on later
 ```
 
 ```bash
-helix paint animate "a cute cartoon fox running in the snow" --out fox.mp4 --making-of drawn.mp4 --keep fox.pinxa
-helix paint animate --video my_clip.mp4 --lines "brush pen" --out drawn.mp4     # draw a video of your own
+helix paint animate "a fox running through snow" --out fox.mp4 --out-fps 24 --making-of drawn.mp4 --keep fox.pinxa
+helix paint animate --video my_clip.mp4 --out drawn.mp4                     # draw a video of your own
+helix paint animate "she dances" --model wan-animate --character me.png --motion dance.mp4
 ```
 
 On a large GPU the cell [notebooks/pinxit_animate_cell.py](../notebooks/pinxit_animate_cell.py) does all of it.
 
 ## 1. Who does what
 
-| part | what it does |
-|---|---|
-| the video model | imagines the motion from the words: what the fox looks like, how it runs, frame by frame |
-| Pinxit's eye | finds in each frame the lines a person would draw and the shapes to colour |
-| Pinxit's hand | draws every line with a pen and colours every shape with markers, in order, at a hand's speed |
-| the lightbox | carries each drawing onto the next frame, so lines that did not change are traced, not redrawn |
+| part | module | what it does |
+|---|---|---|
+| the video model | `video` | imagines the motion from the words, or makes a character picture perform a motion video |
+| the space | `space` | how things move, how near they are (a depth model), which pixels are the character, the camera, one clean picture of the set |
+| ink and paint | `cel` | the colours, clean flat shapes, line art, the shadow and highlight shapes |
+| the principles | `motion` | timing on ones, twos and threes, holds, keys, steadying, in-betweens with ease and arcs |
+| faces and details | `detail` | eyes, mouths, hands, paws drawn at three times the size, carried over rigidly |
+| the check | `check` | each drawing scored against its frame, the bad places drawn again |
+| the desk | `studio` | the making-of video: the board, the exposure sheet, the tray, the hand |
+| all of it | `anime` | the order a studio works in |
 
-To be plain about the "no noise" part: the video model is a diffusion model, so the *idea* of the animation
-comes from a model that works by removing noise. Nothing on the board does. Every mark on every frame is a
-pen line or a marker stroke with a position, a pressure and a time, drawn in the order a person draws.
+To be plain about the "no noise" part: the video models are diffusion models, so the *idea* of the motion comes
+from a model that works by removing noise. Nothing on the board does. Every mark is a pen line or a painted cel
+shape with a position and a time, drawn in the order a person draws.
 
-## 2. The video models
+## 2. How a clip is drawn
 
-| name | model | licence | size | where it runs |
-|---|---|---|---|---|
-| `animatelcm` (default without a large GPU) | AnimateLCM motion module on DreamShaper 8 | AnimateLCM: no licence on its model card; DreamShaper 8: CreativeML OpenRAIL-M | about 3 GB | a CPU, slowly |
-| `animatediff` | AnimateDiff v1.5-3 motion module on DreamShaper 8 | AnimateDiff: none on the card; DreamShaper 8 as above | about 3.8 GB | a CPU or GPU |
-| `wan` (default on a GPU with 40 GB or more) | Wan 2.2 TI2V 5B | Apache-2.0 | about 34 GB | a large GPU |
-| `wan-1.3b` | Wan 2.1 T2V 1.3B | Apache-2.0 | about 29 GB | a GPU |
-| any other name | a `diffusers` text-to-video pipeline from the Hub | its own | | |
+1. **The space.** The clip is read once: the motion between frames, the depth (Depth Anything V2 Small,
+   Apache-2.0), which pixels are the moving character (motion against the camera's, and depth: a near layer
+   with some part moving), how the camera moves, and one clean picture of the set with the character taken out
+   (the median of the frames where the set shows, filled in where the character always stood).
+2. **The colours** are chosen once for the clip, 16 for the character, so her hair is the same red in every
+   drawing. Small but clearly different colours (an eye, a nose) count for more than their area.
+3. **The background** is painted once from the clean picture, with 28 colours of its own and finer detail, and
+   held under every drawing. If the camera moves, the painting moves with it. It does not boil or morph.
+4. **The timing.** As on an exposure sheet, worked out on 24 frames a second whatever the clip's rate: fast
+   action on ones, most movement on twos (`on=` changes it), slow movement on threes, a hold when the character
+   is still. Keys go where the motion stops or turns.
+5. **Each drawing** inks and paints only the character, exactly to its frame: line art with a brush pen (bold
+   silhouette, thinner inner lines), flat colour up to the line, one to three simple shadow shapes per part and
+   a highlight band, coloured the anime way (the shadow darker, cooler and a little more saturated). Paint lies
+   under the ink, as on the back of a cel, so it can never cover a line.
+6. **Faces and small parts** are found (a face by its two eyes, then its eyes and mouth; hands, paws, ears by
+   how much small detail they hold) and drawn again at three times the size. From one drawing to the next, a
+   part that only moved is carried over by a rotation, a scale and a shift: the same eye, not a new one. It is
+   drawn again only when it really changed (a blink, a smile).
+7. **The check.** Each drawing is rendered over its background and scored against its frame (the colour, the
+   board left bare, how far the ink lies from the frame's edges). Clearly wrong places are drawn again, and the
+   new drawing is kept only where it scores better. The numbers are kept with the animation.
+8. **Steadying.** Each line keeps its name from drawing to drawing when it is the same line moved. The path of
+   every line through time is then smoothed with a spline that leaves a steady ease or a parabola as it was, so
+   shakes and wobble go and arcs stay. Keys are pinned.
 
-Check a model's licence before using what it makes commercially. AnimateLCM's and AnimateDiff's model cards do
-not name one.
+If no character can be told apart from the set, every drawing is painted whole, background and all, so the set
+picture cannot show a ghost of the character.
 
-**Fine-tuning.** Each video model takes a LoRA: `load_animator("animatelcm", lora="you/your-style-lora")` or
-`--lora` on the command line. A LoRA trained on a character keeps that character the same across clips; one
-trained on a drawing style changes what is imagined. Training a LoRA is not part of this release: use the
-training scripts of `diffusers` for the model you picked, then load the result here.
+## 3. The video models
 
-Words are given to the model with "2d cartoon animation, clean bold outlines, flat colours, simple shapes,
-plain background" added, because clean shapes are what a pen and markers draw well. `drawable=False` turns
-that off.
+`load_animator(name)` takes any of these, or any Hub repository (`helix_lm.paint.video.list_models()` lists
+them with sizes and memory):
 
-## 3. Drawing one frame
+| name | model | licence | memory (all on GPU / offloaded) |
+|---|---|---|---|
+| `animatelcm` | AnimateLCM on DreamShaper 8 | none on its card; DreamShaper CreativeML OpenRAIL-M | runs on a CPU |
+| `animatediff` | AnimateDiff v1.5-3 on DreamShaper 8 | as above | runs on a CPU |
+| `wan` | Wan 2.2 TI2V 5B | Apache-2.0 | 34 / 21 GB |
+| `wan-14b`, `wan-i2v-14b` | Wan 2.2 T2V and I2V A14B | Apache-2.0 | 81 / 41 GB |
+| `wan-animate` | Wan 2.2 Animate 14B | Apache-2.0 | 62 / 49 GB |
+| `wan-vace`, `wan-vace-1.3b` | Wan 2.1 VACE | Apache-2.0 | 56 / 44, 21 / 16 GB |
+| `ltx`, `ltx2` | LTX-Video, LTX-2 | a paid licence from $10M revenue | 46 / 34, 80 / 50 GB |
+| `hunyuan` | HunyuanVideo 1.5 | not valid in the EU, UK or South Korea | 44 / 27 GB |
+| `cogvideox` | CogVideoX 5B | commercial use needs a free registration | 30 / 19 GB |
+| `skyreels` | SkyReels V2 14B | Skywork Community | 53 / 41 GB |
 
-1. The frame is seen in planes (small differences inside a shape levelled out, borders kept).
-2. The borders are thinned to one pixel and followed like a pen follows them: from loose ends first, straight
-   on through crossings, broken where an arm would lift. Stronger borders are pressed harder.
-3. The markers are chosen once for the whole animation, from all its frames: up to ten colours, white left as
-   bare board.
-4. Each shape is coloured with its marker back and forth, the nib turning just inside the border. Narrow parts
-   get the fine nib. Parts clearly darker than their marker are gone over again across the first layer.
-5. Order: ink lines first (the long ones first, then on to whichever starts nearest), then one marker at a
-   time from the lightest.
+`"auto"` picks Wan 2.2 A14B from 80 GB of GPU memory (the I2V one when a character picture is given), TI2V 5B
+from 40 GB, else AnimateLCM. Check a model's licence before using what it makes commercially.
 
-The tools:
+**A character that keeps its look.** Give a picture of the character: `character="me.png"`. With
+`wan-animate` and a `motion=` video of someone moving, the character performs that motion, which is the best
+route to the same character in every frame. Pinxit makes the pose video with RT-DETR and ViTPose (17 body
+points, so hands are not posed); for the best result pass `motion={"pose": ..., "face": ...}` made with Wan's
+own preprocessing.
 
-| tool | |
-|---|---|
-| `pen` | a fineliner: even, a little thinner where it lands and lifts |
-| `brush pen` | thin to thick with pressure |
-| `pencil` | grey, broken by the paper's tooth |
-| `marker`, `fine marker` | see-through colour; strokes of one marker blend while wet, a later layer darkens it, a little ink pools where the nib rests |
+**Fine-tuning.** Every model takes a LoRA: `load_animator("wan-14b", lora="you/your-style-lora")`. A LoRA
+trained on a character keeps that character the same across clips. Training a LoRA is not part of this
+release: use the training scripts of `diffusers` for the model you picked, then load the result here.
 
-The hand is not steady: every line wavers a little and may run a pixel past its end. A line traced onto the
-next frame is drawn again with a new waver, which is the slight "boil" of drawn animation.
+Words are given to the model with "anime style, cel shading, clean line art, flat colours, crisp details,
+detailed background" added, because that is what a cel painter draws well. `drawable=False` turns it off.
 
-## 4. Frame by frame, and why the character stays the same
+## 4. The desk
 
-An animator lays the last drawing on the lightbox and a new sheet over it. Pinxit does the same:
+`clip.making_of(path)` is a video of the animation being drawn: the board in the middle, the background art
+drawn first, then each drawing over a faint copy of the last (the lightbox); an exposure sheet along the top
+with each drawing and how long it is held; a tray with the pens, the brush and the paint pots; the frame being
+drawn pinned beside the board. The look is kept plain on purpose, as a real animation tool is: neutral greys,
+one accent, thin rules on a grid, no gradients or glow.
 
-- how each part of the picture moved is measured (optical flow, coarse to fine; plain areas such as an
-  empty sky take their motion from the detail around them, and with none near they hold still);
-- every line of the last drawing is moved with it. If it still lies on a line of the new frame it is
-  traced: pulled onto that line and drawn again. If not, it is left off. Lines of the new frame that nothing
-  covers are drawn new;
-- colour the same way, shape by shape. A stroke that lands outside its shape, or that the move would tear,
-  is left off, and what it leaves bare is coloured again;
-- strokes that only go over what other strokes already drew are left out, so a drawing traced frame after
-  frame does not gather layers;
-- a frame that changed almost everywhere (a cut) is drawn from nothing.
+The hand is built from shaded 3D shapes in a tripod grip on the real tool. Its shadow on the board grows and
+softens when it lifts. It follows the stroke with a damped spring (a little lag and overshoot where a line
+turns), turns its wrist with the line, slows on curves, hovers between strokes, and puts one tool down to pick
+up the next. It is a render, not a photograph of a hand.
 
-Like most hand-drawn animation, a video of 16 frames a second or more is drawn "on twos": one drawing for
-every two frames, so Wan's 24 frames a second become 12 drawings a second. `on=1` draws every frame.
+## 5. Memory and changes
 
-So the character keeps its look three ways: the same markers colour every frame, most of its lines are traced
-rather than drawn anew, and the video model itself keeps it steady within a clip. Between clips:
-`clip.extend("the fox jumps over a log")` starts the next clip from the last frame (the video model is
-given it as the start) and traces on from the last drawing with the same markers. `character=` gives a
-picture of the character to start from; `like=` uses an earlier animation's markers.
-
-## 5. The whiteboard video
-
-`clip.making_of(path)` shows the drawing being made: a whiteboard in its frame, the pens and markers on the
-ledge below, the one in use in hand, moving as a hand would (slower round curves, lifting between lines,
-stopping to take another marker). Every frame is drawn over a faint copy of the last one, the lightbox. Lines
-being traced go faster than new ones. The first frame takes about 14 seconds, every next one about 3, and the
-finished animation plays twice at the end.
-
-## 6. Memory and changes
-
-A `.pinxa` file keeps every frame's lines, the markers and the frames the drawing was made from.
+A `.pinxa` file keeps every drawing's lines, the background art, the holds, the cameras, the colours and the
+frames the drawing was made from.
 
 ```python
 from helix_lm.paint.animate import Animation
 
-clip = Animation.load("fox.pinxa")
-clip.recolor((0.2, 0.4, 0.9), at=(0.4, 0.6))   # the marker that colours that spot, blue in every frame at once
-clip.retool("brush pen")                        # every line drawn with a brush pen instead
-clip.extend("the fox stops and looks at the camera")
-clip.save("fox.pinxa")
-clip.save("fox.mp4")
+clip = Animation.load("girl.pinxa")
+clip.recolor((0.2, 0.4, 0.9), at=(0.45, 0.2))   # her hair blue in every drawing; shadows stay shadows
+clip.retool("pen")                              # every line with a finer pen
+clip.extend("she laughs and runs down the path")  # the next clip, same background, same colours
+clip.save("girl.mp4", fps=30)
 ```
 
-## 7. What was checked, and what was not
+## 6. What was checked, and what was not
 
-Checked here, on a CPU:
+Checked here, on a CPU (four cores):
 
-- the drawing of single pictures by eye at full size, and tests for each part (pressure and taper, wet and dry
-  marker layers, thinning and following lines, colouring up to a border, the order of drawing);
-- the optical flow on known shifts (found to within 0.01 pixel) and on a cartoon scene (the ball's inside
-  moves with it, the still sky and sun stay at 0);
-- frame-by-frame drawing on a made-up clip (a ball rolling past a still sun): most lines traced, the same
-  marker for the ball in every frame, the sun traced from the first frame to the last, a cut drawn anew;
-- saving and opening, recolouring, retooling, the whiteboard video, `.mp4` and `.gif` out and back in;
-- AnimateLCM run for real on the CPU (see the notes in the release for how long it took and how it looked).
+RESULTS
 
 Not checked:
 
-- **Wan 2.2 and Wan 2.1 were not run**: they need a large GPU and about 30 GB of disk, which this machine does
-  not have. The code calls them the way `diffusers` documents; the first real run will tell.
-- **The video model decides how good the motion is.** On a CPU AnimateLCM is slow and its characters can
-  change shape between frames; the lightbox then has less to trace and draws more anew.
-- Lines come from the borders between shapes, not from an understanding of the drawing. A face drawn from a
-  photo-like frame gets the lines of its shadows, not the lines an illustrator would choose.
-- Training a LoRA for the video model is not built in.
+- **The large video models were not run**: there is no GPU here and about 1 GB of disk. Every call was checked
+  against the code of `diffusers` 0.43; the first real run will tell how they look and how much memory they
+  take.
+- **The video model decides how good the motion is.** AnimateLCM on a CPU morphs hands and changes small
+  shapes between frames. The drawing follows its frame; steadying takes out shakes, not a melt that lasts
+  several frames. A bigger model on a GPU is the way to clean motion.
+- Faces are found by two open, visible eyes. A face in profile, or with closed eyes, is drawn as ordinary
+  detail.
+- Shapes come from the colours of the frame, not from an understanding of anatomy. A photo-like frame gives
+  shadow shapes where its light falls, which may not be where an animator would put them.
+- Training a LoRA is not built in.
