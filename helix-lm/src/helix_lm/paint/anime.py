@@ -85,8 +85,21 @@ def still_camera(camera: torch.Tensor, tolerance: float = 1e-4) -> bool:
 
 
 # ----------------------------------------------------------------------------- lines that stay the same --
+def _outer(line: Line) -> torch.Tensor:
+    """A cel shape's outer edge: its largest ring (a shape cut to a box may list a hole first)."""
+    rings = line.ring_points()
+    if len(rings) == 1:
+        return rings[0]
+
+    def size(ring: torch.Tensor) -> float:
+        x, y = ring[:, 0], ring[:, 1]
+        return abs(float((x * torch.roll(y, -1) - torch.roll(x, -1) * y).sum()))
+
+    return max(rings, key=size)
+
+
 def _centre_area(line: Line, scale: float) -> tuple:
-    ring = line.ring_points()[0] * scale
+    ring = _outer(line) * scale
     x, y = ring[:, 0], ring[:, 1]
     xs, ys = torch.roll(x, -1), torch.roll(y, -1)
     cross = x * ys - xs * y
@@ -177,7 +190,7 @@ def tidy_spots(lines: list, height: int, width: int, *, most: float = 0.0004, ti
     big = sorted((k for k, (_, area) in enumerate(sizes) if area > small), key=lambda k: -sizes[k][1])
     for k in big:
         line = cels[k]
-        got = fill_rings(line.ring_points()[0] * width, None, height, width, ss=1)
+        got = fill_rings(_outer(line) * width, None, height, width, ss=1)
         if got is None:
             continue
         y0, x0, cov = got
