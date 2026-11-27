@@ -87,7 +87,8 @@ MATERIALS = torch.tensor([
     [0.55, 0.00, 0.00, 1.0],        # cloth
     [0.05, 0.00, 0.45, 90.0],       # lacquered wood
 ])
-SKIN_TONE = (0.86, 0.66, 0.54)       # sRGB; any other can be given
+SKIN_TONE = (0.85, 0.67, 0.57)       # sRGB; any other can be given
+CAMERA = 6.5                         # the camera above the board, in hand lengths (about 1.2 m)
 
 
 def _lin(c) -> torch.Tensor:
@@ -110,6 +111,7 @@ class Cone:
     k: float = 0.0
     nail: tuple | None = None        # (where along it 0..1, half length 0..1, up (x, y, z)): a nail on top
     creases: float = 0.0             # creases across the joint at its start, this dark
+    flat: float = 1.0                # its cross-section this much lower than wide (a forearm is flatter than round)
 
 
 @dataclass
@@ -125,6 +127,7 @@ class Blob:
     material: int = SKIN
     group: int = 0
     k: float = 0.0
+    taper: float = 0.0               # how much wider it is at its front than in the middle (and narrower behind)
 
 
 def _box(shape, aa: float = 1.0) -> tuple:
@@ -132,7 +135,7 @@ def _box(shape, aa: float = 1.0) -> tuple:
         r = max(shape.ra, shape.rb) + aa + 1.0
         xs, ys = (shape.a[0], shape.b[0]), (shape.a[1], shape.b[1])
         return min(xs) - r, min(ys) - r, max(xs) + r, max(ys) + r
-    big = max(shape.axes[0], shape.axes[1]) + aa + 1.0
+    big = max(shape.axes[0], shape.axes[1] * (1.0 + abs(shape.taper))) + aa + 1.0
     return shape.c[0] - big, shape.c[1] - big, shape.c[0] + big, shape.c[1] + big
 
 
@@ -159,17 +162,18 @@ def _cone(s: Cone, px: torch.Tensor, py: torch.Tensor, aa: float):
         across = qx * -wy + qy * wx
         r = s.ra + (s.rb - s.ra) * t2
         room = r * r - across * across
-        z = az + (dz / flat) * along + room.clamp(min=0.0).sqrt() / c
+        z = az + (dz / flat) * along + s.flat * room.clamp(min=0.0).sqrt() / c
         tau = c * along + (dz / length) * (z - az)
         top = torch.where((room >= 0) & (tau >= 0) & (tau <= length), z, top)
     for (cx, cy, cz), rad in (((ax, ay, az), s.ra), ((bx, by, bz), s.rb)):
         room = rad * rad - (px - cx) ** 2 - (py - cy) ** 2
-        top = torch.maximum(top, torch.where(room >= 0, cz + room.clamp(min=0.0).sqrt(), torch.full_like(room, -1e9)))
+        top = torch.maximum(top, torch.where(room >= 0, cz + s.flat * room.clamp(min=0.0).sqrt(),
+                                             torch.full_like(room, -1e9)))
     edge = az + t2 * dz                               # just outside: the height of its middle
     top = torch.where(top < -1e8, edge.expand_as(top), top)
-    # the normal: from the nearest point of the axis to the surface
+    # the normal: from the nearest point of the axis to the surface (a flat section leans it up)
     tau = (((px - ax) * dx + (py - ay) * dy + (top - az) * dz) / (length * length)).clamp(0.0, 1.0)
-    nx, ny, nz = px - (ax + tau * dx), py - (ay + tau * dy), top - (az + tau * dz)
+    nx, ny, nz = px - (ax + tau * dx), py - (ay + tau * dy), (top - (az + tau * dz)) / (s.flat * s.flat)
     norm = (nx * nx + ny * ny + nz * nz).sqrt().clamp(min=1e-6)
     normal = torch.stack([nx / norm, ny / norm, nz / norm])
     return cov, top, normal, tau
@@ -181,6 +185,8 @@ def _blob(s: Blob, px: torch.Tensor, py: torch.Tensor, aa: float):
     ca, sa = math.cos(s.angle), math.sin(s.angle)
     u = (px - cx) * ca + (py - cy) * sa
     v = -(px - cx) * sa + (py - cy) * ca
+    if s.taper:
+        v = v / (1.0 + s.taper * (u / big_a).clamp(-1.0, 1.0))
     k0 = ((u / big_a) ** 2 + (v / big_b) ** 2).sqrt()
     k1 = ((u / big_a ** 2) ** 2 + (v / big_b ** 2) ** 2).sqrt().clamp(min=1e-6)
     sdf = k0 * (k0 - 1.0) / k1
@@ -239,12 +245,12 @@ def render(shapes: list, x0: int, y0: int, w: int, h: int, aa: float = 1.0) -> d
         mix = torch.where(empty, 1.0, mix) * has
         new_h = torch.where(same, old_h + (top - old_h) * blend + k * blend * (1.0 - blend), torch.maximum(top, old_h))
         height[sl] = torch.where(has, torch.where(empty, top, new_h), old_h)
-        n = normal[every].lerp_(nrm, mix)
-        n.div_(n.norm(dim=0, keepdim=True).clamp(min=1e-6))
+        normal[every].lerp_(nrm, mix)
         albedo[every].lerp_(colour.expand_as(albedo[every]), mix)
         params[every].lerp_(mat.expand_as(params[every]), mix)
         group[sl] = torch.where(mix > 0.5, s.group, old_g).to(torch.int8)
         torch.maximum(cover[sl], cov, out=cover[sl])
+    normal.div_((normal * normal).sum(0, keepdim=True).sqrt().clamp(min=1e-6))
     return {"cover": cover, "height": height.clamp(min=0.0), "normal": normal, "albedo": albedo, "params": params}
 
 
@@ -298,10 +304,10 @@ def shade(g: dict, unit: float, lift: float = 0.0) -> torch.Tensor:
     crowd, dark = crowd.flatten()[where], dark.flatten()[where]
     wrap, scatter, shine, sharp = p[0], p[1], p[2], p[3].clamp(min=1.0)
     ndl = (n * LIGHT[:, None]).sum(0)
-    diffuse = ((ndl + wrap) / (1.0 + wrap)).clamp(min=0.0) * (1.0 - 0.8 * dark)
+    diffuse = ((ndl + wrap) / (1.0 + wrap)).clamp(min=0.0) * (1.0 - 0.6 * dark)
     band = _smooth(0.0, 0.32, diffuse) * _smooth(0.64, 0.32, diffuse) * scatter
     edge = (1.0 - n[2]).clamp(min=0.0) ** 2 * scatter                  # thin skin at the edges looks redder
-    red = torch.tensor([0.22, 0.05, 0.015])[:, None] * band + torch.tensor([0.06, 0.0, -0.01])[:, None] * edge
+    red = torch.tensor([0.14, 0.035, 0.012])[:, None] * band + torch.tensor([0.06, 0.0, -0.01])[:, None] * edge
     ndh = (n * HALF[:, None]).sum(0).clamp(min=0.0)
     gloss = shine * ndh ** sharp * crowd * (1.0 - 0.7 * dark)
     sun = torch.tensor(SUN)[:, None]
@@ -320,7 +326,7 @@ def _self_shadow(height: torch.Tensor, unit: float) -> torch.Tensor:
     h, w = height.shape
     away = LIGHT[:2] / LIGHT[:2].norm()
     rise = float(LIGHT[2] / LIGHT[:2].norm())
-    soft = 0.012 * unit + 0.5
+    soft = 0.035 * unit + 0.5
     worst = torch.zeros_like(height)
     step, seen = 1.0, set()
     while step < 0.4 * unit:
@@ -334,7 +340,7 @@ def _self_shadow(height: torch.Tensor, unit: float) -> torch.Tensor:
         xs, xd = slice(max(0, dx), w + min(0, dx)), slice(max(0, -dx), w + min(0, -dx))
         moved[yd, xd] = height[ys, xs]
         worst = torch.maximum(worst, ((moved - math.hypot(dx, dy) * rise - height) / soft).clamp(0.0, 1.0))
-    return gaussian_blur(worst, 0.5 + 0.004 * unit)
+    return gaussian_blur(worst, 0.6 + 0.012 * unit)
 
 
 def _smooth(a: float, b: float, x: torch.Tensor) -> torch.Tensor:
@@ -354,9 +360,9 @@ def cast_shadow(cover: torch.Tensor, height: torch.Tensor, unit: float, pad: int
     away = (-LIGHT[:2] / LIGHT[2]).tolist()
     total = torch.ones_like(cov_s)
     sh, sw = cov_s.shape
-    for level in (0.015, 0.09, 0.22, 0.45, 0.9, 1.6):
+    for level in (0.02, 0.14, 0.4, 1.0):
         z = level * unit
-        width = 0.45 * z + 0.6 * unit * 0.02
+        width = 0.6 * z + 0.02 * unit
         weight = (1.0 - (hgt_s - z).abs() / width).clamp(0.0, 1.0) * cov_s
         if float(weight.max()) <= 0:
             continue
@@ -374,33 +380,41 @@ def cast_shadow(cover: torch.Tensor, height: torch.Tensor, unit: float, pad: int
 
 # ------------------------------------------------------------------------------------------------- tools --
 # a tool along its axis from the point, in hand lengths: (from, to, radius there, radius here, material, what)
-PEN_BODY, INK, CAP, STEEL = "body", "ink", "cap", "steel"
+PEN_BODY, INK, CAP, STEEL, GREY = "body", "ink", "cap", "steel", "grey"
 FELT, BRISTLE, PAINT, WOOD = "felt", "bristle", "paint", "wood"
 
 
 def tool_parts(tool: str, posted: bool = True) -> list:
-    """The parts of a tool along its axis from the point, in hand lengths. ``posted``: the cap is on the back
-    end (in hand); else on the point (in the tray)."""
+    """The parts of a tool along its axis from the point, in hand lengths: ``(from, to, radius there, radius
+    here, material, what)``, or ``("clip", from, to, radius, what)``. ``posted``: in hand, its cap on the back
+    end; else (in the tray) on the point."""
     if tool in ("pen", "brush pen"):
         point = [(0.0, 0.010, 0.0016, 0.0022, METAL, STEEL), (0.010, 0.045, 0.004, 0.015, PLASTIC, CAP)] \
             if tool == "pen" else [(0.0, 0.055, 0.0015, 0.011, MATTE, INK), (0.055, 0.07, 0.012, 0.016, PLASTIC, CAP)]
-        body = [(0.045, 0.10, 0.017, 0.021, PLASTIC, PEN_BODY), (0.10, 0.62, 0.022, 0.022, PLASTIC, PEN_BODY)]
+        body = [(0.045, 0.10, 0.017, 0.021, PLASTIC, PEN_BODY), (0.10, 0.60, 0.021, 0.021, PLASTIC, PEN_BODY),
+                (0.60, 0.62, 0.021, 0.017, PLASTIC, PEN_BODY)]
+        cap = [(0.0, 0.17, 0.025, 0.025, PLASTIC, CAP), (0.17, 0.19, 0.025, 0.021, PLASTIC, CAP)]
         if posted:
-            return point + body + [(0.56, 0.76, 0.026, 0.026, PLASTIC, CAP), ("clip", 0.60, 0.74, 0.006, CAP)]
-        return [(0.0, 0.19, 0.026, 0.026, PLASTIC, CAP), ("clip", 0.04, 0.17, 0.006, CAP)] + body[1:] + \
-            [(0.62, 0.64, 0.021, 0.018, PLASTIC, PEN_BODY)]
+            return point + body + [(s0 + 0.56, s1 + 0.56, r0, r1, m, w) for s0, s1, r0, r1, m, w in cap] + \
+                [("clip", 0.60, 0.73, 0.0055, CAP)]
+        return cap + [("clip", 0.03, 0.16, 0.0055, CAP)] + body[1:]
     if tool == "pencil":
         return [(0.0, 0.012, 0.001, 0.0045, MATTE, INK), (0.012, 0.075, 0.005, 0.020, MATTE, WOOD),
                 (0.075, 0.66, 0.020, 0.020, LACQUER, PEN_BODY), (0.66, 0.70, 0.021, 0.021, METAL, STEEL),
                 (0.70, 0.73, 0.019, 0.018, MATTE, PAINT)]
     if tool in ("marker", "fine marker"):
-        nib = [(0.0, 0.035, 0.007, 0.016, MATTE, FELT)] if tool == "marker" else [(0.0, 0.03, 0.003, 0.007, MATTE,
-                                                                                            FELT)]
-        collar = [(0.03, 0.075, 0.024, 0.032, PLASTIC, PEN_BODY)]
-        barrel = [(0.075, 0.70, 0.040, 0.040, PLASTIC, PEN_BODY), (0.58, 0.64, 0.041, 0.041, PLASTIC, CAP)]
-        if posted:
-            return nib + collar + barrel + [(0.64, 0.84, 0.044, 0.042, PLASTIC, CAP)]
-        return [(0.0, 0.16, 0.044, 0.043, PLASTIC, CAP)] + barrel + [(0.64, 0.80, 0.044, 0.042, PLASTIC, CAP)]
+        # a twin marker: a white barrel with a band of its colour, a cap on each end with a coloured end
+        barrel = [(0.15, 0.66, 0.039, 0.039, PLASTIC, PEN_BODY), (0.37, 0.45, 0.0395, 0.0395, PLASTIC, CAP)]
+        caps = [(0.0, 0.03, 0.040, 0.043, PLASTIC, CAP), (0.03, 0.15, 0.043, 0.043, PLASTIC, GREY),
+                (0.66, 0.78, 0.043, 0.043, PLASTIC, GREY), (0.78, 0.81, 0.043, 0.040, PLASTIC, CAP),
+                ("clip", 0.035, 0.14, 0.006, GREY)]
+        if not posted:
+            return caps + barrel
+        nib = [(0.0, 0.035, 0.007, 0.016, MATTE, FELT)] if tool == "marker" else \
+            [(0.0, 0.03, 0.003, 0.008, MATTE, FELT)]
+        collar = [(0.03, 0.08, 0.022, 0.030, PLASTIC, GREY), (0.08, 0.15, 0.032, 0.039, PLASTIC, PEN_BODY)]
+        return nib + collar + barrel + [(0.66, 0.78, 0.045, 0.045, PLASTIC, GREY),
+                                        (0.78, 0.81, 0.045, 0.041, PLASTIC, CAP), ("clip", 0.67, 0.78, 0.006, GREY)]
     # the cel brush: bristles wet with paint, a steel ferrule, a lacquered handle
     return [(0.0, 0.045, 0.0015, 0.013, MATTE, PAINT), (0.045, 0.085, 0.013, 0.016, MATTE, BRISTLE),
             (0.085, 0.17, 0.016, 0.018, METAL, STEEL), (0.17, 0.42, 0.020, 0.024, LACQUER, WOOD),
@@ -413,6 +427,7 @@ def _tool_colours(tool: str, colour) -> dict:
     body = {"pen": (0.86, 0.86, 0.84), "brush pen": (0.20, 0.20, 0.22), "pencil": (0.18, 0.30, 0.24),
             "marker": (0.93, 0.93, 0.91), "fine marker": (0.93, 0.93, 0.91), "brush": (0.12, 0.12, 0.13)}[tool]
     return {PEN_BODY: _lin(body), INK: grey if tool == "pencil" else ink, CAP: ink if tool != "pencil" else grey,
+            GREY: _lin((0.80, 0.80, 0.79)),
             STEEL: _lin((0.62, 0.63, 0.65)), FELT: ink, BRISTLE: _lin((0.80, 0.66, 0.45)),
             PAINT: ink if tool == "brush" else _lin((0.85, 0.55, 0.55)), WOOD: _lin((0.42, 0.12, 0.08))
             if tool == "brush" else _lin((0.80, 0.62, 0.42))}
@@ -451,8 +466,8 @@ PEN_UP = (math.cos(TURN) * math.sin(TILT), -math.sin(TURN) * math.sin(TILT), mat
 JOINTS = {
     "index": [(-0.430, 0.000, 0.300), (-0.261, 0.027, 0.368), (-0.196, 0.036, 0.275), (-0.124, 0.045, 0.231)],
     "middle": [(-0.440, -0.095, 0.282), (-0.282, -0.058, 0.208), (-0.214, -0.008, 0.136), (-0.150, 0.014, 0.096)],
-    "ring": [(-0.455, -0.180, 0.244), (-0.362, -0.162, 0.122), (-0.392, -0.140, 0.042), (-0.448, -0.124, 0.034)],
-    "little": [(-0.470, -0.255, 0.196), (-0.388, -0.236, 0.086), (-0.412, -0.218, 0.032), (-0.460, -0.202, 0.030)],
+    "ring": [(-0.455, -0.180, 0.244), (-0.402, -0.165, 0.112), (-0.432, -0.146, 0.040), (-0.482, -0.130, 0.032)],
+    "little": [(-0.470, -0.255, 0.196), (-0.424, -0.240, 0.082), (-0.446, -0.222, 0.031), (-0.492, -0.206, 0.028)],
     "thumb": [(-0.620, 0.150, 0.150), (-0.362, 0.258, 0.238), (-0.236, 0.178, 0.250), (-0.170, 0.124, 0.212)],
 }
 FOLLOW = (1.0, 0.6, 0.25, 0.0)
@@ -514,44 +529,39 @@ def hand_shapes(pose: Pose, unit: float, tool: str | None, colour, skin=SKIN_TON
     u = unit
     # the back of the hand (wide at the knuckles, narrow at the wrist), the ball of the thumb, the web between
     # thumb and index
-    out.append(Blob(world((-0.610, -0.120, 0.175), 1.0), (0.190 * u, 0.205 * u, 0.060 * u), pose.yaw,
-                    back, (0.30, -0.26), SKIN, 0, 0.06 * u))
-    out.append(Blob(world((-0.830, -0.090, 0.130), 1.0), (0.175 * u, 0.158 * u, 0.058 * u), pose.yaw,
-                    back, (0.24, -0.20), SKIN, 0, 0.08 * u))
+    palm = Blob(world((-0.690, -0.110, 0.150), 1.0), (0.300 * u, 0.180 * u, 0.070 * u), pose.yaw, back,
+                (0.27, -0.26), SKIN, 0, 0.06 * u, 0.24)
+    out.append(palm)
     out.append(Blob(world((-0.540, 0.170, 0.150), 1.0), (0.175 * u, 0.090 * u, 0.072 * u), pose.yaw - 0.40,
-                    base, (0.12, 0.0), SKIN, 0, 0.05 * u))
+                    base, (0.12, 0.0), SKIN, 0, 0.06 * u))
     out.append(Blob(world((-0.370, 0.125, 0.232), 0.9), (0.100 * u, 0.062 * u, 0.060 * u), pose.yaw - 0.90,
-                    base, (0.0, 0.0), SKIN, 0, 0.045 * u))
-    wrist = world((-0.960, -0.085, 0.055), 1.0)
-    # the tendons from the wrist to the knuckles, just under the skin
-    for name, z0 in (("index", 0.215), ("middle", 0.205), ("ring", 0.185), ("little", 0.16)):
-        knuckle_at = JOINTS[name][0]
-        start = world((-0.86, -0.07 - 0.03 * ("index", "middle", "ring", "little").index(name), z0 - 0.04), 1.0)
-        end = world((knuckle_at[0] + 0.05, knuckle_at[1], knuckle_at[2] - 0.035), 1.0)
-        out.append(Cone(start, end, 0.016 * u, 0.020 * u, back, SKIN, 0, 0.05 * u))
-    # the forearm, out of the picture, and the sleeve over it
+                    base, (0.0, 0.0), SKIN, 0, 0.05 * u))
+    # the forearm, flush with the back of the hand at the wrist, out of the picture, and the sleeve over it
+    wx, wy, _ = world((-0.860, -0.095, 0.0), 1.0)
+    wrist = (wx, wy, max(_top(palm, wx, wy), 0.10 * u + lift) - 0.125 * u)
     ax, ay = math.cos(pose.arm), math.sin(pose.arm)
     rise = 0.20
 
     def arm(d: float, z0: float) -> tuple:
         return (wrist[0] + ax * d * u, wrist[1] + ay * d * u, wrist[2] + (z0 + rise * d) * u)
 
-    out.append(Cone(arm(-0.05, 0.0), arm(0.6, 0.0), 0.135 * u, 0.170 * u, base, SKIN, 0, 0.09 * u))
-    out.append(Cone(arm(0.6, 0.0), arm(1.25, 0.0), 0.170 * u, 0.200 * u, base, SKIN, 0, 0.0))
+    out.append(Cone(arm(0.0, 0.0), arm(0.6, 0.0), 0.148 * u, 0.185 * u, base, SKIN, 0, 0.15 * u, flat=0.7))
+    out.append(Cone(arm(0.6, 0.0), arm(1.25, 0.0), 0.185 * u, 0.212 * u, base, SKIN, 0, 0.0, flat=0.7))
     cloth = _lin((0.24, 0.25, 0.27))
-    out.append(Cone(arm(1.05, 0.02), arm(1.17, 0.02), 0.235 * u, 0.242 * u, cloth * 1.12, CLOTH, 2))
+    out.append(Cone(arm(1.05, 0.03), arm(1.17, 0.03), 0.250 * u, 0.257 * u, cloth * 1.12, CLOTH, 2))
     d = 1.15                                     # the sleeve in short pieces, so that each has a small box
     while d < reach:
         nxt = min(reach, d + 0.8)
-        out.append(Cone(arm(d, 0.02), arm(nxt, 0.02), (0.235 + 0.004 * (d - 1.15)) * u,
-                        (0.235 + 0.004 * (nxt - 1.15)) * u, cloth, CLOTH, 2))
+        out.append(Cone(arm(d, 0.03), arm(nxt, 0.03), (0.25 + 0.004 * (d - 1.15)) * u,
+                        (0.25 + 0.004 * (nxt - 1.15)) * u, cloth, CLOTH, 2))
         d = nxt
-    # the fingers: three segments each, the knuckles of the hand at their roots
+    # the fingers: three segments each, the knuckles of the hand at their roots and a bump at the middle joint
     for name, joints in JOINTS.items():
         radii = RADII[name]
         pts = [world(p, FOLLOW[i]) for i, p in enumerate(joints)]
         if name != "thumb":
             out.append(Cone(pts[0], pts[0], radii[0] * 1.06 * u, radii[0] * 1.06 * u, knuckle, SKIN, 0, 0.045 * u))
+            out.append(Cone(pts[1], pts[1], radii[1] * 1.07 * u, radii[1] * 1.07 * u, knuckle, SKIN, 0, 0.02 * u))
         for i in range(3):
             if name == "thumb" and i == 0:                 # the thumb's first bone is inside the ball of the thumb
                 out.append(Cone(pts[0], pts[1], radii[0] * u, radii[1] * u, base, SKIN, 0, 0.05 * u))
@@ -562,7 +572,39 @@ def hand_shapes(pose: Pose, unit: float, tool: str | None, colour, skin=SKIN_TON
                 up = (0.0, 0.0, 1.0) if name != "thumb" else (lx * 0.55, ly * 0.55, 0.83)
                 nail = (0.62, 0.40, up)
             out.append(Cone(pts[i], pts[i + 1], radii[2 * i] * u, radii[2 * i + 1] * u, colour, SKIN, 0,
-                            0.016 * u, nail, 0.22 if i > 0 else 0.0))
+                            0.016 * u, nail, 0.28 if i > 0 else 0.0, 0.88))
+    return out
+
+
+def _top(blob: Blob, x: float, y: float) -> float:
+    """The height of a blob's top at the point ``x, y`` (its middle height outside it)."""
+    ca, sa = math.cos(blob.angle), math.sin(blob.angle)
+    u = (x - blob.c[0]) * ca + (y - blob.c[1]) * sa
+    v = -(x - blob.c[0]) * sa + (y - blob.c[1]) * ca
+    q = max(0.0, 1.0 - (u / blob.axes[0]) ** 2 - (v / blob.axes[1]) ** 2)
+    return blob.c[2] + blob.slope[0] * u + blob.slope[1] * v + blob.axes[2] * math.sqrt(q)
+
+
+def perspective(shapes: list, centre: tuple, camera: float) -> list:
+    """The shapes as a camera ``camera`` pixels above the board, over ``centre``, sees them: the nearer a part
+    is, the larger it looks and the further from the middle of the picture (what is on the board stays put)."""
+    cx, cy = centre
+
+    def see(p) -> tuple:
+        s = camera / max(camera - p[2], 0.2 * camera)
+        return (cx + (p[0] - cx) * s, cy + (p[1] - cy) * s, p[2]), s
+
+    out = []
+    for shape in shapes:
+        if isinstance(shape, Cone):
+            (a, sa), (b, sb) = see(shape.a), see(shape.b)
+            out.append(Cone(a, b, shape.ra * sa, shape.rb * sb, shape.colour, shape.material, shape.group,
+                            shape.k * 0.5 * (sa + sb), shape.nail, shape.creases, shape.flat))
+        else:
+            c, s = see(shape.c)
+            out.append(Blob(c, (shape.axes[0] * s, shape.axes[1] * s, shape.axes[2] * s), shape.angle,
+                            shape.colour, (shape.slope[0] / s, shape.slope[1] / s), shape.material, shape.group,
+                            shape.k * s, shape.taper))
     return out
 
 
@@ -591,31 +633,45 @@ class Layout:
     board: tuple                     # x0, y0, width, height of the drawing surface
     rim: int
     tray: tuple                      # x0, y0, x1, y1
+    reference: tuple | None          # x0, y0, width, height of the print of the frame drawn from
     unit: float                      # pixels to a hand length
     cell: tuple                      # thumbnail width, height
 
 
-def layout(width: int, size: tuple) -> Layout:
-    """The studio for an animation of ``size (h, w)`` in a picture ``width`` wide, 16:9."""
+def layout(width: int, size: tuple, reference: bool = True) -> Layout:
+    """The studio for an animation of ``size (h, w)`` in a picture ``width`` wide and 16:9: the board on the
+    left as large as the height allows, the tray beside it, a print of the frame being drawn from beyond."""
     height = round(width * 9 / 16)
     height += height % 2
     g = width / 160.0
     bar = max(8, round(11 * g))
     margin = max(2, round(3 * g))
-    unit = 0.27 * (height - bar)
-    tray_w = round((0.9 * unit + 4 * g) / g) * g
+    unit = 0.31 * (height - bar)
+    gap = round(4 * g)
+    tray_w = round(round((0.9 * unit + 4 * g) / g) * g)
     rim = max(1, round(0.75 * g))
-    aw = width - 2 * margin - tray_w - round(4 * g) - 2 * rim
+    room_w = width - 2 * margin - tray_w - gap - 2 * rim
     ah = height - bar - 2 * margin - 2 * rim
     h, w = size
-    scale = min(aw / w, ah / h)
-    bw, bh = max(8, round(w * scale)), max(8, round(h * scale))
+    scale = min(room_w * (0.62 if reference else 1.0) / w, ah / h)
+    bw = max(8, round(w * scale))
+    bh = max(8, round(bw * h / w))                 # as Animation.board makes it
     x0 = margin + rim
     y0 = bar + margin + rim + (ah - bh) // 2
-    tray = (round(width - margin - tray_w), y0 - rim, width - margin, height - margin - round(2 * g))
+    tx0 = x0 + bw + rim + gap
+    tray = (tx0, y0 - rim, tx0 + tray_w, height - margin - round(2 * g))
+    ref = None
+    left = width - margin - (tx0 + tray_w + gap)
+    if reference and left > 6 * g:
+        rw = min(left, round(0.5 * (bw + 2 * rim)))
+        rh = round(rw * h / w)
+        if rh > 0.5 * (bh + 2 * rim):
+            rh = round(0.5 * (bh + 2 * rim))
+            rw = round(rh * w / h)
+        ref = (width - margin - rw, y0 - rim, rw, rh)
     ch = max(4, round(5.5 * g))
     cw = max(3, min(round(10 * g), round(ch * w / h)))
-    return Layout(width, height, g, bar, margin, (x0, y0, bw, bh), rim, tray, unit, (cw, ch))
+    return Layout(width, height, g, bar, margin, (x0, y0, bw, bh), rim, tray, ref, unit, (cw, ch))
 
 
 def _font(size: float, mono: bool = False):
@@ -906,7 +962,7 @@ class Studio:
                  onion: float = 0.16, hand: bool = True, skin=None) -> None:
         self.anim, self.fps, self.first, self.later, self.onion = animation, float(fps), first, later, onion
         self.hand, self.skin = hand, tuple(skin) if skin is not None else SKIN_TONE
-        self.lay = lay = layout(width, animation.size)
+        self.lay = lay = layout(width, animation.size, animation.frames is not None)
         self.background = list(getattr(animation, "background", None) or [])
         holds = getattr(animation, "holds", None)
         on = 1 if holds is not None else max(1, int(animation.settings.get("on", 1)))
@@ -914,18 +970,22 @@ class Studio:
         self.rate = float(animation.fps) * on               # exposure frames a second
         x0, y0, self.bw, self.bh = lay.board
         self.origin = (x0, y0)
-        self.shoulder = (lay.width * 1.02, lay.height * 1.9)
+        self.shoulder = (lay.width * 1.35, lay.height * 1.05)     # off the picture, to the right and below
         self.fonts: dict = {}
         self.cel_tables: dict = {}
         self.thumbs: dict = {}
         self.played: dict = {}
+        self.backdrop: torch.Tensor | None = None            # the background drawn, for an animation without board()
         self.live = None                                     # the thumbnail of the frame being drawn
         self.board_px: torch.Tensor | None = None            # the board as shown, bytes (bh, bw, 3)
         self.missing = "nothing yet"
         self.items, self.pots = self._things()
         self.tray = Tray(self.items, lay, self.pots)
         self.where = {thing.key: thing.at for thing in self.items + self.pots}
+        self.print_box = None
         self.base = self._chrome()
+        self.reference = None                                # the frame drawn from, on the print (bytes)
+        self.prints: dict = {}
         self.motion = Motion(fps, lay.unit, self.shoulder)
 
     # ----------------------------------------------------------------------------------- the still parts --
@@ -971,13 +1031,43 @@ class Studio:
             desk[:, y0 - 1: y0 + bh + 1, x0 - 1] = _lin((0.58, 0.59, 0.60))[:, None]
         tx0, ty0, tx1, ty1 = self.tray.box
         desk[:, ty0 + 1: ty1 + 2, tx0 + 1: tx1 + 2] *= 0.88    # the tray stands a little off the desk
+        if lay.reference is not None:                          # a photo print: white paper round the picture
+            px, py, pw, ph = lay.reference
+            border = max(1, round(0.75 * lay.grid))
+            desk[:, py + 1: py + ph + 2, px + 1: px + pw + 2] *= 0.86
+            desk[:, py: py + ph, px: px + pw] = _lin((0.95, 0.948, 0.94))[:, None, None]
+            self.print_box = (px + border, py + border, pw - 2 * border, ph - 2 * border)
         out = _to_u8(desk)
         out[: lay.bar] = torch.tensor(BAR, dtype=torch.uint8)
         return out
 
     # ----------------------------------------------------------------------------------- the board --
     def _board(self, frame: int) -> Board:
-        return Board(self.bw, self.bh, self.anim.surface, seed=max(0, frame))
+        """The board for drawing ``frame``, as the animation itself draws it (``Animation.board``: the
+        background art already on it, moved with the camera); for -1 the bare board the background is drawn
+        on."""
+        waver = float(self.anim.settings.get("waver", 0.35))
+        if frame < 0:
+            return Board(self.bw, self.bh, self.anim.surface, waver=waver, seed=10_007)
+        if hasattr(self.anim, "board"):
+            board = self.anim.board(frame, self.bw)
+            if (board.width, board.height) == (self.bw, self.bh):
+                return board
+        board = Board(self.bw, self.bh, self.anim.surface, waver=waver, seed=frame)
+        if self.backdrop is not None:
+            board.canvas = self.backdrop.clone()
+        return board
+
+    def _background_lines(self) -> list:
+        """The background art as the first drawing's camera sees it."""
+        cameras = getattr(self.anim, "cameras", None)
+        if not self.background or cameras is None or len(cameras) == 0:
+            return self.background
+        try:
+            from .anime import background_for
+        except ImportError:
+            return self.background
+        return list(background_for(self.background, cameras[0], self.anim.size[1]))
 
     def _box(self, line: Line) -> tuple | None:
         """The part of the board a line can change: its points, its nib and the waver of the hand."""
@@ -996,11 +1086,9 @@ class Studio:
         x0, y0, x1, y1 = box
         self.board_px[y0:y1, x0:x1] = _to_u8(canvas[:, y0:y1, x0:x1])
 
-    def _clean(self, lines: list, frame: int, start: torch.Tensor | None) -> torch.Tensor:
+    def _clean(self, lines: list, frame: int) -> torch.Tensor:
         """A sheet drawn again without the lightbox under it, the way the animation shows it."""
         board = self._board(frame)
-        if start is not None:
-            board.canvas = start.clone()
         for line in lines:
             board.draw(line)
         return board.canvas
@@ -1072,7 +1160,7 @@ class Studio:
     def plan(self) -> tuple:
         """Every phase with its steps, the tool held from each time on, and when it all ends."""
         u, lay = self.lay.unit, self.lay
-        phases = [Phase(self.background, -1, 0.32 * self.first)] if self.background else []
+        phases = [Phase(self._background_lines(), -1, 0.32 * self.first)] if self.background else []
         phases += [Phase(sheet.lines, i, self.first if i == 0 else self.later)
                    for i, sheet in enumerate(self.anim.sheets)]
         away = (lay.width + 0.3 * u, lay.height + 0.2 * u)  # off the picture, toward the shoulder
@@ -1203,19 +1291,11 @@ class Studio:
                 x += round(step * g)
         cw, ch = lay.cell
         gap = max(1, round(0.5 * g))
-        slot = cw + gap
-        x_start = left_w + round(2 * g) if text else m
-        x_end = W - right_w - round(2 * g) if text else W - m
         cells = self._cells()
-        fit = max(1, (x_end - x_start + gap) // slot)
-        here = next((k for k, c in enumerate(cells) if c[2] == current and not c[3]), 0)
-        first = 0 if len(cells) <= fit else max(0, min(here - fit // 3, len(cells) - fit))
-        top = round(4.0 * g) if text else max(1, round(0.15 * lay.bar))
-        for k in range(first, min(len(cells), first + fit)):
+        for k, x, top in self.cell_places(current):
             key, name, frame, on = cells[k]
-            x = x_start + (k - first) * slot
             mine = frame == current
-            if text and (not on or slot >= 3.5 * g):
+            if text and (not on or cw + gap >= 3.5 * g):
                 draw.text((x, round(1.9 * g)), name, font=tiny, fill=ACCENT if mine and not on else DIM)
             if on:                                            # held: a line through the cell, as on an x-sheet
                 mid = top + ch // 2
@@ -1232,6 +1312,37 @@ class Studio:
             if mine:
                 draw.rectangle([x - 1, top - 1, x + cw, top + ch], outline=ACCENT, width=max(1, round(0.25 * g)))
         return torch.from_numpy(np.asarray(image).copy())
+
+    def cell_places(self, current: int | None) -> list:
+        """Which cells of the exposure sheet are on the strip while frame ``current`` is drawn (it scrolls when
+        they do not all fit), and where: ``(number of the cell, x, y)`` of each, ``lay.cell`` big."""
+        lay = self.lay
+        g, W, m = lay.grid, lay.width, lay.margin
+        text = g >= 4.5
+        cw, _ = lay.cell
+        gap = max(1, round(0.5 * g))
+        slot = cw + gap
+        x_start = round(19 * g) if text else m
+        x_end = W - round(24 * g) if text else W - m
+        cells = self._cells()
+        fit = max(1, (x_end - x_start + gap) // slot)
+        here = next((k for k, c in enumerate(cells) if c[2] == current and not c[3]), 0)
+        first = 0 if len(cells) <= fit else max(0, min(here - fit // 3, len(cells) - fit))
+        top = round(4.0 * g) if text else max(1, round(0.15 * lay.bar))
+        return [(k, x_start + (k - first) * slot, top) for k in range(first, min(len(cells), first + fit))]
+
+    def _reference(self, frame: int) -> None:
+        """The frame of the video being drawn from, on the print beside the tray."""
+        frames = getattr(self.anim, "source", None)
+        if self.print_box is None or frames is None or len(frames) == 0:
+            return
+        frame = min(frame, len(frames) - 1)
+        if frame not in self.prints:
+            _, _, pw, ph = self.print_box
+            picture = frames[frame].float()[None] / 255.0
+            small = F.interpolate(picture, size=(ph, pw), mode="area")[0]
+            self.prints[frame] = _u8(small * 0.97 + 0.01)       # printed: a little less than full range
+        self.reference = self.prints[frame]
 
     def _thumb(self, canvas: torch.Tensor):
         from PIL import Image
@@ -1252,6 +1363,9 @@ class Studio:
             self.missing = missing
         out = self.base.clone()
         out[: lay.bar] = bar
+        if self.reference is not None:
+            px, py, pw, ph = self.print_box
+            out[py: py + ph, px: px + pw] = self.reference
         x0, y0 = self.origin
         out[y0: y0 + self.bh, x0: x0 + self.bw] = self.board_px
         if live is not None and box is not None:
@@ -1276,6 +1390,7 @@ class Studio:
                 reach = d
                 break
         shapes = hand_shapes(pose, u, holding[0], holding[1], self.skin, reach, self.hand)
+        shapes = perspective(shapes, (W / 2, (H + lay.bar) / 2), CAMERA * u)
         boxes = [_box(s) for s in shapes]
         bx0, by0 = max(0, int(min(b[0] for b in boxes))), max(lay.bar, int(min(b[1] for b in boxes)))
         bx1, by1 = min(W, int(max(b[2] for b in boxes)) + 1), min(H, int(max(b[3] for b in boxes)) + 1)
@@ -1327,6 +1442,8 @@ class Studio:
 
     def shots(self, loops: int = 2):
         """Every picture of the making-of in order (:class:`Shot`)."""
+        if not self.anim.sheets:
+            return
         phases, swaps, leave = self.plan()
         swap_times = [s[0] for s in swaps]
         fps, k = self.fps, 0
@@ -1334,16 +1451,14 @@ class Studio:
         def holding_at(time: float):
             return swaps[max(0, bisect.bisect_right(swap_times, time) - 1)][1]
 
-        bg_canvas, last_clean = None, None
+        last_clean = None
         for phase in phases:
             frame, lines = phase.frame, phase.lines
             board = self._board(frame)
-            if bg_canvas is not None:
-                board.canvas = bg_canvas.clone()
-            start = board.canvas.clone()
             if frame >= 0 and last_clean is not None and self.onion > 0:     # the lightbox
                 board.canvas = board.canvas * (1.0 - self.onion) + last_clean * self.onion
             self._show(board.canvas)
+            self._reference(max(0, frame))
             self.live, last_live = None, -1e9
             starts = [s.t0 for s in phase.steps]
             done, dense = 0, {}
@@ -1372,10 +1487,10 @@ class Studio:
                 holding = holding_at(time)
                 bar = self._bar(frame, done, len(lines))
                 yield Shot(self.picture(live, box, tip, lift, holding, bar), time, frame, tip, doing, holding)
-            clean = self._clean(lines, frame, start)
+            clean = self._clean(lines, frame)
             self.thumbs["bg" if frame < 0 else frame] = self._thumb(clean)
             if frame < 0:
-                bg_canvas = clean
+                self.backdrop = clean
             else:
                 last_clean = clean
                 self.played[frame] = _to_u8(clean)
@@ -1389,16 +1504,21 @@ class Studio:
             tip, lift = self._where_now(leave, share)
             holding = holding_at(time)
             yield Shot(self.picture(None, None, tip, lift, holding, bar), time, last, tip, "leaving", holding)
-        clock = 0.0
-        for loop in range(loops):                             # and the animation plays
-            for i in range(len(self.anim)):
-                self.board_px = self.played[i]
-                n = round((clock + self.holds[i] / self.rate) * fps) - round(clock * fps)
-                clock += self.holds[i] / self.rate
+        # and the animation plays: each picture shows the drawing exposed at its time, as a player would
+        ends = torch.tensor(self.holds, dtype=torch.float64).cumsum(0) / self.rate
+        length = float(ends[-1])
+        shown = None
+        for j in range(round(loops * length * fps)):
+            at = (j + 0.5) / fps
+            loop, at = int(at // length), at % length
+            i = min(len(self.anim) - 1, int(torch.searchsorted(ends, torch.tensor([at], dtype=torch.float64),
+                                                                right=True)[0]))
+            if (i, loop) != shown:
+                self.board_px, shown = self.played[i], (i, loop)
+                self._reference(i)
                 bar = self._bar(i, loop + 1, loops, playing=True)
-                for _ in range(max(1, n)):
-                    k += 1
-                    yield Shot(self.picture(None, None, None, 0.0, None, bar), k / fps, None, None, "playing")
+            k += 1
+            yield Shot(self.picture(None, None, None, 0.0, None, bar), k / fps, None, None, "playing")
 
 
 def _densify(line: Line, scale: float, most: float = 2.0) -> tuple:
@@ -1429,8 +1549,18 @@ def making_of(animation, path, width: int = 1280, fps: int = 24, first: float = 
     the hand (sRGB). Written with :class:`helix_lm.paint.animate.VideoWriter`: ``.mp4`` (ffmpeg) or ``.gif``."""
     writer = VideoWriter(path, fps)
     for shot in shots(animation, width, fps, first, later, loops, onion, hand, skin):
-        writer.add(shot.picture.permute(2, 0, 1).float() / 255.0)
+        _write(writer, shot.picture)
     return writer.close()
+
+
+def _write(writer: VideoWriter, picture: torch.Tensor) -> None:
+    """One picture (bytes ``(H, W, 3)``) to the writer: straight down the pipe to ffmpeg once it is open (the
+    picture is already bytes), else as the writer takes it."""
+    proc, size = getattr(writer, "proc", None), getattr(writer, "size", None)
+    if proc is not None and size is not None and not getattr(writer, "gif", True):
+        proc.stdin.write(picture[: size[0], : size[1]].contiguous().numpy().tobytes())
+        return
+    writer.add(picture.permute(2, 0, 1).float() / 255.0)
 
 
 __all__ = ["Blob", "Cone", "Item", "Layout", "Motion", "Phase", "Pose", "Shot", "Spring", "Step", "Studio", "Tray",

@@ -22,7 +22,7 @@ import torch.nn.functional as F
 
 from .color import delta_e, image_to_oklab, srgb_to_oklab
 from .detail import Part, components, draw_details, merge
-from .draw import SURFACES, Board, find_lines, markers, thin
+from .draw import SURFACES, Board, fill_rings, find_lines, markers, thin
 from .flow import nearest
 from .see import gaussian_blur
 
@@ -43,9 +43,11 @@ def _labels(image: torch.Tensor, palette: torch.Tensor) -> torch.Tensor:
 
 
 def score(lines: list, image: torch.Tensor, palette: torch.Tensor | None = None, *, surface: str = "whiteboard",
-          waver: float = 0.0, seed: int = 0) -> dict:
+          waver: float = 0.0, seed: int = 0, under: list | None = None) -> dict:
     """How well ``lines`` (board widths) draw ``image (3, H, W)`` (sRGB), drawn on a ``surface`` of the image's
-    size. Returns a dict:
+    size. ``under`` (lines) is drawn first as a layer of its own, as :func:`helix_lm.paint.draw.render` does
+    (the background art under a character's cel), so the character is judged over its background. Returns a
+    dict:
 
     - ``error``: the mean OKLab distance between the drawing and the frame; ``error_map`` the same per pixel
       ``(H, W)``; ``regions`` the mean for the pixels of each palette colour ``{marker: error}``;
@@ -53,22 +55,35 @@ def score(lines: list, image: torch.Tensor, palette: torch.Tensor | None = None,
     - ``ink_to_edge``, ``edge_to_ink``, ``chamfer``: how far (pixels) the ink lies from the frame's borders, the
       borders from the ink, and their mean (each counted up to :data:`FAR`);
     - ``bad``: ``(H, W)`` bool, the places that are clearly wrong;
+    - ``layer``: ``(H, W)`` bool, where ``lines`` themselves show (everywhere they drew, when there is no
+      ``under``);
     - ``loss``: one number to make smaller (the error, plus the bare share and the chamfer distance weighted
       in); ``picture``: the drawing.
+
+    The ink that counts is what shows: the ink of ``lines``, and that of ``under`` where ``lines`` did not
+    paint over it.
     """
     image = image.float().clamp(0.0, 1.0)
     h, w = image.shape[-2:]
     palette = markers([image]) if palette is None else palette
     board = Board(w, h, surface, waver=waver, seed=seed)
+    below = torch.zeros(h, w, dtype=torch.bool)
+    if under:
+        for line in under:
+            board.draw(line)
+        below = board.ink_cover > 0.5
+        board.settle()
+    before = board.canvas.clone()
     for line in lines:
         board.draw(line)
+    layer = (board.canvas - before).abs().amax(0) > 1e-4
     picture = board.picture()
     error = delta_e(picture, image)
     lab_pic, lab_img = image_to_oklab(picture), image_to_oklab(image)
     bare_lab = srgb_to_oklab(torch.tensor(SURFACES.get(surface, SURFACES["whiteboard"])))[:, None, None]
     coloured = (lab_img - bare_lab).norm(dim=0) > 0.06
     bare = ((lab_pic - bare_lab).norm(dim=0) < 0.02) & coloured
-    ink = board.ink_cover > 0.5
+    ink = (board.ink_cover > 0.5) | (below & ~layer)
     edges, _ = find_lines(image, 0.6)
     if bool(ink.any()) and bool(edges.any()):
         drawn = thin(ink)
@@ -91,8 +106,8 @@ def score(lines: list, image: torch.Tensor, palette: torch.Tensor | None = None,
     share = float(bare.sum()) / max(1, int(coloured.sum()))
     return {"error": float(error.mean()), "error_map": error, "regions": regions, "bare": share,
             "bare_pixels": int(bare.sum()), "ink_to_edge": ink_to_edge, "edge_to_ink": edge_to_ink,
-            "chamfer": chamfer, "bad": bad, "loss": float(error.mean()) + 0.2 * share + 0.004 * chamfer,
-            "picture": picture}
+            "chamfer": chamfer, "bad": bad, "layer": layer,
+            "loss": float(error.mean()) + 0.2 * share + 0.004 * chamfer, "picture": picture}
 
 
 def bad_boxes(bad: torch.Tensor, most: int = 8, grow: float = 0.3) -> list:
@@ -123,24 +138,52 @@ def bad_boxes(bad: torch.Tensor, most: int = 8, grow: float = 0.3) -> list:
     return [tuple(b) for b in boxes[:most]]
 
 
+def _share_on(line, mask: torch.Tensor, scale: float) -> float:
+    """How much of a line (or of a cel shape's area) lies on ``mask (H, W)``."""
+    h, w = mask.shape
+    if line.rings is not None:
+        got = fill_rings(line.points * scale, line.rings, h, w)
+        if got is None:
+            return 0.0
+        y0, x0, cov = got
+        return float((cov * mask[y0 : y0 + cov.shape[0], x0 : x0 + cov.shape[1]]).sum() / cov.sum().clamp(min=1e-6))
+    pts = line.points * scale
+    xi, yi = pts[:, 0].long().clamp(0, w - 1), pts[:, 1].long().clamp(0, h - 1)
+    return float(mask[yi, xi].float().mean()) if len(pts) else 0.0
+
+
 def fix(lines: list, image: torch.Tensor, drawer=None, palette: torch.Tensor | None = None, rounds: int = 2, *,
-        scale_up: int = 2, most: int = 8) -> list:
+        scale_up: int = 2, most: int = 8, under: list | None = None) -> list:
     """``lines`` with their bad places (:func:`score`) drawn again, up to ``rounds`` times. Each place is a
     part (:func:`bad_boxes`): what lies inside it is taken out (a line crossing its edge is cut there) and
     ``drawer(crop, palette)`` draws it anew, enlarged ``scale_up`` times and cut to it
     (:func:`helix_lm.paint.detail.draw_details` and :func:`helix_lm.paint.detail.merge`). A place's new
     drawing is kept only when it matches the frame better there, and a round only when the whole drawing
-    scores better (a lower ``loss``)."""
+    scores better (a lower ``loss``).
+
+    With ``under`` (the background art the lines are laid over, see :func:`score`), only the lines are
+    changed, never ``under``, and only bad places where the lines themselves show (or come within three
+    pixels) are drawn again: a fault of the background is not the character's to mend. Of the new lines, only
+    those lying mostly where the character's lines show are kept, so the bit of background the drawer also
+    draws in such a place stays the background's. Lay a character in cel paint over its background: marker
+    colour is see-through and would darken the background under it."""
     image = image.float().clamp(0.0, 1.0)
     h, w = image.shape[-2:]
+    scale = float(w)
     palette = markers([image]) if palette is None else palette
-    best = score(lines, image, palette)
+    best = score(lines, image, palette, under=under)
     for _ in range(rounds):
-        parts = [Part(box, "detail", 1.0, (h, w)) for box in bad_boxes(best["bad"], most)]
+        bad = best["bad"]
+        if under:
+            bad = bad & (F.max_pool2d(best["layer"][None, None].float(), 7, 1, 3)[0, 0] > 0)
+        parts = [Part(box, "detail", 1.0, (h, w)) for box in bad_boxes(bad, most)]
         if not parts:
             break
         drawn = [draw_details(image, [part], palette, drawer, scale_up) for part in parts]
-        tried = score(merge(lines, [x for d in drawn for x in d], parts), image, palette)
+        if under:                                     # the character's own: not the background round it
+            near = F.max_pool2d(best["layer"][None, None].float(), 7, 1, 3)[0, 0] > 0
+            drawn = [[line for line in d if _share_on(line, near, scale) >= 0.5] for d in drawn]
+        tried = score(merge(lines, [x for d in drawn for x in d], parts), image, palette, under=under)
         keep = []
         for part, new in zip(parts, drawn, strict=True):  # each place on its own: better there, or as it was
             x0, y0, x1, y1 = (int(v) for v in part.box)
@@ -149,7 +192,7 @@ def fix(lines: list, image: torch.Tensor, drawer=None, palette: torch.Tensor | N
         if not keep:
             break
         candidate = merge(lines, [x for _, new in keep for x in new], [part for part, _ in keep])
-        result = score(candidate, image, palette)
+        result = score(candidate, image, palette, under=under)
         if result["loss"] >= best["loss"]:
             break
         lines, best = candidate, result

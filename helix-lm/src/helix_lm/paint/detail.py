@@ -84,11 +84,26 @@ def _odd(x: float) -> int:
 def components(mask: torch.Tensor) -> tuple[torch.Tensor, int]:
     """The connected parts of ``mask (H, W)`` (pixels touching at a side or a corner): a number for each part
     ``(H, W)`` long (-1 outside the mask), and how many there are. Each pixel takes the largest index in its
-    reach, with pointer jumping so long thin shapes do not take a step per pixel."""
+    reach, with pointer jumping so long thin shapes do not take a step per pixel (SciPy's labelling is used
+    instead when it is installed; it is not needed)."""
     h, w = mask.shape
     mask = mask.bool()
     if not bool(mask.any()):
         return torch.full((h, w), -1, dtype=torch.long), 0
+    try:                                             # the same parts, much quicker, when SciPy is there
+        from scipy import ndimage
+
+        found, n = ndimage.label(mask.numpy(), structure=[[1, 1, 1], [1, 1, 1], [1, 1, 1]])
+        lab = torch.from_numpy(found).long() - 1
+        last = torch.full((n,), -1, dtype=torch.long).scatter_reduce(
+            0, lab[mask], torch.arange(h * w).view(h, w)[mask], "amax")
+        rank = torch.empty(n, dtype=torch.long)
+        rank[last.argsort()] = torch.arange(n)       # numbered as below: by the last pixel of each part
+        out = torch.full((h, w), -1, dtype=torch.long)
+        out[mask] = rank[lab[mask]]
+        return out, int(n)
+    except ImportError:
+        pass
     index = torch.arange(h * w, dtype=torch.float64).view(h, w)
     lab = torch.where(mask, index, torch.full_like(index, -1.0))
     while True:
@@ -333,32 +348,38 @@ def _small_dark(lab: torch.Tensor, side: int) -> torch.Tensor:
 
 def _eye_shapes(lab: torch.Tensor, side: int) -> list:
     """Shapes that may be eyes: small, compact and dark against the light round them. Each is a dict with its
-    box, centre, area and how much light hole (a highlight) it holds."""
+    box, centre, area and how much light hole (a highlight) it holds. They are looked for at a few levels of
+    darkness, from mid to near black, because at a lighter level an eye can run into dark hair beside it."""
     light = lab[0]
-    dark = (_small_dark(lab, side) > 0.22) & (light < 0.62)
-    comp, n = components(dark)
-    if n == 0:
-        return []
-    st = _stats(comp, n, light)
+    darker = _small_dark(lab, side) > 0.22
     least, most = max(6.0, (0.012 * side) ** 2), 0.22 * side
-    out = []
-    for i in range(n):
-        area, bw, bh = float(st["area"][i]), float(st["x1"][i] - st["x0"][i]), float(st["y1"][i] - st["y0"][i])
-        if area < least or max(bw, bh) > most or not (0.35 <= bw / bh <= 3.2) or area / (bw * bh) < 0.3:
+    out: list = []
+    for level in (0.62, 0.5, 0.4, 0.3):
+        comp, n = components(darker & (light < level))
+        if n == 0:
             continue
-        x0, y0, x1, y1 = int(st["x0"][i]), int(st["y0"][i]), int(st["x1"][i]), int(st["y1"][i])
-        own = comp[y0:y1, x0:x1] == i
-        if float(torch.quantile(light[y0:y1, x0:x1][own], 0.2)) > 0.42:     # an eye has a dark lash line or pupil
-            continue
-        holes, count = components(F.pad((~own).float()[None, None], (1, 1, 1, 1), value=1.0)[0, 0].bool())
-        lit = 0.0
-        if count > 1:
-            outside = int(holes[0, 0])
-            inner = (holes[1:-1, 1:-1] >= 0) & (holes[1:-1, 1:-1] != outside)
-            bright = light[y0:y1, x0:x1] > max(0.7, float(st["mean"][i]) + 0.3)
-            lit = float((inner & bright).sum())
-        out.append({"box": (float(x0), float(y0), float(x1), float(y1)), "c": (float(st["cx"][i]), float(st["cy"][i])),
-                    "area": area, "w": bw, "h": bh, "lit": lit, "light": float(st["mean"][i])})
+        st = _stats(comp, n, light)
+        bw_all, bh_all = st["x1"] - st["x0"], st["y1"] - st["y0"]
+        fits = ((st["area"] >= least) & (torch.maximum(bw_all, bh_all) <= most) & (bw_all >= 0.35 * bh_all)
+                & (bw_all <= 3.2 * bh_all) & (st["area"] >= 0.3 * bw_all * bh_all))
+        for i in torch.nonzero(fits).flatten().tolist():
+            area, bw, bh = float(st["area"][i]), float(bw_all[i]), float(bh_all[i])
+            cx, cy = float(st["cx"][i]), float(st["cy"][i])
+            if any(abs(cx - e["c"][0]) < 0.5 * e["w"] and abs(cy - e["c"][1]) < 0.5 * e["h"] for e in out):
+                continue                             # found already, whole, at a lighter level
+            x0, y0, x1, y1 = int(st["x0"][i]), int(st["y0"][i]), int(st["x1"][i]), int(st["y1"][i])
+            own = comp[y0:y1, x0:x1] == i
+            if float(torch.quantile(light[y0:y1, x0:x1][own], 0.2)) > 0.42:  # an eye has a dark lash line or pupil
+                continue
+            holes, count = components(F.pad((~own).float()[None, None], (1, 1, 1, 1), value=1.0)[0, 0].bool())
+            lit = 0.0
+            if count > 1:
+                outside = int(holes[0, 0])
+                inner = (holes[1:-1, 1:-1] >= 0) & (holes[1:-1, 1:-1] != outside)
+                bright = light[y0:y1, x0:x1] > max(0.7, float(st["mean"][i]) + 0.3)
+                lit = float((inner & bright).sum())
+            out.append({"box": (float(x0), float(y0), float(x1), float(y1)), "c": (cx, cy), "area": area, "w": bw,
+                        "h": bh, "lit": lit, "light": float(st["mean"][i])})
     out.sort(key=lambda e: -e["area"] * (1.5 if e["lit"] > 0 else 1.0))
     return out[:40]
 
@@ -414,7 +435,7 @@ def _faces_by_eyes(image: torch.Tensor, lab: torch.Tensor) -> list:
         ys, xs = torch.nonzero(head, as_tuple=True)
         hbox = (float(xs.min()) + lx0, float(ys.min()) + ly0, float(xs.max()) + 1 + lx0, float(ys.max()) + 1 + ly0)
         surrounds = all(hbox[0] <= e["c"][0] <= hbox[2] and hbox[1] <= e["c"][1] <= hbox[3] for e in (a, b))
-        if not surrounds or float(head.sum()) < 1.2 * d * d or hbox[2] - hbox[0] < 1.5 * d:
+        if not surrounds or float(head.sum()) < d * d or hbox[2] - hbox[0] < 1.25 * d:   # too small for a head
             continue
         # it ends somewhere: a colour that runs on past three sides of where a head could be is the ground round
         # the eyes, not a head (a side at the picture's edge does not count; the neck may run on below)
@@ -439,7 +460,13 @@ def _faces_by_eyes(image: torch.Tensor, lab: torch.Tensor) -> list:
         score = base + 1.0 + (0.7 if mouth else 0.0) + 0.4 * ((a["lit"] > 0) + (b["lit"] > 0))
         if score < 3.4:
             continue
-        boxes = [hbox, a["box"], b["box"]] + ([mouth] if mouth else [])
+        # the face: the head's colour, the eyes, the mouth, and at least where a face lies on this eye line (so an
+        # eye at the edge of the colour found, a cheek in shadow, is not cut in two)
+        least = torch.tensor([[mx + (ex * u + nx * v) * d, my + (ey * u + ny * v) * d]
+                              for u in (-1.2, 1.2) for v in (-0.8, 1.5)])
+        expect = (float(least[:, 0].min()), float(least[:, 1].min()), float(least[:, 0].max()),
+                  float(least[:, 1].max()))
+        boxes = [hbox, expect, a["box"], b["box"]] + ([mouth] if mouth else [])
         face = (min(x[0] for x in boxes), min(x[1] for x in boxes), max(x[2] for x in boxes), max(x[3] for x in boxes))
         face = _clamp_box((max(face[0], limit[0]) - 0.08 * d, max(face[1], limit[1]) - 0.08 * d,
                            min(face[2], limit[2]) + 0.08 * d, min(face[3], limit[3]) + 0.08 * d), h, w)
@@ -616,7 +643,7 @@ def on_board(palette: torch.Tensor, surface: str = "whiteboard",
 
 
 def accents(palette: torch.Tensor, surface: str = "whiteboard") -> torch.Tensor:
-    """The colours to paint a part's own shapes with beside marker colouring: what each marker leaves on the
+    """The colours to paint a part's small shapes with beside marker colouring: what each marker leaves on the
     board (:func:`on_board`), so a colour looks the same in the part as everywhere else, except for the darks
     a see-through marker would leave clearly lighter (pupils, lash lines, a nose, paws): those keep their own
     colour, so they stay as dark and clear as they are drawn."""
@@ -658,15 +685,17 @@ def cel_shapes(labels: torch.Tensor, palette: torch.Tensor, darker: torch.Tensor
     return out
 
 
-def joining(labels: torch.Tensor, outside: torch.Tensor) -> torch.Tensor:
-    """The shapes of ``labels (H, W)`` that reach into ``outside (H, W)``: their labels, -1 elsewhere."""
+def joining(labels: torch.Tensor, outside: torch.Tensor, share: float = 0.0) -> torch.Tensor:
+    """The shapes of ``labels (H, W)`` that reach into ``outside (H, W)`` (with more than ``share`` of their
+    pixels there): their labels, -1 elsewhere."""
     out = torch.full_like(labels, -1)
     for k in torch.unique(labels[outside]).tolist():
         if k < 0:
             continue
         comp, n = components(labels == k)
-        reach = torch.zeros(n + 1, dtype=torch.bool)
-        reach[comp[outside & (labels == k)] + 1] = True
+        there = torch.bincount(comp[outside & (labels == k)] + 1, minlength=n + 1).float()
+        every = torch.bincount(comp[labels == k] + 1, minlength=n + 1).float().clamp(min=1)
+        reach = (there > 0) & (there > share * every)
         out[reach[comp + 1] & (labels == k)] = k
     return out
 
@@ -685,39 +714,54 @@ def _seen(crop: torch.Tensor, palette: torch.Tensor, detail: float):
     return ink, labels, darker
 
 
-def draw_crop(crop: torch.Tensor, palette: torch.Tensor, detail: float = 0.85, inner=None) -> list:
-    """The default drawer of a part: the ink lines as :func:`helix_lm.paint.draw.draw_picture` draws them with
-    much detail, and the colour as cel paint, shape by shape (:func:`cel_shapes`). Marker hatching would only
-    come near those shapes, and when a picture is enlarged its dark outlines are wider than the pen, so they
-    are painted as the shapes they are rather than left to two thin lines. With an ``inner`` box (pixels of
-    the crop: the part itself, without its margin), the colours are those markers leave on the whiteboard
-    (:func:`on_board`), the darks of the shapes wholly inside it kept dark (:func:`accents`), so the part sits
-    in a frame coloured with markers.
-    Points in the crop's board widths. (:func:`draw_details` does better for shapes that go on past the part:
-    it colours them with the frame's own markers.)"""
+def draw_crop(crop: torch.Tensor, palette: torch.Tensor, detail: float = 0.85) -> list:
+    """A part drawn as cel animation is: the ink lines as :func:`helix_lm.paint.draw.draw_picture` draws them
+    with much detail, and the colour as cel paint of the palette's colours, shape by shape
+    (:func:`cel_shapes`). Marker hatching would only come near those shapes, and when a picture is enlarged its
+    dark outlines are wider than the pen, so they are painted as the shapes they are rather than left to two
+    thin lines. The white the picture leaves as paper (the white of an eye, a highlight) is painted too, in
+    the whiteboard's colour, so a character drawn this way and laid over its background does not show the
+    background through its eyes. Points in the crop's board widths. (:func:`draw_details` uses this, and
+    colours the shapes that go on past the part as the frame's markers do.)"""
     ink, labels, darker = _seen(crop, palette, detail)
-    h, w = labels.shape
-    cels = cel_shapes(labels, palette, darker)
-    if inner is not None:
-        join = joining(labels, _outside(h, w, inner))
-        cels = cel_shapes(torch.where(join >= 0, torch.full_like(labels, -1), labels), accents(palette), darker) + \
-            cel_shapes(join, on_board(palette), darker)
-    return ink + [line.moved(line.points / float(w), age=0) for line in cels]
+    w = float(labels.shape[1])
+    paper = F.max_pool2d((labels < 0)[None, None].float(), 3, 1, 1)[0, 0] > 0
+    white = _cel(paper, SURFACES["whiteboard"], -1)
+    cels = ([white] if white is not None else []) + cel_shapes(labels, palette, darker)
+    return ink + [line.moved(line.points / w, age=0) for line in cels]
+
+
+def small_shapes(labels: torch.Tensor, area: float) -> torch.Tensor:
+    """The shapes of ``labels (H, W)`` no larger than ``area`` pixels: their labels, -1 elsewhere."""
+    out = torch.full_like(labels, -1)
+    for k in torch.unique(labels).tolist():
+        if k < 0:
+            continue
+        comp, n = components(labels == k)
+        size = torch.bincount(comp[comp >= 0], minlength=n)
+        out[(comp >= 0) & (size[comp.clamp(min=0)] <= area)] = k
+    return out
 
 
 def _default_part(image: torch.Tensor, palette: torch.Tensor, box, window, big: torch.Tensor, factor: int):
-    """A part drawn the default way: the ink and the shapes that lie wholly inside the part as
-    :func:`draw_crop` draws them (board widths of ``big``, the part's ``window`` enlarged ``factor`` times),
-    and the shapes that go on past the part coloured with markers at the frame's own size, so they join the
-    frame's colouring outside: the same nibs, the same slant, and gone over again where the frame, looked at
-    at its own size, is darker than its marker (frame board widths)."""
+    """A part drawn the default way, to sit in a frame coloured with markers: the ink and the part's own shapes
+    as :func:`draw_crop` draws them (board widths of ``big``, the part's ``window`` enlarged ``factor``
+    times), in the colours the markers leave on the board (:func:`on_board`), its small darks kept dark
+    (:func:`accents`); and the shapes that go on well past the part (more than 30% of them outside it, like
+    the ground behind) coloured with markers at the frame's own size, so they join the frame's colouring
+    outside: the same nibs, the same slant, and gone over again where the frame, looked at at its own size,
+    is darker than its marker (frame board widths). Bare paper wholly inside the part (a highlight, the white
+    of an eye) is painted the whiteboard's colour, so no marker the frame laid there shows through it."""
     h, w = image.shape[-2:]
     x0, y0, x1, y1 = window
     ink, labels, darker = _seen(big, palette, 0.85)
     bh, bw = labels.shape
     inner = tuple((v - o) * factor for v, o in zip(box, (x0, y0, x0, y0), strict=True))
-    join = joining(labels, _outside(bh, bw, inner))
-    own = cel_shapes(torch.where(join >= 0, torch.full_like(labels, -1), labels), accents(palette), darker)
+    join = joining(labels, _outside(bh, bw, inner), 0.3)
+    inside = torch.where(join >= 0, torch.full_like(labels, -1), labels)
+    tiny = small_shapes(inside, (0.2 * factor * min(box[2] - box[0], box[3] - box[1])) ** 2)
+    large = torch.where(tiny >= 0, torch.full_like(labels, -1), inside)
+    own = cel_shapes(large, on_board(palette), darker) + cel_shapes(tiny, accents(palette), darker)
     paper = (labels < 0) & ~joining(labels + 1, _outside(bh, bw, inner)).eq(0)
     blank = _cel(paper, SURFACES["whiteboard"], -1)  # a highlight stays white over the frame's markers under it
     own += [blank] if blank is not None else []
@@ -769,8 +813,10 @@ def draw_details(image: torch.Tensor, parts: list, palette: torch.Tensor, drawer
     """The lines that draw each part of ``image (3, H, W)`` (sRGB) at ``scale_up`` times its size, in the
     frame's board widths, each cut to its part's box (so :func:`merge` can put them in place of the frame's
     own lines there). ``drawer(crop, palette) -> list[Line]`` draws a picture, its lines in that picture's
-    board widths (by default :func:`draw_crop`; a cel painter fits the same way). A part lying inside another
-    part of the list is drawn with that one.
+    board widths (by default :func:`draw_crop`, with the shapes that go on past a part coloured as the frame's
+    markers colour them, see :func:`_default_part`; a cel painter fits the same way). A part lying inside
+    another part of the list is drawn with that one, and where two parts overlap the one earlier in the list
+    (the more important) draws the overlap.
 
     Ink lines come back with the frame's own pens, which are already the finest. Cel paint comes back as it
     was drawn, cut a pixel past its box so no seam shows. Marker strokes, whose nib would be several times too
@@ -784,10 +830,13 @@ def draw_details(image: torch.Tensor, parts: list, palette: torch.Tensor, drawer
     shrink = _can_shrink()
     out = []
     boxes = [p.box if isinstance(p, Part) else tuple(p) for p in parts]
+    drawn_boxes: list = []
     for i, box in enumerate(boxes):
         if any(j != i and _within(box, other) >= 0.8 and (_within(other, box) < 0.8 or j < i)
                for j, other in enumerate(boxes)):
             continue
+        earlier = [b for b in drawn_boxes if _box_iou(b, box) > 0]   # what an earlier part drew is not drawn twice
+        drawn_boxes.append(box)
         bw, bh = box[2] - box[0], box[3] - box[1]
         if bw < 2 or bh < 2:
             continue
@@ -798,6 +847,8 @@ def draw_details(image: torch.Tensor, parts: list, palette: torch.Tensor, drawer
         bh_up, bw_up = big.shape[-2:]
         if drawer is draw_crop:                      # the default: shapes going on past the part get markers
             drawn, colour = _default_part(image, palette, box, (x0, y0, x1, y1), big, scale_up)
+            for other in earlier:
+                colour = clip_lines(colour, other, scale, keep_inside=False)
             out += colour
         else:
             drawn = drawer(big, palette)
@@ -816,8 +867,11 @@ def draw_details(image: torch.Tensor, parts: list, palette: torch.Tensor, drawer
             mapped.append(moved)
         cels = [line for line in mapped if line.kind in CELS]
         lines = [line for line in mapped if line.kind not in CELS]
-        out += clip_lines(lines, box, scale, keep_inside=True)
-        out += clip_lines(cels, (box[0] - 1, box[1] - 1, box[2] + 1, box[3] + 1), scale, keep_inside=True)
+        mine = clip_lines(lines, box, scale, keep_inside=True)
+        mine += clip_lines(cels, (box[0] - 1, box[1] - 1, box[2] + 1, box[3] + 1), scale, keep_inside=True)
+        for other in earlier:
+            mine = clip_lines(mine, other, scale, keep_inside=False)
+        out += mine
     return out
 
 
@@ -1036,4 +1090,4 @@ def follow(lines: list, part_box, before_frame: torch.Tensor, frame: torch.Tenso
 
 __all__ = ["KINDS", "REDRAW", "Part", "accents", "cel_shapes", "clip_lines", "clip_polyline", "clip_ring",
            "components", "detail_map", "draw_crop", "draw_details", "enlarge", "find_details", "fit_similarity",
-           "follow", "joining", "mask_rings", "merge", "move_box", "move_lines", "on_board", "track"]
+           "follow", "joining", "mask_rings", "merge", "move_box", "move_lines", "on_board", "small_shapes", "track"]

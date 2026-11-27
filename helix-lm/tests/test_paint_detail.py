@@ -15,6 +15,7 @@ from helix_lm.paint.detail import (
     clip_lines,
     clip_polyline,
     components,
+    draw_crop,
     draw_details,
     find_details,
     fit_similarity,
@@ -238,6 +239,42 @@ def test_the_check_finds_a_missing_eye_and_draws_it_again():
     again = score(fixed, image, palette)
     assert again["loss"] < missing["loss"] and box_error(again, eye.box) < 0.6 * box_error(missing, eye.box)
     assert set(score(fixed, image, palette)) >= {"error", "regions", "bare", "chamfer", "bad", "loss"}
+
+
+def test_a_character_is_checked_and_mended_over_its_background_without_touching_it():
+    image = face(0)
+    palette = markers([image], 8)
+    ground = torch.tensor(BACK)[:, None, None].expand(3, SIZE, SIZE).clone()
+    under = draw_picture(ground, palette)                        # the background art, drawn once
+
+    def cel(crop, colours):                                      # the character is cel paint: opaque
+        return draw_crop(crop, colours, 0.5)
+
+    cx, cy, _ = where(0)
+
+    ex, ey = eye_centre(0, 1)
+    yy, xx = torch.meshgrid(torch.arange(SIZE) + 0.5, torch.arange(SIZE) + 0.5, indexing="ij")
+
+    def mostly(line, centre, radii):                             # a cel shape by its area, a line by its points
+        if line.rings is not None:
+            place = ((xx - centre[0]) / radii[0]) ** 2 + ((yy - centre[1]) / radii[1]) ** 2 < 1.0
+            return float((coverage(line) * place).sum() / coverage(line).sum()) > 0.5
+        inside = ((line.points * SIZE - torch.tensor(centre)) / torch.tensor(radii)).pow(2).sum(-1) < 1.0
+        return float(inside.float().mean()) > 0.5
+
+    character = [line for line in cel(image, palette) if mostly(line, (cx, cy), (42.0, 48.0))]   # the head
+    broken = [line for line in character if not mostly(line, (ex, ey), (12.0, 11.0))]           # an eye missing
+    assert len(broken) < len(character)
+    alone, over = score(broken, image, palette), score(broken, image, palette, under=under)
+    assert alone["bare"] > 0.5 and over["bare"] < 0.05           # the background is there under it
+    assert bool(over["layer"][int(cy), int(cx)]) and not bool(over["layer"][5, 5])
+    eye = (ex - 10, ey - 9, ex + 10, ey + 9)
+    assert float(over["bad"][int(ey) - 6 : int(ey) + 6, int(ex) - 6 : int(ex) + 6].float().mean()) > 0.3
+    kept = list(under)
+    fixed = fix(broken, image, cel, palette, under=under)
+    again = score(fixed, image, palette, under=under)
+    assert again["loss"] < over["loss"] and box_error(again, eye) < 0.7 * box_error(over, eye)
+    assert under == kept and not any(line in fixed for line in under)   # the background is never changed
 
 
 def test_merge_needs_to_know_the_frame_and_keeps_lines_outside_the_parts():

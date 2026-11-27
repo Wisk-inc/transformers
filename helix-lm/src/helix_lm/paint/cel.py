@@ -31,12 +31,19 @@ How one frame is done (:func:`paint_frame`):
 1. :func:`regions`: the frame smoothed without blurring its edges, each pixel given the nearest colour of the
    palette in OKLab, neighbours voting so the borders do not fray, slivers and specks given to the part beside
    them;
-2. :func:`shade`: for every part its shadow and highlight, from the frame's own light and dark inside the part,
-   from a darker or lighter tone of the same colour beside it, or from normals and a light;
+2. :func:`shade`: what is background (flooded in from the edges of the picture across soft, small changes of
+   colour; it stops at the character's silhouette) and, for every part of the character, one shadow and one
+   highlight shape: from the darker and lighter tones of its colour the frame shows, from the frame's own light
+   and dark inside it, from normals and a light, or, where the frame shows it flat, from its silhouette blown
+   up into a rounded relief;
 3. the borders between parts are followed from junction to junction and smoothed once, keeping real corners
    (:func:`outlines` does the same for a single mask); each cel shape is put together from them;
 4. :func:`line_art`: ink along the borders, joined through junctions into long strokes, heavy on the silhouette,
-   lighter inside, colour trace lines on the shadows, and the thin dark details of the frame (an eye, a mouth).
+   lighter inside, colour trace lines on the shadows, and the small dark marks of the frame the paint lost (an
+   eye, a mouth).
+
+All of it is rules, nothing is learned, and the frames are judged one at a time: the same palette keeps the
+colours of an animation steady, but the shapes of one frame are found again in the next, not carried over.
 """
 
 from __future__ import annotations
@@ -134,18 +141,21 @@ def _turn_hue(lab: torch.Tensor, toward: float, share: float, most: float) -> to
 
 
 def shadow_colour(colour: torch.Tensor) -> torch.Tensor:
-    """The anime shadow (kage) of sRGB colours ``(..., 3)``: darker, a little more saturated, the hue turned toward
-    blue and purple. A white or a grey gets a cool lavender shadow."""
+    """The anime shadow (kage) of sRGB colours ``(..., 3)``: about a tenth darker in OKLab lightness, the hue
+    turned a little toward blue and purple, a dull colour made more saturated (a strong one is saturated enough
+    once it is darker). A white or a grey gets a cool lavender shadow."""
     lab = srgb_to_oklab(colour.float())
     chroma = torch.hypot(lab[..., 1], lab[..., 2])
-    turned = _turn_hue(lab, SHADOW_HUE, 0.12, math.radians(14))
-    grow = (1.12 + 0.004 / chroma.clamp(min=0.01))[..., None]
-    turned[..., 1:] = turned[..., 1:] * grow.clamp(max=1.5)
+    turned = _turn_hue(lab, SHADOW_HUE, 0.1, math.radians(8))
+    grow = 1.0 + 0.3 * (1.0 - chroma / 0.12).clamp(min=0.0)
+    most = torch.maximum(torch.full_like(chroma, 0.15), 0.85 * chroma)
+    new = torch.minimum(chroma * grow, most)
+    turned[..., 1:] = turned[..., 1:] * (new / chroma.clamp(min=1e-6))[..., None]
     grey = ((0.05 - chroma) / 0.05).clamp(0.0, 1.0)            # how neutral it is: a tint of its own
-    tint = 0.028 * torch.stack([torch.full_like(chroma, math.cos(SHADOW_HUE)),
-                                torch.full_like(chroma, math.sin(SHADOW_HUE))], -1)
+    tint = 0.03 * torch.stack([torch.full_like(chroma, math.cos(SHADOW_HUE)),
+                               torch.full_like(chroma, math.sin(SHADOW_HUE))], -1)
     turned[..., 1:] = turned[..., 1:] * (1 - grey[..., None]) + tint * grey[..., None]
-    turned[..., 0] = lab[..., 0] * 0.8
+    turned[..., 0] = lab[..., 0] - torch.minimum(torch.full_like(chroma, 0.11), 0.3 * lab[..., 0])
     return _to_srgb(turned)
 
 
@@ -158,14 +168,20 @@ def light_colour(colour: torch.Tensor) -> torch.Tensor:
     return _to_srgb(turned)
 
 
+def _hue_gap(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """How far apart the hues of OKLab colours ``(..., 3)`` are, radians 0..pi."""
+    return (torch.remainder(torch.atan2(x[..., 2], x[..., 1]) - torch.atan2(y[..., 2], y[..., 1]) + math.pi,
+                            2 * math.pi) - math.pi).abs()
+
+
 def _family(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    """Where OKLab colour ``y`` is a darker or lighter tone of colour ``x`` (both ``(..., 3)``): the same hue and
-    about the same saturation (or both near grey), and clearly but not wholly lighter or darker."""
+    """Where OKLab colour ``y`` is a darker or lighter tone of colour ``x`` (both ``(..., 3)``), as a shadow or
+    a highlight of one material is: the same hue and about the same saturation (chroma for its lightness), or
+    both near grey; and clearly but not wholly lighter or darker."""
     cx, cy = torch.hypot(x[..., 1], x[..., 2]), torch.hypot(y[..., 1], y[..., 2])
-    gap = torch.remainder(torch.atan2(x[..., 2], x[..., 1]) - torch.atan2(y[..., 2], y[..., 1]) + math.pi,
-                          2 * math.pi) - math.pi
-    ratio = torch.maximum(cx, cy) / torch.minimum(cx, cy).clamp(min=1e-3)
-    hue = (cx > 0.04) & (cy > 0.04) & (gap.abs() < math.radians(28)) & (ratio < 2.2)
+    sx, sy = cx / x[..., 0].clamp(min=0.05), cy / y[..., 0].clamp(min=0.05)
+    ratio = torch.maximum(sx, sy) / torch.minimum(sx, sy).clamp(min=1e-3)
+    hue = (cx > 0.04) & (cy > 0.04) & (_hue_gap(x, y) < math.radians(25)) & (ratio < 1.7)
     grey = (cx < 0.045) & (cy < 0.045)
     step = (x[..., 0] - y[..., 0]).abs()
     return (hue | grey) & (step > 0.025) & (step < 0.32)
@@ -173,11 +189,12 @@ def _family(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 def palette_for(frames, count: int = 16, *, side: int = 256, least: float = 0.0003) -> torch.Tensor:
     """The colours to paint a set of frames (sRGB ``(3, H, W)`` each) with: at most ``count`` distinct colours
-    (sRGB ``(K, 3)``, light to dark), each covering at least ``least`` of the frames' area. Colours are picked
-    from the flat parts of the frames (the pixels on an edge are a mix of the colours either side and pick none,
-    unless one is the lightest or darkest of its neighbours: the middle of a small dot), with small but clearly
-    different colours counted more than their area alone (an eye, a nose), and whites kept as colours of their
-    own. The same palette paints every frame of an animation."""
+    (sRGB ``(K, 3)``, light to dark), each covering at least ``least`` of the frames' area. More colours than
+    that are found first (k-means in OKLab), then the two most alike are made one until ``count`` are left.
+    Colours are picked from the flat parts of the frames (the pixels on an edge are a mix of the colours either
+    side and pick none, unless one is the lightest or darkest of its neighbours: the middle of a small dot), with
+    small but clearly different colours counted more than their area alone (an eye, a nose), and whites kept as
+    colours of their own. The same palette paints every frame of an animation."""
     pixels = []
     for frame in frames:
         f = frame.float().clamp(0.0, 1.0)
@@ -198,7 +215,7 @@ def palette_for(frames, count: int = 16, *, side: int = 256, least: float = 0.00
     means = torch.zeros(len(bins), 3).index_add_(0, owner, x) / counts[:, None]
     weight = counts.float() ** 0.6                # small colours count for more than their area alone
     centres = means[counts.argmax()][None]
-    for _ in range(1, min(count, len(means))):
+    for _ in range(1, min(count + 8, len(means))):
         d = _distance(means[:, None], centres[None]).min(1).values
         score = weight * d ** 2
         if float(score.max()) <= 0:
@@ -219,11 +236,12 @@ def palette_for(frames, count: int = 16, *, side: int = 256, least: float = 0.00
         apart = _distance(colour[:, None], colour[keep][None]).min(1).values
         keep |= (share >= least / 8) & (apart > 0.09)
     colour, share = colour[keep], share[keep]
-    # colours that came out nearly the same are one colour
+    # the two most alike colours become one, until there are ``count`` left and no two nearly the same: a
+    # gradient loses a band before a small colour unlike the rest is lost
     while len(colour) > 1:
         d = _distance(colour[:, None], colour[None]) + torch.eye(len(colour)) * 9.0
         i, j = divmod(int(d.argmin()), len(colour))
-        if float(d[i, j]) >= 0.035:
+        if float(d[i, j]) >= 0.035 and len(colour) <= count:
             break
         a, b = (i, j) if share[i] >= share[j] else (j, i)
         colour[a] = (colour[a] * share[a] + colour[b] * share[b]) / (share[a] + share[b])
@@ -276,6 +294,23 @@ def _adjacency(ids: torch.Tensor, n: int) -> tuple[torch.Tensor, torch.Tensor, t
     keep = a != b
     key, count = torch.unique(a[keep] * n + b[keep], return_counts=True)
     return key // n, key % n, count
+
+
+def _steps(ids: torch.Tensor, n: int, lab: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor,
+                                                                   torch.Tensor]:
+    """Like :func:`_adjacency`, with how sharply the frame ``lab (3, H, W)`` (OKLab, smoothed) changes across
+    each border: the mean OKLab step from one pixel to the next over it. A painted gradient changes softly
+    across the border between two of its bands; the silhouette of a thing is a crisp step."""
+    wt = WEIGHT[:, None, None]
+    sx = ((lab[:, :, 1:] - lab[:, :, :-1]) * wt).norm(dim=0)
+    sy = ((lab[:, 1:] - lab[:, :-1]) * wt).norm(dim=0)
+    a = torch.cat([ids[:, :-1].flatten(), ids[:, 1:].flatten(), ids[:-1].flatten(), ids[1:].flatten()])
+    b = torch.cat([ids[:, 1:].flatten(), ids[:, :-1].flatten(), ids[1:].flatten(), ids[:-1].flatten()])
+    step = torch.cat([sx.flatten(), sx.flatten(), sy.flatten(), sy.flatten()])
+    keep = a != b
+    key, inverse, count = torch.unique(a[keep] * n + b[keep], return_inverse=True, return_counts=True)
+    total = torch.zeros(len(key)).index_add_(0, inverse, step[keep])
+    return key // n, key % n, count, total / count.float()
 
 
 def _merge_small(labels: torch.Tensor, least: float, pigments: torch.Tensor | None = None, rounds: int = 8) -> \
@@ -684,10 +719,11 @@ def cel_shape(rings: list, colour, scale: float, marker: int = -1, kind: str = "
 # -------------------------------------------------------------------------------------------- shading --
 @dataclass
 class Shading:
-    """The paint of every part of a frame: which region each pixel is on, and which paint (tone) it takes. Each
-    region has one base tone (``cel``) and may have shadow tones (``cel-shadow``) and highlight tones
-    (``cel-light``) on it; ``colour``, ``marker`` (the palette colour it belongs to), ``kind`` and ``region``
-    describe each tone. ``back`` says which regions are background."""
+    """The paint of every part of a frame: which region each pixel is on, and which paint (tone) it takes. A
+    region is numbered as one of the frame's :func:`parts` (its base part; a shadow tone part beside it belongs
+    to it), and ``back``, indexed by those numbers, says which are background. Each region has one base tone
+    (``cel``) and may have one shadow tone (``cel-shadow``) and one highlight tone (``cel-light``) on it;
+    ``colour``, ``marker`` (the palette colour it belongs to), ``kind`` and ``region`` describe each tone."""
 
     regions: torch.Tensor      # (H, W) long
     tones: torch.Tensor        # (H, W) long
@@ -717,15 +753,28 @@ class Shading:
         return self.shadow & on, self.light & on
 
 
-def _backdrop(ids: torch.Tensor, n: int, lab: torch.Tensor, subject=None) -> torch.Tensor:
-    """Which parts are background ``(n,)``. A character is a compact group of parts in colours of its own, set
-    off from what is round it; the background is what is left. It starts from the large parts that reach the
-    edge of the picture, the very large parts (a twentieth of it or more) and the parts that stretch over most of
-    it (a pillar), and spreads from part to part across every border of some length where the colour changes
-    only a little or to a lighter or darker tone of itself (a glow in the sky, snow in the air, the lit side of
-    a pillar). It does not cross the silhouette of a character, where the colour jumps. Tiny parts almost wholly
-    inside the background are background too (a snowflake). With a ``subject`` mask ``(H, W)``, the parts
-    mostly outside it."""
+def _gentle(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Where two OKLab colours ``(..., 3)`` differ only a little: close, or the same hue and saturation in a
+    lighter or darker tone (the steps of a painted gradient)."""
+    cx, cy = torch.hypot(x[..., 1], x[..., 2]), torch.hypot(y[..., 1], y[..., 2])
+    ratio = torch.maximum(cx, cy) / torch.minimum(cx, cy).clamp(min=1e-3)
+    tone = (cx > 0.04) & (cy > 0.04) & (_hue_gap(x, y) < math.radians(20)) & (ratio < 1.5) & \
+        ((x[..., 0] - y[..., 0]).abs() < 0.25)
+    return (_distance(x, y) < 0.1) | tone
+
+
+def _backdrop(ids: torch.Tensor, n: int, lab: torch.Tensor, seen: torch.Tensor | None = None, subject=None) -> \
+        torch.Tensor:
+    """Which parts are background ``(n,)``. A character is a group of parts in colours of its own, set off from
+    what is round it; the background is what is left. It starts from the parts that reach the top or a side of
+    the picture (a character often stands on the bottom edge, or is cut off by it) and from long thin parts that
+    stretch over most of it (a pillar), and spreads from part to part across every border of some length where
+    the colour changes only a little (:func:`_gentle`: a glow in the sky, snow in the air, the dark side of a
+    pillar). It does not cross the silhouette of a character, where the colour jumps, nor (with the frame
+    ``seen (3, H, W)``, OKLab smoothed) a border the frame shows as a crisp edge unless the colours either side
+    are nearly the same: a shirt in nearly the colour of the sky behind it is still the character's. ``lab (n,
+    3)`` is the OKLab colour of each part. Tiny parts almost wholly inside the background are background too (a
+    snowflake). With a ``subject`` mask ``(H, W)``, the parts mostly outside it."""
     h, w = ids.shape
     flat = ids.flatten()
     area = torch.bincount(flat, minlength=n).float()
@@ -737,25 +786,45 @@ def _backdrop(ids: torch.Tensor, n: int, lab: torch.Tensor, subject=None) -> tor
         lo = torch.full((n,), 1 << 30).scatter_reduce(0, flat, c, "amin")
         hi = torch.full((n,), -1).scatter_reduce(0, flat, c, "amax")
         span.append((hi - lo + 1).float())
-    edge = torch.cat([ids[0], ids[-1], ids[:, 0], ids[:, -1]])
-    back = ((torch.bincount(edge, minlength=n) > 0) & (area >= 0.002 * h * w)) | (area >= 0.05 * h * w) | \
-        (span[0] >= 0.6 * w) | (span[1] >= 0.6 * h)
+    long = torch.maximum(span[0] / w, span[1] / h)
+    thin = (long >= 0.45) & (torch.minimum(span[0], span[1]) <= 0.25 * torch.maximum(span[0], span[1]))
+    edge = torch.cat([ids[0], ids[:, 0], ids[:, -1]])
+    back = ((torch.bincount(edge, minlength=n) > 0) & (area >= 0.002 * h * w)) | thin
     if n < 2:
         return back
-    a, b, count = _adjacency(ids, n)
+    if seen is None:
+        a, b, count = _adjacency(ids, n)
+        soft = torch.ones(len(a), dtype=torch.bool)
+    else:
+        a, b, count, step = _steps(ids, n, seen)
+        gap = _distance(lab[a], lab[b])
+        soft = (step < 0.45 * gap) | (gap < 0.05)
     border = torch.zeros(n).index_add_(0, a, count.float())
-    gentle = ((_distance(lab[a], lab[b]) < 0.16) | _family(lab[a], lab[b])) & \
-        (count.float() >= torch.minimum(0.1 * border[b], torch.full_like(border[b], 12.0)))
-    a, b = a[gentle], b[gentle]
+    gentle = _gentle(lab[a], lab[b]) & soft & (count.float() >= torch.minimum(0.1 * border[b],
+                                                                              torch.full_like(border[b], 12.0)))
+    ga, gb = a[gentle], b[gentle]
     for _ in range(64):
         grow = torch.zeros(n, dtype=torch.bool)
-        grow[b[back[a]]] = True
-        if bool((grow & ~back).sum() == 0):
+        grow[gb[back[ga]]] = True
+        if not bool((grow & ~back).any()):
             break
         back = back | grow
-    a, b, count = _adjacency(ids, n)
     share = torch.zeros(n).index_add_(0, a, count.float() * back[b].float()) / border.clamp(min=1)
-    return back | ((share >= 0.97) & (area < 0.001 * h * w))
+    back = back | ((share >= 0.97) & (area < 0.001 * h * w))
+    # a character is a group of touching parts: a small group far smaller than the largest is a bit of the
+    # background the flood went round (a line on a wall, a clump of snow)
+    group = torch.arange(n)
+    both = ~back[a] & ~back[b]
+    ga, gb = a[both], b[both]
+    for _ in range(n):
+        low = group.clone().scatter_reduce_(0, ga, group[gb], "amin")
+        low = low[low]
+        if torch.equal(low, group):
+            break
+        group = low
+    size = torch.zeros(n).index_add_(0, group, area * (~back).float())
+    keep = size >= min(0.2 * float(size.max()), 0.01 * h * w)
+    return back | ~keep[group]
 
 
 def _relief(mask: torch.Tensor, to_light: torch.Tensor, radius: float) -> torch.Tensor:
@@ -808,58 +877,87 @@ def _tidy(mask: torch.Tensor, ids: torch.Tensor, size: int, least: float) -> tor
     return out & (area[pieces] >= least)
 
 
+def _tone_parts(ids: torch.Tensor, n: int, paint: torch.Tensor, base: torch.Tensor, area: torch.Tensor,
+                back: torch.Tensor):
+    """Which parts of a character are a darker or lighter tone of the colour beside them (:func:`_family`), so
+    together one region with its shadow and highlight rather than regions of their own: ``(region (n,), role
+    (n,))``, the region each part is on and its role there (0 the base, 1 a shadow tone, 2 a highlight tone).
+    Parts are grouped across borders between tones of one colour; the base of a group is the colour with the
+    most area times chroma squared (the one that makes its look), every part of the group near its hue and
+    lightness is a tone of it, darker or lighter, and any other part (an iris among the tones of the skin)
+    stays a region of its own. ``paint (n,)`` is each part's palette number."""
+    region = torch.arange(n)
+    role = torch.zeros(n, dtype=torch.long)
+    if n < 2:
+        return region, role
+    a, b, _ = _adjacency(ids, n)
+    kin = _family(base[a], base[b]) & ~back[a] & ~back[b]
+    ka, kb = a[kin], b[kin]
+    group = torch.arange(n)
+    for _ in range(n):
+        low = group.clone().scatter_reduce_(0, ka, group[kb], "amin")
+        low = low[low]
+        if torch.equal(low, group):
+            break
+        group = low
+    k = int(paint.max()) + 1
+    # the base is the colour that most makes the look of the group: much of it, and vivid (red hair is
+    # painted red with a darker shadow, even where the frame shows more of the dark)
+    vivid = (base[:, 1] ** 2 + base[:, 2] ** 2) + 0.002
+    used = torch.zeros(n * k).index_add_(0, group * k + paint, area * vivid).view(n, k)
+    main = used.argmax(1)
+    for g in torch.unique(group[torch.bincount(group, minlength=n)[group] > 1]).tolist():
+        members = torch.nonzero(group == g).flatten()
+        colour = int(main[g])
+        own = members[paint[members] == colour]
+        root = int(own[area[own].argmax()])
+        main_lab = base[own[0]]
+        grey = float(torch.hypot(main_lab[1], main_lab[2])) < 0.045
+        for s in members.tolist():
+            c = int(paint[s])
+            near = grey or float(_hue_gap(main_lab, base[s])) < math.radians(35)
+            if c == colour:
+                region[s] = root
+            elif near and 0.02 < abs(float(base[s, 0] - main_lab[0])) < 0.3:
+                region[s] = root
+                role[s] = 1 if float(base[s, 0]) < float(main_lab[0]) else 2
+    return region, role
+
+
 def shade(image: torch.Tensor, labels: torch.Tensor, palette: torch.Tensor, normals: torch.Tensor | None = None,
           light: torch.Tensor | None = None, *, detail: float = 0.5, subject=None, relief: bool = True) -> Shading:
     """The shadow (kage) and the highlight (hi) of every region of a frame. ``image (3, H, W)`` is the frame
     (sRGB), ``labels (H, W)`` its regions as palette numbers (:func:`regions`), ``palette (K, 3)`` the colours.
 
-    Background regions (see :class:`Shading`) are painted flat. On a character, a part painted in a darker (or
-    lighter) tone of the colour of the part beside it is that part's shadow (or highlight), in the colour the
-    frame shows. Otherwise the shadow is where the frame is clearly darker than the region's palette colour (two
-    levels with hysteresis, made into hard-edged shapes of a least size), and the highlight where it is clearly
+    Background regions (see :class:`Shading`) are painted flat. On a character, the parts painted in a darker
+    (or lighter) tone of the colour of the part beside them are that part's shadow (or highlight), in one colour:
+    the tone the frame shows most. Where a region has no such tones, the shadow is where the frame is clearly
+    darker than the region's palette colour (two levels with hysteresis) and the highlight where it is clearly
     lighter. A part of the character the frame shows flat gets, with ``relief``, the shadow its figure would
-    have blown up into a rounded relief (:func:`_relief`): a hard-edged band along the side away from the light.
-    With ``normals (3, H, W)`` (unit vectors, x right, y down, z toward the viewer) the shadow is instead where
-    the surface turns from ``light (3,)`` (toward the light; from the upper left and in front by default):
-    Lambert below a threshold, and the highlight where the light is reflected toward the viewer. A
-    shadow takes the palette's tone of the colour nearest to what the frame shows there, or else the colour
-    made darker, more saturated and bluer (:func:`shadow_colour`); a highlight lighter and warmer
+    have blown up into a rounded relief (:func:`_relief`): a band along the side away from the light. With
+    ``normals (3, H, W)`` (unit vectors, x right, y down, z toward the viewer) the shadow is instead where the
+    surface turns from ``light (3,)`` (toward the light; from the upper left and in front by default): Lambert
+    below a threshold; and the highlight where the light is reflected toward the viewer. Every shadow and
+    highlight is made a clean hard-edged shape of a least size. A shadow found from the light of the frame takes
+    the palette's tone of its colour nearest to what the frame shows there, or else the colour made darker, a
+    little bluer and (if dull) more saturated (:func:`shadow_colour`); a highlight lighter and warmer
     (:func:`light_colour`)."""
     image = image.float().clamp(0.0, 1.0)
     labels = torch.as_tensor(labels).long()
     h, w = labels.shape
     ids, n = parts(labels)
     pigments = srgb_to_oklab(palette.float())
-    flat_ids, flat_labels = ids.flatten(), labels.flatten()
-    paint = torch.zeros(n, dtype=torch.long).scatter_(0, flat_ids, flat_labels)
+    flat_ids = ids.flatten()
+    paint = torch.zeros(n, dtype=torch.long).scatter_(0, flat_ids, labels.flatten())
     base = pigments[paint]
     area = torch.bincount(flat_ids, minlength=n).float()
-    back = _backdrop(ids, n, base, subject)
-    region = torch.arange(n)
-    role = torch.zeros(n, dtype=torch.long)                # 0 base, 1 shadow, 2 highlight
-    if n > 1:
-        a, b, count = _adjacency(ids, n)
-        border = torch.zeros(n).index_add_(0, a, count.float())
-        kin = _family(base[a], base[b]) & ~back[a] & ~back[b] & (area[b] > area[a])
-        a_l, b_l, c_l = a[kin].tolist(), b[kin].tolist(), count[kin].tolist()
-        options: dict = {}
-        for x, y, c in zip(a_l, b_l, c_l, strict=True):
-            options.setdefault(x, []).append((c, y))
-        for s in sorted(options, key=lambda s: -float(area[s])):     # largest first: bases are settled first
-            best, got = -1, 0.0
-            for c, r in options[s]:
-                top = int(region[r])
-                if top != r and not bool(_family(base[top], base[s])):
-                    continue
-                if c > got:
-                    best, got = top, c
-            if best >= 0 and got >= 0.3 * float(border[s]):
-                region[s] = best
-                role[s] = 1 if float(base[s, 0]) < float(base[best, 0]) else 2
-    reg = region[ids]
     lab = image_to_oklab(image)
-    base_px = base[region][ids].permute(2, 0, 1)            # the base colour of each pixel's region
-    fg = ~back[region][ids]
+    seen = _bilateral(lab)
+    back = _backdrop(ids, n, base, seen, subject)
+    region, role = _tone_parts(ids, n, paint, base, area, back)
+    reg = region[ids]
+    sub = role[ids]
+    fg = ~back[reg]
     has_tone = torch.zeros(n, dtype=torch.bool)
     has_tone[region[role > 0]] = True
     size = _odd(max(3.0, 0.008 * w * (1.5 - detail)))
@@ -876,37 +974,36 @@ def shade(image: torch.Tensor, labels: torch.Tensor, palette: torch.Tensor, norm
         nrm = nrm / nrm.norm(dim=0, keepdim=True).clamp(min=1e-6)
         lambert = (nrm * to_light[:, None, None]).sum(0)
         reflect = 2 * lambert * nrm[2] - to_light[2]          # the reflection toward the viewer (0, 0, 1)
-        dark_strong, dark_weak = lambert < 0.18, lambert < 0.3
-        bright_strong, bright_weak = reflect > 0.97, reflect > 0.93
-        allowed = fg
-        role[role > 0] = 0                                    # the shape of the light comes from the normals
+        shadow = _hysteresis((lambert < 0.18) & fg, (lambert < 0.3) & fg, reg)
+        lit = _hysteresis((reflect > 0.97) & fg, (reflect > 0.93) & fg, reg)
     else:
-        diff = _bilateral(lab)[0] - base_px[0]
-        dark_strong, dark_weak = diff < -0.07, diff < -0.035
-        bright_strong, bright_weak = diff > 0.1, diff > 0.05
+        diff = seen[0] - base[region][ids][..., 0]
         allowed = fg & ~has_tone[reg]
-    sub = role[ids]
-    shadow = _tidy(_hysteresis(dark_strong & allowed & inner, dark_weak & allowed & (sub == 0), reg), reg, size,
-                   least)
-    lit = _tidy(_hysteresis(bright_strong & allowed & inner, bright_weak & allowed & (sub == 0), reg), reg, size,
-                least / 2)
-    lit &= ~shadow
+        shadow = _hysteresis((diff < -0.07) & allowed & inner, (diff < -0.035) & allowed, reg)
+        lit = _hysteresis((diff > 0.1) & allowed & inner, (diff > 0.05) & allowed, reg)
+        # where the frame paints a region in tones of its colour, the shadow and the highlight are those tones,
+        # each smoothed over a few pixels into one clean shape (most of the pixels round it decide)
+        toned = fg & has_tone[reg]
+        if bool(toned.any()):
+            sigma = max(1.0, 0.005 * w * (1.5 - detail))
+            weight = gaussian_blur(toned.float(), sigma).clamp(min=1e-6)
+            shadow |= toned & (gaussian_blur((toned & (sub == 1)).float(), sigma) / weight > 0.5)
+            lit |= toned & (gaussian_blur((toned & (sub == 2)).float(), sigma) / weight > 0.5)
+    shadow = _tidy(shadow, reg, size, least)
+    lit = _tidy(lit, reg, size, least / 2) & ~shadow
     # a region mostly "in shadow" is only darker than its palette colour: it has no shadow of its own; and a
     # highlight is a small shape, not most of a part
-    rn = n
-    region_area = torch.bincount(reg.flatten(), minlength=rn).float().clamp(min=1)
-    for m, most in ((shadow, 0.6), (lit, 0.3)):
-        share = torch.bincount(reg[m], minlength=rn).float() / region_area
+    region_area = torch.bincount(reg.flatten(), minlength=n).float().clamp(min=1)
+    for m, most in ((shadow, 0.6), (lit, 0.35)):
+        share = torch.bincount(reg[m], minlength=n).float() / region_area
         m &= share[reg] < most
     if relief and normals is None and bool(fg.any()):
         # a part of the character the frame shows flat: shaded as the rounded figure would be
-        flat = torch.ones(rn, dtype=torch.bool)
+        flat = torch.ones(n, dtype=torch.bool)
         flat[reg[shadow]] = False
-        flat &= ~has_tone
-        lambert = _relief(fg, to_light, 0.03 * w)
-        more = _tidy((lambert < 0.3) & fg & flat[reg], reg, size, least)
-        shadow |= more & ~lit
-    # the tones: one base for each region, one for each tone part beside it, one shadow and one highlight
+        more = _tidy((_relief(fg, to_light, 0.03 * w) < 0.3) & fg & flat[reg] & ~lit, reg, size, least)
+        shadow |= more
+    # the colour of each region's shadow and highlight: the tone the frame shows most there
     colour, marker, kind, owner = [], [], [], []
     base_tone = torch.full((n,), -1, dtype=torch.long)
     for r in torch.nonzero(region == torch.arange(n)).flatten().tolist():
@@ -915,37 +1012,35 @@ def shade(image: torch.Tensor, labels: torch.Tensor, palette: torch.Tensor, norm
         marker.append(int(paint[r]))
         kind.append("cel")
         owner.append(r)
-    tone_of_part = base_tone[region].clone()
-    for s in torch.nonzero(role > 0).flatten().tolist():
-        tone_of_part[s] = len(colour)
-        colour.append(palette[paint[s]].float())
-        marker.append(int(paint[s]))
-        kind.append("cel-shadow" if int(role[s]) == 1 else "cel-light")
-        owner.append(int(region[s]))
-    tones = tone_of_part[ids]
-    for m, name, make in ((shadow, "cel-shadow", shadow_colour), (lit, "cel-light", light_colour)):
+    tones = base_tone[reg]
+    for m, name, role_id, make in ((shadow, "cel-shadow", 1, shadow_colour), (lit, "cel-light", 2, light_colour)):
         if not bool(m.any()):
             continue
-        rs = torch.unique(reg[m])
-        seen_lab = torch.zeros(len(rs), 3)
-        got = torch.zeros(int(region.max()) + 1, dtype=torch.long)
-        got[rs] = torch.arange(len(rs))
-        k = got[reg[m]]
-        seen_lab.index_add_(0, k, lab[:, m].T)
-        seen_lab /= torch.bincount(k, minlength=len(rs)).float().clamp(min=1)[:, None]
-        tone_ids = torch.full((int(region.max()) + 1,), -1, dtype=torch.long)
-        for i, r in enumerate(rs.tolist()):
-            mine = paint[r]
-            made = make(palette[mine].float())
-            # the palette's own tone of this colour, when it is nearly what the frame shows here
-            gap = _distance(pigments, seen_lab[i])
-            pick = int(gap.argmin())
-            if pick != int(mine) and float(gap[pick]) < 0.05 and bool(_family(pigments[mine], pigments[pick])) and \
-                    (float(pigments[pick, 0]) < float(pigments[mine, 0])) == (name == "cel-shadow"):
-                made = palette[pick].float()
+        k = len(palette)
+        used = torch.bincount(reg[m] * k + labels[m], minlength=n * k).view(n, k).float()
+        mean = torch.zeros(n, 3).index_add_(0, reg[m], seen[:, m].T) / used.sum(1).clamp(min=1)[:, None]
+        tone_ids = torch.full((n,), -1, dtype=torch.long)
+        for r in torch.nonzero(used.sum(1) > 0).flatten().tolist():
+            mine = int(paint[r])
+            counts = used[r].clone()
+            counts[mine] = 0
+            tone_of = [int(i) for i in torch.nonzero(counts > 0).flatten().tolist()
+                       if bool(_family(pigments[mine], pigments[i]))
+                       and (float(pigments[i, 0]) < float(pigments[mine, 0])) == (role_id == 1)]
+            if tone_of:
+                pick = max(tone_of, key=lambda i: float(counts[i]))
+                made, mark = palette[pick].float(), pick
+            else:
+                # the palette's own tone of this colour, when it is nearly what the frame shows here
+                gap = _distance(pigments, mean[r])
+                pick = int(gap.argmin())
+                made, mark = make(palette[mine].float()), mine
+                if pick != mine and float(gap[pick]) < 0.05 and bool(_family(pigments[mine], pigments[pick])) and \
+                        (float(pigments[pick, 0]) < float(pigments[mine, 0])) == (role_id == 1):
+                    made, mark = palette[pick].float(), pick
             tone_ids[r] = len(colour)
             colour.append(made)
-            marker.append(int(mine))
+            marker.append(mark)
             kind.append(name)
             owner.append(r)
         tones = torch.where(m, tone_ids[reg], tones)
@@ -963,7 +1058,7 @@ def _flat_shading(labels: torch.Tensor, palette: torch.Tensor | None, image: tor
         lab = image_to_oklab(image.float().clamp(0, 1)).reshape(3, -1).T
         mean = torch.zeros(n, 3).index_add_(0, flat, lab) / torch.bincount(flat, minlength=n).float()[:, None]
         colour = _to_srgb(mean)
-    back = _backdrop(ids, n, srgb_to_oklab(colour), subject)
+    back = _backdrop(ids, n, srgb_to_oklab(colour), _bilateral(image_to_oklab(image.float().clamp(0, 1))), subject)
     return Shading(ids, ids.clone(), colour, paint, ("cel",) * n, torch.arange(n), back)
 
 
@@ -1034,8 +1129,6 @@ def _strokes(bd: Borders, style: np.ndarray, key: list, pressure: np.ndarray, le
             if prev is None or prev[0] == c:
                 break
             cur, enter = prev[0], 1 - prev[1]
-        closed = link.get((cur, enter)) is not None and link[(cur, enter)][0] == c and cur != c or \
-            (cur == c and link.get((c, 0)) is not None)
         seq = []
         while cur not in done:
             done.add(cur)
@@ -1044,13 +1137,14 @@ def _strokes(bd: Borders, style: np.ndarray, key: list, pressure: np.ndarray, le
             if nxt is None:
                 break
             cur, enter = nxt
+        last, last_enter = seq[-1]
+        closed = len(seq) > 1 and link.get((last, 1 - last_enter)) == seq[0]
         pts, prs = [], []
         for i, (cc, ee) in enumerate(seq):
             p, q = piece(cc, ee)
             pts.append(p if i == 0 else p[1:])
             prs.append(q if i == 0 else q[1:])
         p, q = np.concatenate(pts), np.concatenate(prs)
-        closed = closed and len(seq) > 1 and np.hypot(*(p[0] - p[-1])) < 1e-6
         if closed:
             p, q = p[:-1], q[:-1]
         out.append((p, q, closed, key[c]))
@@ -1183,7 +1277,7 @@ def line_art(labels: torch.Tensor, image: torch.Tensor, *, palette: torch.Tensor
     dark_tone = torch.where(tone_lab[ta, 0] < tone_lab[tb, 0], ta, tb)
     dark_base = torch.where(la[:, 0] < lb[:, 0], base_tone[ra], base_tone[rb])
     traced = torch.where(same, dark_tone, dark_base)
-    tones_dark = [tuple(c) for c in _darker(shading.colour).tolist()]
+    tones_dark = [tuple(c) for c in _darker(shading.colour, 0.05).tolist()]
     back_dark = [tuple(c) for c in _darker(shading.colour, 0.06).tolist()]
     key: list = []
     for i, st in enumerate(style.tolist()):
@@ -1252,7 +1346,7 @@ def cels(shading: Shading, bd: Borders, scale: float, *, background: bool = True
 
 def paint_frame(image: torch.Tensor, palette: torch.Tensor | None = None, *, normals: torch.Tensor | None = None,
                 light: torch.Tensor | None = None, line_tool: str = "pen", detail: float = 0.5,
-                background: bool = True, trace_lines: bool = True, subject=None) -> list:
+                background: bool = True, trace_lines: bool = True, subject=None, relief: bool = True) -> list:
     """One frame ``image (3, H, W)`` (sRGB) inked and painted as an anime cel: cel paint (``cel`` base colours
     from ``palette``, ``cel-shadow`` and ``cel-light`` shapes; ``marker`` is the palette number) and line art
     with ``line_tool`` (``pen``, ``brush pen``), in the order a person draws them (:func:`helix_lm.paint.draw.order`:
@@ -1260,12 +1354,13 @@ def paint_frame(image: torch.Tensor, palette: torch.Tensor | None = None, *, nor
     width. Give the same ``palette`` (:func:`palette_for` of all frames) to every frame of an animation.
     ``normals`` and ``light`` shade from the shape of the surface (:func:`shade`); ``detail`` 0..1 keeps smaller
     parts; ``background`` False paints only the character; ``subject`` (an ``(H, W)`` mask) says where the
-    character is when the frame does not make it plain."""
+    character is when the frame does not make it plain; ``relief`` False leaves a part the frame shows flat
+    without a shadow; ``trace_lines`` False draws no colour trace lines."""
     image = image.float().clamp(0.0, 1.0)
     palette = palette_for([image]) if palette is None else palette.float()
     w = image.shape[-1]
     labels = regions(image, palette, detail=detail)
-    shading = shade(image, labels, palette, normals, light, detail=detail, subject=subject)
+    shading = shade(image, labels, palette, normals, light, detail=detail, subject=subject, relief=relief)
     bd = borders(shading.tones, len(shading.kind), sigma=_sigmas(shading))
     ink = line_art(labels, image, palette=palette, shading=shading, tool=line_tool, detail=detail,
                    background=background, trace_lines=trace_lines, bd=bd)
