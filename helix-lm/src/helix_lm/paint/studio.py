@@ -2,12 +2,13 @@
 """
 The making-of studio: a video of an animation being drawn by hand, frame after frame.
 
-What is seen is a desk from above. The board (a whiteboard, or a sheet of paper) is the largest thing and sits on
-the left; the tools lie in a tray on the right, each where it was put down, and the one in hand is missing from
-it. A hand holds the tool and draws every stroke of every frame, over a faint copy of the frame before (the
-lightbox). Along the top runs a slim exposure sheet: one cell for each frame of the animation, a thumbnail in the
-cells already drawn, a line through the cells a drawing is held for, the frame being drawn marked. At the end the
-finished animation is played.
+What is seen is a desk from above, as a camera over it sees it. The board (a whiteboard in its aluminium frame,
+or a sheet of paper) is the largest thing, on the left; beside it lie the tools in a tray, each where it was put
+down, the one in hand missing from it (the pens, a twin marker for each colour, the cel brush and a pot for each
+cel paint); beyond the tray, a print of the video frame being drawn from. A hand comes in from the right and
+draws every stroke: the background art first, if the animation has one (in about a third of the first frame's
+time), then every frame over the one before, which shows faintly through the new sheet as on a lightbox. Along
+the top runs a slim exposure sheet. At the end the hand goes and the finished animation plays.
 
 The design rules, and where they come from:
 
@@ -18,38 +19,46 @@ The design rules, and where they come from:
    Canatselis, "Spot the slop: a UI designer's guide to fixing AI defaults" (world.hey.com), and the 925 Studios
    and DEV Community write-ups on the purple gradient and Inter defaults. They are opinions of working designers,
    not studies, but they agree with each other.
-2. The work is the hero, the interface stays out of its way: neutral greys, one accent colour (the red of a
-   playhead) used for one thing only (where the drawing is now), crisp 1 px rules, square corners, everything on
-   an 8 px grid (at 1280 wide) and aligned to its edges.
+2. The work is the hero and the interface keeps out of its way: neutral greys, one accent colour (the red of a
+   playhead) used for one thing only (the frame being drawn), crisp 1 px rules, square corners, everything on an
+   8 px grid (at 1280 wide) and aligned to its edges. What is on the desk means something: the print beside the
+   tray is the frame the drawing is made from.
 3. The strip along the top is an exposure sheet, as in Toon Boom Harmony's Xsheet view ("designed to work like
    a traditional paper exposure sheet": the drawing in its cell, a held drawing shown by a line through the
-   cells it is held for, empty cells where nothing is exposed) and the instances and exposure cells of TVPaint's
-   timeline (doc.tvpaint.com). A background drawn once has its own cell, as a background has its own column on
-   an x-sheet. Cels are numbered as Clip Studio Paint's timeline numbers them.
-4. Two typefaces with two jobs: a plain grotesque for the few labels (short labels in capitals, as on a control
-   panel), and a monospaced face for numbers, so frame counts and timings do not jitter as they change.
-5. The physical things look physical, not drawn as icons: pens, markers, the cel brush and paint pots are
-   shaded objects in their real colours, with soft contact shadows; the light comes from the top left for all of
-   them, the hand included.
+   cells it is held for, empty cells where nothing is exposed yet) and the instances and exposure cells of
+   TVPaint's timeline (doc.tvpaint.com). The cells are numbered by frame of the video, as on a paper sheet; a
+   background drawn once has a cell of its own, as it has its own column on an x-sheet; the cell of the frame
+   being drawn fills in as it is drawn. A small counter and the frames a second, exposure and lines drawn are
+   read out beside it, as in Clip Studio Paint's timeline header (current frame, start and end).
+4. Two typefaces with two jobs: a plain grotesque (Pillow's own) for the few labels, short and in capitals as on
+   a control panel, and a monospaced face for numbers, so that counts do not jitter as they change.
+5. The physical things look physical, not drawn as icons: pens, markers, the brush and the pots are shaded
+   objects in their real colours with soft contact shadows, and one lamp, from the top left, lights all of them,
+   the hand included.
 
-The hand is a procedural 3D model, not a photograph and not a capture of a real hand: a right hand in a dynamic
-tripod grip (the tool pinched between the pads of the thumb and the index finger and resting on the side of the
-middle finger, the ring and little fingers curled under, as occupational therapists describe it). It is made of
-smooth signed-distance shapes, round cones for the forearm and the three segments of each finger and ellipsoids
-for the back of the hand, the ball of the thumb and the web between thumb and index, blended with a smooth
-maximum (Inigo Quilez, "smooth minimum" and "distance functions", iquilezles.org). Seen straight from above, each
-shape gives its height and its normal at every pixel of the hand's own box only, so it is fast. The skin is lit
-with wrapped diffuse light and a little red where the light turns to shadow, the cheap stand-in for light
-scattered under the skin (Simon Green, "Real-time approximations to subsurface scattering", GPU Gems, chapter
-16), a soft broad sheen, and darker creases where the shapes meet. Knuckles have creases, fingers have nails.
-The hand casts a soft shadow on the board, further off and softer the higher each part of it is, so the shadow
-moves away from the pen when it lifts.
+The hand is a procedural 3D model, not a photograph and not a capture of a real hand, and it looks like a well
+made rendering rather than like a filmed one. It is a right hand in a dynamic tripod grip (the tool pinched
+between the pads of the thumb and the index finger and resting on the side of the middle finger, the ring and
+little fingers curled under, as occupational therapists describe it), with the forearm and the cuff of a sleeve.
+It is made of smooth signed-distance shapes: round cones for the forearm and the three segments of each finger,
+ellipsoids for the back of the hand, the ball of the thumb and the web between thumb and index, blended into each
+other with a smooth maximum (Inigo Quilez, "smooth minimum" and "distance functions", iquilezles.org). Seen from
+above, each shape gives its height and its normal at every pixel, worked out only in the shape's own box, so it
+is fast. A little perspective makes what is nearer the camera look larger. The skin is lit with wrapped diffuse
+light and a little red where the light turns to shadow, the cheap stand-in for light scattered under the skin
+(Simon Green, "Real-time approximations to subsurface scattering", GPU Gems, chapter 16), a soft broad sheen,
+shadows the fingers and the pen cast on the hand, and darker creases where shapes crowd each other; its colour
+varies a little, knuckles have creases and are redder, finger tips have nails. The hand casts a soft shadow on
+the board, further off and softer the higher each part of it is, so the shadow parts from the point of the tool
+when it lifts.
 
 The motion: the point of the tool is exactly on the stroke being drawn, always. The hand turns about it and the
-forearm swings after it on damped springs, so they lag a little and overshoot when a stroke turns; the wrist turns
-a little with the direction of the stroke. A hand slows on a curve (:func:`helix_lm.paint.draw.timing`). Between
-strokes the tool lifts and travels in a low arc; to change tools the hand goes to the tray, puts one down and
-takes the next (a twin marker is only turned round for its other nib, a cel brush is dipped in the next pot).
+forearm swings after it on damped springs, and the back of the hand gives a little as the fingers do, so they lag
+and overshoot when a stroke turns; the wrist turns a little with the direction of the stroke. A hand slows on a
+curve (:func:`helix_lm.paint.draw.timing`). Between strokes the tool lifts and travels in a low arc; to change
+tools the hand goes to the tray, puts one down and takes the next (a twin marker is only turned round for its
+other nib, the cel brush is dipped in the next pot). It is a time-lapse, cut slower while lines are drawn than
+while colour goes on.
 
 Use :func:`making_of` for the video, or :func:`shots` for its pictures one by one.
 """
@@ -555,8 +564,8 @@ def hand_shapes(pose: Pose, unit: float, tool: str | None, colour, skin=SKIN_TON
     u = unit
     # the back of the hand (wide at the knuckles, narrow at the wrist), the ball of the thumb, the web between
     # thumb and index
-    palm = Blob(world((-0.690, -0.110, 0.150), 1.0), (0.300 * u, 0.180 * u, 0.070 * u), pose.yaw, back,
-                (0.27, -0.26), SKIN, 0, 0.06 * u, 0.24)
+    palm = Blob(world((-0.760, -0.110, 0.150), 1.0), (0.360 * u, 0.180 * u, 0.070 * u), pose.yaw, back,
+                (0.27, -0.26), SKIN, 0, 0.06 * u, 0.26)
     out.append(palm)
     out.append(Blob(world((-0.540, 0.170, 0.150), 1.0), (0.175 * u, 0.090 * u, 0.072 * u), pose.yaw - 0.40,
                     base, (0.12, 0.0), SKIN, 0, 0.06 * u))
@@ -572,7 +581,7 @@ def hand_shapes(pose: Pose, unit: float, tool: str | None, colour, skin=SKIN_TON
     def arm(d: float, z0: float) -> tuple:
         return (wrist[0] + ax * d * u, wrist[1] + ay * d * u, wrist[2] + (z0 + rise * d) * u)
 
-    out.append(Cone(arm(-0.3, 0.0), arm(0.45, 0.0), 0.130 * u, 0.170 * u, base, SKIN, 0, 0.22 * u, flat=0.72))
+    out.append(Cone(arm(-0.3, 0.0), arm(0.45, 0.0), 0.130 * u, 0.170 * u, base, SKIN, 0, 0.14 * u, flat=0.72))
     out.append(Cone(arm(0.45, 0.0), arm(0.9, 0.0), 0.170 * u, 0.190 * u, base, SKIN, 0, 0.0, flat=0.72))
     cloth = _lin((0.24, 0.25, 0.27))
     out.append(Cone(arm(0.62, 0.035), arm(0.74, 0.035), 0.215 * u, 0.222 * u, cloth * 1.12, CLOTH, 2))
@@ -1003,6 +1012,7 @@ class Studio:
         self.thumbs: dict = {}
         self.played: dict = {}
         self.backdrop: torch.Tensor | None = None            # the background drawn, for an animation without board()
+        self.lightbox: torch.Tensor | None = None            # how the drawing before darkens the new sheet
         self.live = None                                     # the thumbnail of the frame being drawn
         self.board_px: torch.Tensor | None = None            # the board as shown, bytes (bh, bw, 3)
         self.missing = "nothing yet"
@@ -1105,20 +1115,23 @@ class Studio:
         x0, y0, x1, y1 = max(0, x0), max(0, y0), min(self.bw, x1), min(self.bh, y1)
         return None if x1 <= x0 or y1 <= y0 else (x0, y0, x1, y1)
 
+    def _lit(self, canvas: torch.Tensor, box=None) -> torch.Tensor:
+        """A board canvas (linear), or the part of it in ``box``, on the lightbox: the drawing before shows
+        through the new sheet, faintly, wherever it differs from the bare board."""
+        if box is not None:
+            x0, y0, x1, y1 = box
+            canvas = canvas[:, y0:y1, x0:x1]
+        if self.lightbox is None:
+            return canvas
+        return canvas * (self.lightbox if box is None else self.lightbox[:, y0:y1, x0:x1])
+
     def _show(self, canvas: torch.Tensor, box=None) -> None:
         """Put a board canvas (linear), or the part of it in ``box``, on the picture."""
         if box is None:
-            self.board_px = _to_u8(canvas)
+            self.board_px = _to_u8(self._lit(canvas))
             return
         x0, y0, x1, y1 = box
-        self.board_px[y0:y1, x0:x1] = _to_u8(canvas[:, y0:y1, x0:x1])
-
-    def _clean(self, lines: list, frame: int) -> torch.Tensor:
-        """A sheet drawn again without the lightbox under it, the way the animation shows it."""
-        board = self._board(frame)
-        for line in lines:
-            board.draw(line)
-        return board.canvas
+        self.board_px[y0:y1, x0:x1] = _to_u8(self._lit(canvas, box))
 
     # ----------------------------------------------------------------------------------- the plan --
     def _between(self, before, want) -> str:
@@ -1397,7 +1410,7 @@ class Studio:
         out[y0: y0 + self.bh, x0: x0 + self.bw] = self.board_px
         if live is not None and box is not None:
             bx0, by0, bx1, by1 = box
-            out[y0 + by0: y0 + by1, x0 + bx0: x0 + bx1] = _to_u8(live[:, by0:by1, bx0:bx1])
+            out[y0 + by0: y0 + by1, x0 + bx0: x0 + bx1] = _to_u8(self._lit(live, box))
         if tip is not None and holding is not None:
             self._hand(out, tip, lift, holding)
         return out
@@ -1482,8 +1495,10 @@ class Studio:
         for phase in phases:
             frame, lines = phase.frame, phase.lines
             board = self._board(frame)
-            if frame >= 0 and last_clean is not None and self.onion > 0:     # the lightbox
-                board.canvas = board.canvas * (1.0 - self.onion) + last_clean * self.onion
+            self.lightbox = None
+            if frame >= 0 and last_clean is not None and self.onion > 0:     # the drawing before, under it
+                ratio = last_clean / board.canvas.clamp(min=1e-4)
+                self.lightbox = (1.0 + self.onion * (ratio - 1.0)).clamp(0.0, 1.0)
             self._show(board.canvas)
             self._reference(max(0, frame))
             self.live, last_live = None, -1e9
@@ -1514,7 +1529,7 @@ class Studio:
                 holding = holding_at(time)
                 bar = self._bar(frame, done, len(lines))
                 yield Shot(self.picture(live, box, tip, lift, holding, bar), time, frame, tip, doing, holding)
-            clean = self._clean(lines, frame)
+            clean = board.canvas                              # the lightbox is only shown: the board is clean
             self.thumbs["bg" if frame < 0 else frame] = self._thumb(clean)
             if frame < 0:
                 self.backdrop = clean
