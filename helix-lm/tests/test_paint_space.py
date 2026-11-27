@@ -84,7 +84,8 @@ def test_depth_finds_the_character_that_walks_on_the_spot():
         img[:, r < 16.0] = torch.tensor([0.95, 0.45, 0.1])[:, None]
         clip.append(img)
         masks.append(r < 18.0)
-        depth.append(torch.where(r < 18.0, 0.6 + 0.2 * (1 - (r / 18.0) ** 2).clamp(min=0).sqrt(), 0.1 + 0.2 * yy / 128))
+        ball = 0.6 + 0.2 * (1 - (r / 18.0) ** 2).clamp(min=0).sqrt()
+        depth.append(torch.where(r < 18.0, ball, 0.1 + 0.2 * yy / 128))           # nearer than the wall
     frames, truth, depth = torch.stack(clip), torch.stack(masks), torch.stack(depth)
     space = read_space(frames, depth)
     assert min(iou(space.character[t], truth[t]) for t in range(8)) > 0.9

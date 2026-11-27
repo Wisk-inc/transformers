@@ -73,6 +73,11 @@ def _identity() -> torch.Tensor:
     return torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 
 
+def _still(matrix: torch.Tensor) -> bool:
+    """Whether a camera does not move: then frames and plates are used as they are, not resampled."""
+    return bool(torch.allclose(matrix.float(), _identity(), rtol=0.0, atol=1e-6))
+
+
 def _look_up(image: torch.Tensor, points: torch.Tensor, mode: str = "bilinear") -> torch.Tensor:
     """``image (C, H, W)`` at ``points (2, h, w)`` (pixels): ``(C, h, w)``, the edge repeated outside."""
     hh, ww = image.shape[-2:]
@@ -586,39 +591,66 @@ def normals(depth: torch.Tensor, scale: float | None = None, smooth: int = 6) ->
     and the right side of a ball is ``(1, 0, 0)``-ish. ``scale`` is how many pixels toward the viewer one unit of
     depth is (by default a quarter of the picture's longer side, as relative depth has no true scale).
 
-    The slopes are smoothed (``smooth`` rounds) but not across an outline: where the depth jumps (a step much
-    larger than the slopes around it) neighbours are not mixed, and each pixel takes its slope from the side it
-    belongs to, so the edge of a character is not bent toward the background behind it.
+    The slopes are smoothed (``smooth`` rounds) but not across an outline. A depth model draws an outline as a
+    soft ramp; its middle pixels are first snapped to one side or the other, so the outline is a step. Where the
+    depth then jumps (a step more than twice the steps beside it) neighbours are not mixed, and each pixel takes
+    its slope from the side it belongs to, so the edge of a character is not bent toward the background behind
+    it, and the background round a character stays as flat as it is.
     """
     h, w = depth.shape
     scale = 0.25 * max(h, w) if scale is None else scale
     z = depth.float() * scale
-    dx, dy = z[:, 1:] - z[:, :-1], z[1:] - z[:-1]
-    slope = torch.zeros_like(z)
-    slope[:, :-1] += dx.abs()
-    slope[:, 1:] += dx.abs()
-    slope[:-1] += dy.abs()
-    slope[1:] += dy.abs()
-    around = gaussian_blur(slope / 4.0, 3.0)
-    jump_x = dx.abs() > 4.0 * torch.minimum(around[:, 1:], around[:, :-1]) + 0.5
-    jump_y = dy.abs() > 4.0 * torch.minimum(around[1:], around[:-1]) + 0.5
+
+    def slopes(z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        dx, dy = z[:, 1:] - z[:, :-1], z[1:] - z[:-1]
+        slope = torch.zeros_like(z)
+        slope[:, :-1] += dx.abs()
+        slope[:, 1:] += dx.abs()
+        slope[:-1] += dy.abs()
+        slope[1:] += dy.abs()
+        # the gentlest slope near by: what the surfaces on either side of an outline do
+        gentle = -F.max_pool2d(-gaussian_blur(slope / 4.0, 1.0)[None, None], 7, 1, 3)[0, 0]
+        return dx, dy, gentle
+
+    # a depth model draws an outline as a ramp two or three pixels wide; each pixel in the middle of such a
+    # ramp is snapped to the nearer of the two sides (toggle mapping), so the outline is a step and the sides
+    # keep their slopes (a pixel on the steep side of a ball is not in the middle of a step, and stays)
+    for _ in range(3):
+        _, _, gentle = slopes(z)
+        hi = F.max_pool2d(z[None, None], 3, 1, 1)[0, 0]
+        lo = -F.max_pool2d(-z[None, None], 3, 1, 1)[0, 0]
+        middle = torch.minimum(z - lo, hi - z) > 0.25 * (hi - lo)
+        edge = ((hi - lo) > 8.0 * gentle + 1.0) & middle
+        z = torch.where(edge, torch.where(z - lo < hi - z, lo, hi), z)
+    dx, dy, _ = slopes(z)
+
+    def spikes(d: torch.Tensor, dim: int) -> torch.Tensor:
+        """A jump: a step more than twice the steps on either side of it (a steep but smooth side of a ball
+        steepens gradually, and is not one)."""
+        a = d.abs()
+        zero = torch.zeros_like(a.narrow(dim, 0, 1))
+        before = torch.cat([zero, a.narrow(dim, 0, a.shape[dim] - 1)], dim)
+        after = torch.cat([a.narrow(dim, 1, a.shape[dim] - 1), zero], dim)
+        return a > 2.0 * torch.maximum(before, after) + 0.5
+
+    jump_x, jump_y = spikes(dx, 1), spikes(dy, 0)
     join_x, join_y = (~jump_x).float(), (~jump_y).float()
     z = _diffuse(z, join_x, join_y, max(1, smooth // 2))
     dx, dy = z[:, 1:] - z[:, :-1], z[1:] - z[:-1]
-    # each pixel's slope from the side it belongs to: the one-sided difference that does not cross a jump (the
-    # smaller one when neither does or both do)
-    fx = torch.cat([dx, dx[:, -1:]], 1)
-    bx = torch.cat([dx[:, :1], dx], 1)
-    fjx = torch.cat([jump_x, torch.ones(h, 1, dtype=torch.bool)], 1)
-    bjx = torch.cat([torch.ones(h, 1, dtype=torch.bool), jump_x], 1)
-    gx = torch.where(fjx & ~bjx, bx, torch.where(bjx & ~fjx, fx, torch.where(fx.abs() < bx.abs(), fx, bx)))
-    gx = torch.where(~fjx & ~bjx, 0.5 * (fx + bx), gx)
-    fy = torch.cat([dy, dy[-1:]], 0)
-    by = torch.cat([dy[:1], dy], 0)
-    fjy = torch.cat([jump_y, torch.ones(1, w, dtype=torch.bool)], 0)
-    bjy = torch.cat([torch.ones(1, w, dtype=torch.bool), jump_y], 0)
-    gy = torch.where(fjy & ~bjy, by, torch.where(bjy & ~fjy, fy, torch.where(fy.abs() < by.abs(), fy, by)))
-    gy = torch.where(~fjy & ~bjy, 0.5 * (fy + by), gy)
+
+    def one_sided(d: torch.Tensor, jump: torch.Tensor, dim: int) -> torch.Tensor:
+        """Each pixel's slope from the side it belongs to: the one-sided difference that does not cross a jump,
+        the mean of the two where neither does; with a jump on both sides (a pixel left alone on an outline)
+        the slope across is not known and is taken as flat."""
+        first, last = d.narrow(dim, 0, 1), d.narrow(dim, d.shape[dim] - 1, 1)
+        edge = torch.ones_like(jump.narrow(dim, 0, 1))
+        ahead, behind = torch.cat([d, last], dim), torch.cat([first, d], dim)
+        ahead_jump, behind_jump = torch.cat([jump, edge], dim), torch.cat([edge, jump], dim)
+        g = torch.where(ahead_jump, behind, ahead)
+        g = torch.where(~ahead_jump & ~behind_jump, 0.5 * (ahead + behind), g)
+        return torch.where(ahead_jump & behind_jump, torch.zeros_like(g), g)
+
+    gx, gy = one_sided(dx, jump_x, 1), one_sided(dy, jump_y, 0)
     gx = _diffuse(gx, join_x, join_y, smooth)
     gy = _diffuse(gy, join_x, join_y, smooth)
     n = torch.stack([-gx, -gy, torch.ones_like(gx)])
@@ -661,13 +693,17 @@ def light_direction(image: torch.Tensor, normals: torch.Tensor, mask: torch.Tens
     weight = torch.ones_like(y)
 
     def best(directions: torch.Tensor) -> tuple[torch.Tensor, float]:
-        s = (n @ directions.T).clamp(min=0.0)                       # (N, K)
-        sw = weight.sum()
-        ms = (weight[:, None] * s).sum(0) / sw
-        my = (weight * y).sum() / sw
-        vs = (weight[:, None] * (s - ms) ** 2).sum(0)
-        cs = (weight[:, None] * (s - ms) * (y - my)[:, None]).sum(0)
-        gain = torch.where((vs > 1e-9) & (cs > 0), cs * cs / vs.clamp(min=1e-12), torch.zeros_like(vs))
+        """The direction whose shading explains the most of the brightness (a few hundred at a time)."""
+        nf, wf = n.float(), weight.float()
+        sw = wf.sum()
+        centred = wf * (y.float() - (wf * y.float()).sum() / sw)
+        gains = []
+        for part in directions.float().split(512):
+            s = (nf @ part.T).clamp(min=0.0)                        # (N, K)
+            s = s - (wf @ s) / sw
+            vs, cs = wf @ (s * s), centred @ s
+            gains.append(torch.where((vs > 1e-9) & (cs > 0), cs * cs / vs.clamp(min=1e-12), torch.zeros_like(vs)))
+        gain = torch.cat(gains)
         k = int(gain.argmax())
         return directions[k], float(gain[k])
 
@@ -699,20 +735,6 @@ def light_direction(image: torch.Tensor, normals: torch.Tensor, mask: torch.Tens
 
 
 # ----------------------------------------------------------------------------------------------- layers --
-def _otsu(values: torch.Tensor, bins: int = 64) -> float:
-    lo, hi = float(values.min()), float(values.max())
-    if hi - lo < 1e-9:
-        return hi
-    hist = torch.histc(values.float(), bins, lo, hi).double()
-    p = hist / hist.sum()
-    centres = torch.linspace(lo, hi, bins, dtype=torch.float64)
-    w0 = p.cumsum(0)
-    m0 = (p * centres).cumsum(0)
-    mt = m0[-1]
-    between = (mt * w0 - m0) ** 2 / (w0 * (1 - w0)).clamp(min=1e-12)
-    return float(centres[int(between[:-1].argmax())])
-
-
 def _pop_out(depth: torch.Tensor, width: int) -> torch.Tensor:
     """How much nearer each pixel of ``depth (H, W)`` is than the background behind it: ``depth`` less its
     opening by a square ``width`` pixels wide (what is narrower than that and nearer than round it is taken
@@ -725,7 +747,7 @@ def _pop_out(depth: torch.Tensor, width: int) -> torch.Tensor:
     sh, sw = small.shape[-2:]
     k = 2 * r + 1
     padded = F.pad(small, (2 * r, 2 * r, 2 * r, 2 * r), mode="replicate")
-    low = -F.max_pool2d(-F.max_pool2d(-padded, (1, k), 1, (0, r)), (k, 1), 1, (r, 0))
+    low = -F.max_pool2d(F.max_pool2d(-padded, (1, k), 1, (0, r)), (k, 1), 1, (r, 0))
     low = F.max_pool2d(F.max_pool2d(low, (1, k), 1, (0, r)), (k, 1), 1, (r, 0))[..., 2 * r : 2 * r + sh,
                                                                                  2 * r : 2 * r + sw]
     low = F.avg_pool2d(low, 3, 1, 1, count_include_pad=False)
@@ -824,19 +846,27 @@ def separate(frames: torch.Tensor, flows: torch.Tensor | None = None, depth: tor
     The moving character: ``(T, H, W)``, True on the character (the foreground), False on the set (the
     background), for ``frames (T, 3, H, W)`` (sRGB). ``flows`` are from :func:`clip_flows` (measured when not
     given), ``depth (T, H, W)`` from :func:`estimate_depth` (larger is nearer; without it the character is found
-    by how it differs from the set alone, which fails for a character that walks on the spot).
+    by how it differs from the set alone, which fails for a character that walks on the spot), ``cameras`` from
+    :func:`camera` (fitted here, without masks, when not given).
 
-    1. The camera's own motion is fitted to the flow (what moves on its own is outvoted), and what moves against
-       it is the motion of the character (smoothed by the flow, so only roughly where).
+    1. The camera's own motion is fitted to the flow of each pair of frames (what moves on its own is
+       outvoted); what is left over is the motion of the character (smoothed by the flow, so only roughly where
+       it is).
     2. The candidates: with depth, the parts nearer than the background right behind them (the depth less its
-       opening, :func:`_pop_out`); without, the parts that differ from the clip's median background (built with
-       the camera's motion), with their holes filled.
-    3. A candidate is the character when enough of it moves against the camera, or when most of it lies on the
-       character of the frame before or after (carried over by the flow), so a character that stops for a
-       moment is kept. Small specks are dropped and holes filled.
-    4. The outline is laid onto the edges of the frame (a guided filter with the colour, and the depth, as the
-       guide), and every frame votes with its two neighbours, carried over by the flow (half its own, a quarter
-       each of theirs), so the outline is steady and a part missed in one frame is taken back.
+       opening, :func:`_pop_out`, so the ground in front and other layers that run out of the picture stay
+       background); without, the parts that differ from the clip's median background (lined up by the camera),
+       with their holes filled.
+    3. Each candidate is followed through the clip by the flow (a track), and a track is the character when it
+       moves against the camera in at least a quarter of its frames: a character that stops for a moment is
+       kept, a still thing whose flow was poor in one frame is not. A part that spans the picture from side to
+       side is a layer of the set.
+    4. What the depth missed is added: next to the character, what differs from the set as the other frames saw
+       it, and small pieces with the character's colours rather than those of the set round it (a faint tail
+       tip, a far leg).
+    5. The outline is laid onto the edges of the frame (a guided filter with the colour, and the depth, as the
+       guide). A part that both neighbouring frames have (carried over by the flow) and this frame missed is
+       taken back; a frame's own outline is never cut by its neighbours, so quick legs are not clipped. Small
+       specks are dropped and small holes filled.
     """
     frames = frames.float()
     t_count, _, h, w = frames.shape
@@ -999,7 +1029,7 @@ def background_plate(frames: torch.Tensor, fg_masks: torch.Tensor, cameras: torc
     colours, lights, oks = [], [], []
     for t in range(t_count):
         p = _apply(cameras[t], q)
-        if torch.allclose(cameras[t], _identity()) and origin == (0, 0) and (ph, pw) == (h, w):
+        if _still(cameras[t]) and origin == (0, 0) and (ph, pw) == (h, w):
             colour, cover = frames[t], covered[t]
             inside = torch.ones(h, w, dtype=torch.bool)
         else:
@@ -1030,7 +1060,7 @@ def place_background(plate: Plate, camera_t: torch.Tensor, h: int, w: int) -> to
     camera from :func:`camera`), ``(3, h, w)``. A still camera gives the plate's own pixels, not resampled."""
     x0, y0 = plate.origin
     ph, pw = plate.image.shape[-2:]
-    if torch.equal(camera_t.float(), _identity()) and x0 <= 0 and y0 <= 0 and w - x0 <= pw and h - y0 <= ph:
+    if _still(camera_t) and x0 <= 0 and y0 <= 0 and w - x0 <= pw and h - y0 <= ph:
         return plate.image[:, -y0 : h - y0, -x0 : w - x0].clone()
     p = _apply(_inverse(camera_t), _grid(h, w)) - torch.tensor([float(x0), float(y0)])[:, None, None]
     return _look_up(plate.image, p, "bicubic").clamp(0.0, 1.0)
