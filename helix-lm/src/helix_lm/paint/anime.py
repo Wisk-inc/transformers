@@ -159,21 +159,25 @@ def carry_names(before: list, after: list, flow: torch.Tensor, scale: float, *, 
     return carried
 
 
-def tidy_spots(lines: list, height: int, width: int, *, most: float = 0.0004, gap: float = 0.05) -> int:
+def tidy_spots(lines: list, height: int, width: int, *, most: float = 0.0004, tint: float = 0.012,
+               turn: float = 60.0) -> int:
     """Give a small light spot painted inside a bigger cel shape of another hue that shape's highlight colour
     (:func:`helix_lm.paint.cel.light_colour`): the shine on a cheek is a lighter skin, never a spot of the sky's
     blue, which is what the nearest colour of the palette can be. ``most`` is the largest spot, as a share of
-    the picture; ``gap`` how far apart (OKLab, a and b) the hues must be. Returns how many were changed."""
+    the picture. Only a spot with a colour of its own (OKLab chroma at least ``tint``) whose hue is more than
+    ``turn`` degrees from the shape round it changes: white teeth and the white shine in an eye stay white.
+    Returns how many were changed."""
     cels = [line for line in lines if line.kind in CELS and line.rings]
     if not cels:
         return 0
     sizes = [(_centre_area(line, float(width))) for line in cels]
     small = most * height * width
     under = torch.full((height, width), -1, dtype=torch.long)
-    for k, (line, (_, area)) in enumerate(zip(cels, sizes, strict=True)):
-        if area <= small:
-            continue
-        got = fill_rings(line.points * width, line.rings, height, width, ss=1)
+    # each bigger shape by its outer edge only (a spot sits in a hole cut for it), the smaller over the larger
+    big = sorted((k for k, (_, area) in enumerate(sizes) if area > small), key=lambda k: -sizes[k][1])
+    for k in big:
+        line = cels[k]
+        got = fill_rings(line.ring_points()[0] * width, None, height, width, ss=1)
         if got is None:
             continue
         y0, x0, cov = got
@@ -189,7 +193,9 @@ def tidy_spots(lines: list, height: int, width: int, *, most: float = 0.0004, ga
             continue
         mine = srgb_to_oklab(torch.tensor(line.colour))
         theirs = srgb_to_oklab(torch.tensor(cels[k].colour))
-        if float(mine[0]) > float(theirs[0]) and float((mine[1:] - theirs[1:]).norm()) > gap:
+        hues = math.degrees(abs(math.remainder(math.atan2(float(mine[2]), float(mine[1]))
+                                               - math.atan2(float(theirs[2]), float(theirs[1])), 2 * math.pi)))
+        if float(mine[0]) > float(theirs[0]) and float(mine[1:].norm()) >= tint and hues > turn:
             line.colour = tuple(float(c) for c in light_colour(torch.tensor(cels[k].colour)).clamp(0.0, 1.0))
             changed += 1
     return changed

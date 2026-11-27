@@ -116,3 +116,25 @@ def test_a_shine_on_skin_is_a_lighter_skin_not_a_spot_of_sky():
     r, g, b = dot.colour
     assert r > g > b and sum(dot.colour) > sum(skin.colour)        # a lighter skin tone, warm, not blue
     assert red.colour == (0.5, 0.1, 0.1)                           # a darker mark (a mole, a lash) is left alone
+
+
+def test_a_shine_in_a_hole_cut_for_it_takes_the_skin_round_it():
+    from helix_lm.paint.anime import tidy_spots
+
+    square = torch.tensor([[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]])
+    hole = square * 0.02 + 0.5
+    skin = Line(torch.cat([square, hole.flip(0)]), torch.ones(8), "brush", (0.93, 0.72, 0.62), marker=2, kind="cel",
+                rings=(4, 4))
+    dot = Line(hole, torch.ones(4), "brush", (0.79, 0.84, 0.87), marker=0, kind="cel", rings=(4,))
+    assert tidy_spots([skin, dot], 200, 200) == 1 and dot.colour[0] > dot.colour[2]
+
+
+def test_white_teeth_and_the_shine_in_an_eye_stay_white():
+    from helix_lm.paint.anime import tidy_spots
+
+    square = torch.tensor([[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]])
+    lips = Line(square, torch.ones(4), "brush", (0.85, 0.25, 0.2), marker=3, kind="cel", rings=(4,))
+    teeth = Line(square * 0.02 + 0.5, torch.ones(4), "brush", (0.95, 0.93, 0.91), marker=0, kind="cel", rings=(4,))
+    shine = Line(square * 0.02 + 0.3, torch.ones(4), "brush", (0.98, 0.98, 0.98), marker=0, kind="cel", rings=(4,))
+    assert tidy_spots([lips, teeth, shine], 200, 200) == 0
+    assert teeth.colour == (0.95, 0.93, 0.91) and shine.colour == (0.98, 0.98, 0.98)
