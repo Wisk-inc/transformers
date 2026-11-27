@@ -75,9 +75,14 @@ def main(argv: list[str] | None = None) -> int:
     anim.add_argument("--frames", type=int, default=None)
     anim.add_argument("--size", type=int, default=None, help="the video model's frame size (square)")
     anim.add_argument("--fps", type=float, default=None)
-    anim.add_argument("--on", type=int, default=None, help="video frames per drawing: 1 (ones) or 2 (twos)")
+    anim.add_argument("--on", type=int, default=None, help="the usual timing: 1 (ones), 2 (twos), 3 (threes)")
+    anim.add_argument("--out-fps", type=float, default=None, help="frames a second of the video written out "
+                      "(the timing is kept in seconds)")
+    anim.add_argument("--style", default="anime", help="anime (background held, cels, timing) or marker")
+    anim.add_argument("--no-depth", action="store_true", help="go without the depth model")
+    anim.add_argument("--no-check", action="store_true", help="do not draw again what is off its frame")
     anim.add_argument("--seed", type=int, default=0)
-    anim.add_argument("--lines", default="pen", help="pen, brush pen or pencil")
+    anim.add_argument("--lines", default="pen", help="pen, brush pen (bolder anime lines) or pencil")
     anim.add_argument("--no-colour", action="store_true", help="lines only, no markers")
     anim.add_argument("--sketch", action="store_true", help="a light pencil sketch under the ink")
     anim.add_argument("--surface", default="whiteboard", help="whiteboard or paper")
@@ -105,9 +110,9 @@ def main(argv: list[str] | None = None) -> int:
         result = animate(args.words, video=args.video, animator=animator, frames=args.frames, size=args.size,
                          fps=args.fps, seed=args.seed, character=args.character, motion=args.motion, lines=args.lines,
                          colour=None if args.no_colour else "marker", sketch=args.sketch, on=args.on,
-                         log=print)
-        result.surface = args.surface
-        result.save(args.out, args.width)
+                         style=args.style, depth=None if args.no_depth else "model", check=not args.no_check,
+                         surface=args.surface, log=print)
+        result.save(args.out, args.width, fps=args.out_fps)
         if args.keep:
             result.save(args.keep)
         if args.making_of:

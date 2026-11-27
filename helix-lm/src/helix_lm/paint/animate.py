@@ -410,16 +410,28 @@ class Animation:
             board.draw(line)
         return board.picture()
 
-    def play(self, width: int | None = None):
-        """Every frame of the video in turn (a drawing held for two frames comes twice)."""
-        for i in range(len(self)):
-            picture = self.frame(i, width)
-            for _ in range(self.hold(i)):
-                yield picture
+    def play(self, width: int | None = None, fps: float | None = None):
+        """Every frame of the video in turn (a drawing held for two frames comes twice). At another ``fps`` the
+        drawings are shown for as long, in seconds, as they are at the animation's own rate: nothing is drawn
+        between them, so the animation keeps its timing and its look."""
+        if fps is None or abs(float(fps) - float(self.fps)) < 1e-6:
+            for i in range(len(self)):
+                picture = self.frame(i, width)
+                for _ in range(self.hold(i)):
+                    yield picture
+            return
+        from .motion import playback
 
-    def save(self, path, width: int | None = None) -> Path:
+        shown, picture = -1, None
+        for d in playback([(i, self.hold(i)) for i in range(len(self))], self.fps, fps):
+            if d != shown:
+                shown, picture = d, self.frame(d, width)
+            yield picture
+
+    def save(self, path, width: int | None = None, fps: float | None = None) -> Path:
         """``.pinxa``: the whole animation with its memory, to open and change later. ``.mp4``, ``.webm``,
-        ``.mov``, ``.gif``: the animation. ``.png``, ``.jpg``: every frame side by side."""
+        ``.mov``, ``.gif``: the animation, at ``fps`` frames a second if given (its timing kept in seconds).
+        ``.png``, ``.jpg``: every drawing side by side."""
         path = Path(path)
         kind = path.suffix.lower()
         if kind == ".pinxa":
@@ -432,7 +444,7 @@ class Animation:
                     for r in range(0, len(tiles), columns)]
             to_pil(torch.cat(rows, -2)).save(path)
             return path
-        return write_video(self.play(width), path, self.fps)
+        return write_video(self.play(width, fps), path, fps or self.fps)
 
     def making_of(self, path, width: int = 720, fps: int = 24, first: float = 14.0, later: float = 3.0,
                   loops: int = 2, onion: float = 0.16) -> Path:

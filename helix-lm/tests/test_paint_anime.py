@@ -84,3 +84,22 @@ def test_an_anime_clip_goes_on_with_the_same_background_and_colours():
     assert len(anim) > before and anim.background is background and torch.equal(anim.palette, palette)
     assert len(anim.holds) == len(anim) and len(anim.cameras) == len(anim)
     assert anim.history[-1]["op"] == "extend" and anim.history[-1]["style"] == "anime"
+
+
+def test_an_animation_plays_at_any_frame_rate_with_its_timing_kept(tmp_path):
+    from helix_lm.paint.animate import Sheet
+
+    dot = Line(torch.tensor([[0.2, 0.2], [0.3, 0.2]]), torch.ones(2), "pen", (0.1, 0.1, 0.1))
+    sheets = [Sheet([dot.moved(dot.points + 0.1 * i)]) for i in range(3)]
+    anim = Animation(sheets, torch.tensor([[0.5, 0.5, 0.5]]), None, 12.0, holds=[2, 1, 3])
+    assert len(list(anim.play(32))) == 6                           # half a second at 12 a second
+    at24 = list(anim.play(32, fps=24))
+    assert len(at24) == 12 and torch.equal(at24[0], at24[3]) and not torch.equal(at24[3], at24[4])
+    from PIL import Image
+
+    gif = Image.open(anim.save(tmp_path / "at24.gif", width=32, fps=24))
+    shown = []
+    for k in range(gif.n_frames):                                  # repeated frames are joined into longer ones
+        gif.seek(k)
+        shown.append(gif.info.get("duration", 0))
+    assert abs(sum(shown) - 500) <= 30                             # still half a second
