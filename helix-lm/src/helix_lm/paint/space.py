@@ -969,20 +969,26 @@ def separate(frames: torch.Tensor, flows: torch.Tensor | None = None, depth: tor
     by how it differs from the set alone, which fails for a character that walks on the spot), ``cameras`` from
     :func:`camera` (fitted here, without masks, when not given).
 
-    1. The camera's own motion is fitted to the flow of each pair of frames (what moves on its own is
-       outvoted); what is left over is the motion of the character (smoothed by the flow, so only roughly where
-       it is).
-    2. The candidates: with depth, the parts nearer than the background right behind them (the depth less its
+    1. The candidates: with depth, the parts nearer than the background right behind them (the depth less its
        opening, :func:`_pop_out`, so the ground in front and other layers that run out of the picture stay
-       background); without, the parts that differ from the clip's median background (lined up by the camera),
-       with their holes filled.
+       background), and, when the clip's depths fall cleanly into a near layer and a far one, the near layer
+       (:func:`_near_layer`: a large character in front of a wall, however still); without depth, the parts that
+       differ from the clip's median background (lined up by the camera), shadows left out, holes filled.
+    2. The camera's own motion is fitted to the flow of each pair of frames, with depth only on what is surely
+       the set (far, and not next to a candidate), so a character that fills much of the picture is not taken
+       for the camera; what is left over is the motion of the character (smoothed by the flow, so only roughly
+       where it is).
     3. Each candidate is followed through the clip by the flow (a track), and a track is the character when it
-       moves against the camera in at least a quarter of its frames: a character that stops for a moment is
-       kept, a still thing whose flow was poor in one frame is not. A part that spans the picture from side to
-       side is a layer of the set.
-    4. What the depth missed is added: next to the character, what differs from the set as the other frames saw
-       it, and small pieces with the character's colours rather than those of the set round it (a faint tail
-       tip, a far leg).
+       moves against the camera in at least a quarter of its frames (a character that stops for a moment is
+       kept, a still thing whose flow was poor in one frame is not), or when it is plainly nearer than the set
+       round it and some part of it moves (:func:`_tracks`). A part that spans the picture from side to side is
+       a layer of the set.
+    4. The edge is mended (:func:`_colour_fix`): a piece at the edge coloured like the set round it and not
+       like the character goes back to the set (wall that the depth model joined to an arm), and what the depth
+       missed is added: next to the character, what differs from the set as the other frames saw it (unless it
+       is only the set in shadow: her soft shadow on the wall stays with the wall), and small pieces with the
+       character's colours (a faint tail tip, a far leg). A character that is a clean near layer is not grown
+       into what the depth puts as far as the wall.
     5. The outline is laid onto the edges of the frame (a guided filter with the colour, and the depth, as the
        guide). A part that both neighbouring frames have (carried over by the flow) and this frame missed is
        taken back; a frame's own outline is never cut by its neighbours, so quick legs are not clipped. Small
