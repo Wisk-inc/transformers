@@ -38,7 +38,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .color import linear_to_oklab, linear_to_srgb, srgb_to_linear
+from .color import linear_to_oklab, linear_to_srgb, oklab_to_linear, srgb_to_linear
 from .draw import (
     KINDS,
     TOOL_NAMES,
@@ -344,18 +344,44 @@ def _ledge(canvas: torch.Tensor, top: int, palette: torch.Tensor, holding, size:
 
 # -------------------------------------------------------------------------------------------- animation --
 class Animation:
-    """A drawn animation and its memory: every frame's lines, the markers, and the frames it was drawn from."""
+    """A drawn animation and its memory: every frame's lines, the markers, and the frames it was drawn from.
+    ``background`` is the background art, drawn once and kept under every frame (None: each frame is drawn
+    whole). ``holds`` says for how many frames of the video each drawing is shown, as on an exposure sheet
+    (None: one each); ``fps`` is frames of the video a second."""
 
     def __init__(self, sheets: list, palette: torch.Tensor, frames: torch.Tensor | None, fps: float = 8.0,
                  words: str = "", surface: str = "whiteboard", history: list | None = None,
-                 settings: dict | None = None) -> None:
+                 settings: dict | None = None, background: list | None = None, holds: list | None = None) -> None:
         self.sheets, self.palette, self.fps, self.words, self.surface = sheets, palette.float(), fps, words, surface
         self.source = None if frames is None else (frames.clamp(0, 1) * 255).round().byte()
         self.history = history or []
         self.settings = settings or {}
+        self.background = background
+        self.holds = holds
+        self._backdrops: dict = {}
 
     def __len__(self) -> int:
         return len(self.sheets)
+
+    def hold(self, index: int) -> int:
+        """For how many frames of the video drawing ``index`` is shown."""
+        return max(1, int(self.holds[index])) if self.holds else 1
+
+    def board(self, index: int, width: int | None = None, waver: float = 0.35) -> Board:
+        """A board ready for drawing ``index``: bare, or with the background art already on it. The frame's own
+        paint then covers the background but stays under the frame's own ink."""
+        h, w = self.size
+        width = width or 2 * w
+        board = Board(width, round(width * h / w), self.surface, waver=waver, seed=index)
+        if self.background:
+            key = (width, self.surface)
+            if key not in self._backdrops:
+                under = Board(width, round(width * h / w), self.surface, waver=waver, seed=10_007)
+                for line in self.background:
+                    under.draw(line)
+                self._backdrops = {key: under.canvas}            # one size at a time is enough
+            board.canvas = self._backdrops[key].clone()
+        return board
 
     @property
     def size(self) -> tuple:
@@ -371,16 +397,17 @@ class Animation:
     def frame(self, index: int, width: int | None = None, waver: float = 0.35) -> torch.Tensor:
         """Frame ``index`` drawn, sRGB ``(3, H, W)``, ``width`` pixels wide (twice the frames' size when not
         given)."""
-        h, w = self.size
-        width = width or 2 * w
-        board = Board(width, round(width * h / w), self.surface, waver=waver, seed=index)
+        board = self.board(index, width, waver)
         for line in self.sheets[index].lines:
             board.draw(line)
         return board.picture()
 
     def play(self, width: int | None = None):
+        """Every frame of the video in turn (a drawing held for two frames comes twice)."""
         for i in range(len(self)):
-            yield self.frame(i, width)
+            picture = self.frame(i, width)
+            for _ in range(self.hold(i)):
+                yield picture
 
     def save(self, path, width: int | None = None) -> Path:
         """``.pinxa``: the whole animation with its memory, to open and change later. ``.mp4``, ``.webm``,
@@ -501,23 +528,33 @@ class Animation:
         if marker is None or marker < 0:
             raise ValueError("say which marker: marker=, at=(x, y) or near=(r, g, b)")
         colour = tuple(float(c) for c in to)
+        # every line of that marker moves by the same step in OKLab: the base colour becomes `to` exactly, and
+        # its shadow, highlight and colour trace lines keep how they stood to it
+        step = linear_to_oklab(srgb_to_linear(torch.tensor(colour))) - \
+            linear_to_oklab(srgb_to_linear(self.palette[marker].clone()))
         self.palette[marker] = torch.tensor(colour)
-        for sheet in self.sheets:
-            for line in sheet.lines:
-                if line.marker == marker:
-                    line.colour = colour
+        for line in self._all_lines():
+            if line.marker == marker:
+                was = linear_to_oklab(srgb_to_linear(torch.tensor(line.colour)))
+                line.colour = tuple(float(c) for c in linear_to_srgb(oklab_to_linear(was + step)).clamp(0.0, 1.0))
+        self._backdrops = {}
         self.history.append({"op": "recolor", "marker": marker, "to": list(colour)})
         return self
+
+    def _all_lines(self):
+        yield from self.background or ()
+        for sheet in self.sheets:
+            yield from sheet.lines
 
     def retool(self, lines: str = "brush pen") -> Animation:
         """Draw every line of every frame with another pen (``pen``, ``brush pen``, ``pencil``)."""
         if lines not in TOOLS or TOOLS[lines].multiply:
             raise ValueError(f"lines are drawn with a pen or a pencil: one of pen, brush pen, pencil, not {lines!r}")
-        for sheet in self.sheets:
-            for line in sheet.lines:
-                if line.kind in ("line", "sketch") and line.tool != "pencil":
-                    line.tool = lines
-                    line.colour = TOOLS[lines].ink
+        for line in self._all_lines():
+            if line.kind in ("line", "sketch") and line.tool != "pencil" and line.marker < 0:
+                line.tool = lines
+                line.colour = TOOLS[lines].ink
+        self._backdrops = {}
         self.history.append({"op": "retool", "lines": lines})
         return self
 
@@ -550,12 +587,9 @@ class Animation:
                 "words": self.words}
 
     # -------------------------------------------------------------------------------------------- files --
-    def _save_state(self, path: Path) -> Path:
-        frames = []
-        for sheet in self.sheets:
-            lines = sheet.lines
-            frames.append({
-                "points": torch.cat([line.points for line in lines]) if lines else torch.zeros(0, 2),
+    @staticmethod
+    def _pack(lines: list) -> dict:
+        return {"points": torch.cat([line.points for line in lines]) if lines else torch.zeros(0, 2),
                 "pressure": torch.cat([line.pressure for line in lines]) if lines else torch.zeros(0),
                 "sizes": torch.tensor([len(line) for line in lines], dtype=torch.long),
                 "tools": torch.tensor([TOOL_NAMES.index(line.tool) for line in lines], dtype=torch.long),
@@ -565,10 +599,29 @@ class Animation:
                 "colours": torch.tensor([line.colour for line in lines], dtype=torch.float32).reshape(-1, 3),
                 "uids": torch.tensor([line.uid for line in lines], dtype=torch.long),
                 "ring_counts": torch.tensor([len(line.rings or ()) for line in lines], dtype=torch.long),
-                "rings": torch.tensor([n for line in lines for n in (line.rings or ())], dtype=torch.long),
-                "kept": sheet.kept, "new": sheet.new, "fresh": sheet.fresh})
+                "rings": torch.tensor([n for line in lines for n in (line.rings or ())], dtype=torch.long)}
+
+    @staticmethod
+    def _unpack(f: dict) -> list:
+        lines, at, ring_at = [], 0, 0
+        counts = f["ring_counts"].tolist() if "ring_counts" in f else [0] * len(f["sizes"])
+        for i, n in enumerate(f["sizes"].tolist()):
+            rings = f["rings"][ring_at : ring_at + counts[i]].tolist() if counts[i] else None
+            ring_at += counts[i]
+            lines.append(Line(f["points"][at : at + n], f["pressure"][at : at + n], TOOL_NAMES[int(f["tools"][i])],
+                              f["colours"][i].tolist(), int(f["markers"][i]), KINDS[int(f["kinds"][i])],
+                              int(f["ages"][i]), int(f["uids"][i]) if "uids" in f else None, rings))
+            at += n
+        return lines
+
+    def _save_state(self, path: Path) -> Path:
+        frames = [self._pack(sheet.lines) | {"kept": sheet.kept, "new": sheet.new, "fresh": sheet.fresh}
+                  for sheet in self.sheets]
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"version": VERSION, "sheets": frames, "palette": self.palette, "source": self.source,
+        extra = {"background": self._pack(self.background)} if self.background else {}
+        if self.holds:
+            extra["holds"] = torch.tensor(self.holds, dtype=torch.long)
+        torch.save(extra | {"version": VERSION, "sheets": frames, "palette": self.palette, "source": self.source,
                     "fps": self.fps, "words": self.words, "surface": self.surface, "history": json.dumps(self.history),
                     "settings": json.dumps({k: v for k, v in self.settings.items() if k != "size"} | {"size": list(
                         self.size)})}, path)
@@ -577,20 +630,11 @@ class Animation:
     @classmethod
     def load(cls, path) -> Animation:
         data = torch.load(Path(path), map_location="cpu", weights_only=True)
-        sheets = []
-        for f in data["sheets"]:
-            lines, at, ring_at = [], 0, 0
-            counts = f["ring_counts"].tolist() if "ring_counts" in f else [0] * len(f["sizes"])
-            for i, n in enumerate(f["sizes"].tolist()):
-                rings = f["rings"][ring_at : ring_at + counts[i]].tolist() if counts[i] else None
-                ring_at += counts[i]
-                lines.append(Line(f["points"][at : at + n], f["pressure"][at : at + n], TOOL_NAMES[int(f["tools"][i])],
-                                  f["colours"][i].tolist(), int(f["markers"][i]), KINDS[int(f["kinds"][i])],
-                                  int(f["ages"][i]), int(f["uids"][i]) if "uids" in f else None, rings))
-                at += n
-            sheets.append(Sheet(lines, int(f["kept"]), int(f["new"]), bool(f["fresh"])))
+        sheets = [Sheet(cls._unpack(f), int(f["kept"]), int(f["new"]), bool(f["fresh"])) for f in data["sheets"]]
+        background = cls._unpack(data["background"]) if "background" in data else None
+        holds = data["holds"].tolist() if "holds" in data else None
         anim = cls(sheets, data["palette"], None, float(data["fps"]), data["words"], data["surface"],
-                   json.loads(data["history"]), json.loads(data["settings"]))
+                   json.loads(data["history"]), json.loads(data["settings"]), background, holds)
         anim.source = data["source"]
         return anim
 

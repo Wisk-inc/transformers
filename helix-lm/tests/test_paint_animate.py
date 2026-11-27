@@ -5,7 +5,7 @@ was run by hand (docs/PINXIT.md)."""
 
 import torch
 
-from helix_lm.paint.animate import Animation, animate, draw_frames, read_video, trace_over, write_video
+from helix_lm.paint.animate import Animation, Sheet, animate, draw_frames, read_video, trace_over, write_video
 from helix_lm.paint.draw import (
     TOOLS,
     Board,
@@ -264,3 +264,22 @@ def test_the_animation_cell_is_plain_python_for_this_version_and_needs_no_token(
     assert f'HELIX = "{helix_lm.__version__}"' in text and "helix-lm[paint]==" in text
     assert "HF_TOKEN" not in text and "hf_" + "A" not in text
     assert "animate(WORDS" in text and "making_of(" in text and ".extend(NEXT" in text
+
+
+def test_the_background_is_drawn_once_and_each_drawing_held_for_its_frames(tmp_path):
+    square = torch.tensor([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+    sky = Line(square, torch.ones(4), "brush", (0.2, 0.3, 0.9), marker=0, kind="cel", rings=(4,))
+    cloud = Line(square * 0.3 + 0.1, torch.ones(4), "brush", (0.1, 0.15, 0.6), marker=0, kind="cel-shadow", rings=(4,))
+    ink = Line(torch.tensor([[0.2, 0.8], [0.8, 0.8]]), torch.ones(2) * 0.6, "pen", TOOLS["pen"].ink)
+    sheets = [Sheet([ink.moved(ink.points + 0.02 * t)]) for t in range(3)]
+    anim = Animation(sheets, torch.tensor([[0.2, 0.3, 0.9]]), None, 24.0, background=[sky, cloud], holds=[2, 1, 3])
+    shown = list(anim.play(64))
+    assert len(shown) == 6 and torch.equal(shown[0], shown[1]) and torch.equal(shown[3], shown[5])
+    assert float(shown[0][2, 10, 50]) > 0.8 > float(shown[0][0, 10, 50])         # the sky under every frame
+    back = Animation.load(anim.save(tmp_path / "held.pinxa"))
+    assert back.holds == [2, 1, 3] and len(back.background) == 2 and back.background[1].rings == (4,)
+    assert back.sheets[2].lines[0].uid == anim.sheets[2].lines[0].uid
+    back.recolor((0.9, 0.2, 0.2), marker=0)
+    assert torch.allclose(torch.tensor(back.background[0].colour), torch.tensor([0.9, 0.2, 0.2]), atol=1e-4)
+    shade = back.background[1].colour
+    assert shade[0] > shade[2] and sum(shade) < sum(back.background[0].colour)   # the shadow went red, still darker
